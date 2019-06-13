@@ -1,5 +1,7 @@
 # Local Step Functions
-This repository contains some resources and experiments playing around with AWS Step Functions and related technologies to see the art of the possible in terms of running Step Functions locally, alternative execution models, GUIs and possibilities for calling out to alternate serveless frameworks such as Fn or OpenFaaS or whatever.
+This repository is about art of the possible in terms of running AWS Step Functions/Amazon States Language locally.
+
+The repository contains a range of resources and experiments such as alternative ASL execution environments, GUIs and possibilities for calling out to alternate serveless frameworks such as Fn or OpenFaaS or whatever.
 
 ### AWS Step Function Links
 * https://states-language.net/spec.html
@@ -22,7 +24,7 @@ This repository contains some resources and experiments playing around with AWS 
 * https://github.com/sakazuki/step-functions-draw.io
 * https://github.com/jgraph/drawio
 
-### Local Step Function Links
+### Potentially Interesting Projects
 * https://docs.aws.amazon.com/step-functions/latest/dg/sfn-local.html
 * https://hub.docker.com/r/amazon/aws-stepfunctions-local
 * https://dzone.com/articles/run-aws-lambda-functions-locally-on-windows-machin
