@@ -1,5 +1,5 @@
 # draw.io with Step Functions
-[draw.io](https://github.com/jgraph/drawio) has a [Dockerfile](https://github.com/jgraph/drawio/blob/master/etc/docker/Dockerfile) in the `/etc/docker` directory however that builds from source, which seems overkill for our needs, especially when there are packaged releases of the war file at https://github.com/jgraph/drawio/releases.
+The [draw.io](https://github.com/jgraph/drawio) project already has a [Dockerfile](https://github.com/jgraph/drawio/blob/master/etc/docker/Dockerfile), however that builds from source which seems overkill for our needs, especially when there are packaged releases of the war file at https://github.com/jgraph/drawio/releases.
 
 This alternative Dockerfile takes a slightly simpler approach, simply ADDing the draw.war as ROOT.war into a tomcat container.
 
