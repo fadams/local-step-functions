@@ -19,6 +19,7 @@ The repository contains a range of resources and experiments such as alternative
 * https://serverless.com/blog/aws-lambda-power-tuning/
 * https://serverless.zone/faas-is-stateless-and-aws-step-functions-provides-state-as-a-service-2499d4a6e412
 * https://tech.trivago.com/2019/04/09/circuit-breaker-with-aws-step-functions/
+* https://www.stackery.io/blog/serverless-state-machines/
 
 ### Graphical Tools
 * https://github.com/sakazuki/step-functions-draw.io
