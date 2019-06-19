@@ -28,6 +28,7 @@ reasonably abstracted from the underlying messaging fabric, so that it should
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
+# Tested using Pika 1.0.1, may not work correctly with earlier versions.
 import pika # sudo pip3 install pika
 
 from asl_workflow_engine.logger import init_logging
@@ -92,15 +93,49 @@ class Connection(object):
         self.session = Session(self, name, transactional)
         return self.session
 
+    def set_timeout(self, callback, delay):
+        """
+        Executes the specified callback function after the specified ms delay.
+        Intended to have the same semantics as the JavaScript setTimeout().
+        NOTE: the timer callbacks are dispatched only in the scope of 
+        BlockingConnection.process_data_events() and
+        BlockingChannel.start_consuming() e.g. after the start() method below
+        has been called.
+        """
+        return self.connection.call_later(delay/1000, callback)
+
+    def clear_timeout(self, timeout_id):
+        """
+        Remove a timer if it’s still in the timeout stack.
+        Intended to have the same semantics as the JavaScript clearTimeout().
+        """
+        self.connection.remove_timeout(timeout_id)
+
     def start(self):
         """
         Starts (or restarts) a connection's delivery of incoming messages.
         A call to start on a connection that has already been started is ignored.
 
-        TODO when multiple sessions are supported start them all
+        TODO when multiple sessions are supported start them all.
+        There is actually a lot going on in start_consuming as Pika is basically
+        single threaded and largely not thread safe the main docs are here
+        https://pika.readthedocs.io/en/stable/modules/adapters/blocking.html
+
+        One issue is how to communicate with the Pika dispatch loop from a
+        different thread. I *think* that the way to do it is via the
+        connection.add_callback_threadsafe(callback) method which requests a
+        call to the given function as soon as possible in the context of this
+        connection’s thread.
+
+        It's also not clear how to consume on multiple channels as the
+        start_consuming call is a method on channel, but it blocks, so how to
+        consume on other channels in that case??
         """
         if hasattr(self, "session"):
-            self.session.channel.start_consuming()
+            try:
+                self.session.channel.start_consuming()
+            except pika.exceptions.ConnectionClosedByBroker as e:
+                raise ConnectionError(e)
 
 #-------------------------------------------------------------------------------
 
@@ -170,7 +205,7 @@ class Session(object):
         Closes the session.
         """
         if self.is_open():
-            self.logger.info("Closing Session") # TODO log name
+            self.logger.info("Closing Session") # TODO log session name
             self.channel.close()
 
     def sender(self, target, **options):
@@ -209,7 +244,9 @@ class Destination(object):
                           "routing_key": None, "arguments": None}]
 
     def parse_address(self, address):
-        print("parse_address " + address)
+        """
+        """
+        #print("parse_address " + address)
         # TODO do this properly
         self.queue["name"] = address
 
@@ -225,7 +262,7 @@ class Sender(Destination):
         """
         super().__init__() # Call Destination constructor
 
-        session.connection.logger.info("Creating Sender")
+        session.connection.logger.info("Creating Sender with address {}".format(target))
         self.session = session
 
         self.parse_address(target)
@@ -285,7 +322,7 @@ class Receiver(Destination):
         """
         super().__init__() # Call Destination constructor
 
-        session.connection.logger.info("Creating Receiver")
+        session.connection.logger.info("Creating Receiver with address {}".format(source))
         self.session = session
 
         # Set default capacity/message prefetch to 500

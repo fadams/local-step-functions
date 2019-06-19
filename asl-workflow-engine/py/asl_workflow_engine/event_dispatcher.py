@@ -23,12 +23,12 @@
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-from asl_workflow_engine.state_engine import StateEngine
+import json
 from asl_workflow_engine.exceptions import *
 
 class EventDispatcher(object):
 
-    def __init__(self, logger, config):
+    def __init__(self, logger, state_engine, config):
         """
         :param logger: The Workflow Engine logger
         :type logger: logger
@@ -37,7 +37,26 @@ class EventDispatcher(object):
         """
         self.logger = logger
         self.logger.info("Creating EventDispatcher")
-        self.config = config
+        self.config = config["event_queue"] # TODO Handle missing config
+
+        """
+        Create an association with the state engine and give that a reference
+        back to this event dispatcher so that it can publish events and make
+        use of the set_timeout time scheduler.
+        """
+        self.state_engine = state_engine
+        self.state_engine.event_dispatcher = self
+
+        """
+        Incoming messages should only be acknowledged when they have been
+        fully processed by the StateEngine to allow the messaging fabric to
+        redeliver the message upon a failure. Because processing might take
+        some time due to waiting for Task responses and Wait and Parallel
+        states we must retain any unacknowledged messages. The message count
+        is a simple one-up number used as a key.
+        """
+        self.unacknowledged_messages = {}
+        self.message_count = 0
 
         # TODO validate that config contains the keys we need.
 
@@ -51,53 +70,74 @@ class EventDispatcher(object):
         # implementations in order to allow maximum flexibility.
         # TODO better error handling and logging.
         if self.config["queue_type"] == "AMQP-0.9.1":
-            from asl_workflow_engine.amqp_0_9_1_messaging import Connection
+            from asl_workflow_engine.amqp_0_9_1_messaging import Connection, Message
         elif self.config["queue_type"] == "AMQP-0.10": # TODO
-            from asl_workflow_engine.amqp_0_10_messaging import Connection
+            from asl_workflow_engine.amqp_0_10_messaging import Connection, Message
         elif self.config["queue_type"] == "AMQP-1": # TODO
-            from asl_workflow_engine.amqp_1_messaging import Connection
+            from asl_workflow_engine.amqp_1_messaging import Connection, Message
         elif self.config["queue_type"] == "NATS": # TODO
-            from asl_workflow_engine.nats_messaging import Connection
+            from asl_workflow_engine.nats_messaging import Connection, Message
         elif self.config["queue_type"] == "SQS": # TODO AWS SQS
-            from asl_workflow_engine.sqs_messaging import Connection
-
-        self.state_engine = StateEngine()
+            from asl_workflow_engine.sqs_messaging import Connection, Message
 
         # Connect to event queue and start main event loop.
+        # TODO This code will connect on broker startup, but need to add code to
+        # reconnect for cases when the broker fails and then restarts.
         connection = Connection(self.config["connection_url"])
         try:
             connection.open()
+            self.set_timeout = connection.set_timeout
             session = connection.session()
             self.receiver = session.receiver(self.config["queue_name"])
             self.receiver.capacity = 100; # Enable receiver prefetch
             #print(self.receiver.capacity)
             self.receiver.set_message_listener(self.dispatch)
-
             self.sender = session.sender(self.config["queue_name"])
-
-            connection.start();
-            #connection.close();
+            connection.start(); # Blocks until event loop exits.
         except ConnectionError as e:
             self.logger.error(e)
         except SessionError as e:
             self.logger.error(e)
 
+        connection.close();
+
     def dispatch(self, message):
-        #print("EventDispatcher message_listener called")
-        #print(message.body)
-        #print(vars(message))
-        self.state_engine.notify(message.body)
         """
-        TODO putting message acknowledge here is just a placeholder. When the
-        StateEngine actually starts doing useful things ASL Tasks might take
-        an arbitrary time to execute and they might fail! We should really only
-        acknowledge on success so the message might be redelivered to try
-        again. Similarly for the Parallel State we should only acknowledge when
-        all responses have returned. This stuff is quite a bit of extra work
+        Dispatch the body of the message received from event queue hosted on the
+        underlying messaging fabric. This method is mainly here to abstract some
+        of the implementation details from the state engine, which should be
+        somewhat agnostic of the event queue implementation.
+
+        The message body *should* be a JSON string, but we trap any exception
+        that may be thrown during conversion and simply dump the message and
+        log the failure
         """
+        try:
+            item = json.loads(message.body)
+            self.unacknowledged_messages[self.message_count] = message
+            self.state_engine.notify(item, self.message_count)
+            self.message_count += 1
+        except ValueError as e:
+            self.logger.info("Message {} does not contain valid JSON".format(message.body))
+            message.acknowledge()
+
+    def acknowledge(self, id):
+        """
+        Look up the message with the given id in the unacknowledged_messages
+        dictionary and acknowledge it, then remove the message from the
+        dictionary. See the comment for unacknowledged_messages in constructor.
+        """
+        message = self.unacknowledged_messages[id]
         message.acknowledge()
+        del self.unacknowledged_messages[id]
 
-
-#if __name__ == "__main__":
-#    event_dispatcher = EventDispatcher()
+    def publish(self, item):
+        from asl_workflow_engine.amqp_0_9_1_messaging import Message
+        """
+        Publish supplied item to the event queue hosted on the underlying
+        messaging fabric. This method is mainly here to abstract some of the
+        implementation details from the state engine.
+        """
+        message = Message(json.dumps(item))
+        self.sender.send(message)
 

@@ -35,6 +35,7 @@ assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
 import json
 from asl_workflow_engine.logger import init_logging
+from asl_workflow_engine.state_engine import StateEngine
 from asl_workflow_engine.event_dispatcher import EventDispatcher
 
 class WorkflowEngine(object):
@@ -48,7 +49,7 @@ class WorkflowEngine(object):
         :raises AssertionError: If configuration file does not contain the required fields
         """
         # Initialise logger
-        self.logger = init_logging(log_name='asl_workflow_engine')
+        logger = init_logging(log_name='asl_workflow_engine')
 
         # Load the configuration file. TODO it probably makes sense to also add
         # a mechanism to override config values with values obtained from the
@@ -56,16 +57,17 @@ class WorkflowEngine(object):
         # useful if we wand to deploy this application to Kubernetes.
         try:
             with open(configuration_file, 'r') as fp:
-                self.config = json.load(fp)
-            self.logger.info("Creating WorkflowEngine")
+                config = json.load(fp)
+            logger.info("Creating WorkflowEngine")
         except IOError as e:
-            self.logger.error("Unable to read configuration file: {}".format(configuration_file))
+            logger.error("Unable to read configuration file: {}".format(configuration_file))
             raise
         except ValueError as e:
-            self.logger.error("Configuration file does not contain valid JSON")
+            logger.error("Configuration file does not contain valid JSON")
             raise
 
-        self.event_dispatcher = EventDispatcher(self.logger, self.config["event_queue"])
+        state_engine = StateEngine(logger, config)
+        event_dispatcher = EventDispatcher(logger, state_engine, config)
 
 if __name__ == "__main__":
     workflow_engine = WorkflowEngine('config.json')

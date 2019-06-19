@@ -4,5 +4,8 @@
         "queue_type": "AMQP-0.9.1",
         "connection_url": "amqp://localhost:5672?connection_attempts=20&retry_delay=10&heartbeat=0",
         "connection_options": ""
+    },
+    "state_engine": {
+        "asl_cache": "ASL.json"
     }
 }
