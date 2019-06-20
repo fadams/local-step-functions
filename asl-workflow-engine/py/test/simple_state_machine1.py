@@ -55,7 +55,12 @@ if __name__ == '__main__':
         session = connection.session()
         sender = session.sender("asl_workflow_events")
         for item in items:
-            sender.send(Message(item))
+            """
+            Setting content_type isn't necessary for correct operation,
+            however it is the correct thing to do:
+            https://www.ietf.org/rfc/rfc4627.txt.
+            """
+            sender.send(Message(item, content_type="application/json"))
         connection.close();
     except ConnectionError as e:
         self.logger.error(e)

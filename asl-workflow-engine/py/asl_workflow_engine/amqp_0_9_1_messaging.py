@@ -17,7 +17,7 @@
 # under the License.
 #
 """
-Provides a JMS-like Connection/Session/Sender/Receiver abstraction for
+Provides a JMS-like Connection/Session/Sender/Receiver/Message abstraction for
 AMQP 0.9.1 connections (to RabbitMQ, though may work with other brokers).
 
 By using JMS-like semantics the intention is to have an API that is already

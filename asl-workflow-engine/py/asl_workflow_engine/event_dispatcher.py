@@ -38,6 +38,7 @@ class EventDispatcher(object):
         self.logger = logger
         self.logger.info("Creating EventDispatcher")
         self.config = config["event_queue"] # TODO Handle missing config
+        # TODO validate that config contains the keys we need.
 
         """
         Create an association with the state engine and give that a reference
@@ -51,14 +52,12 @@ class EventDispatcher(object):
         Incoming messages should only be acknowledged when they have been
         fully processed by the StateEngine to allow the messaging fabric to
         redeliver the message upon a failure. Because processing might take
-        some time due to waiting for Task responses and Wait and Parallel
+        some time due to waiting for Task responses and the Wait and Parallel
         states we must retain any unacknowledged messages. The message count
         is a simple one-up number used as a key.
         """
         self.unacknowledged_messages = {}
         self.message_count = 0
-
-        # TODO validate that config contains the keys we need.
 
 #        print(self.config["queue_name"])
 #        print(self.config["queue_type"])
@@ -80,19 +79,28 @@ class EventDispatcher(object):
         elif self.config["queue_type"] == "SQS": # TODO AWS SQS
             from asl_workflow_engine.sqs_messaging import Connection, Message
 
-        # Connect to event queue and start main event loop.
+        # Connect to event queue and start the main event loop.
         # TODO This code will connect on broker startup, but need to add code to
-        # reconnect for cases when the broker fails and then restarts.
+        # reconnect for cases where the broker fails and then restarts.
         connection = Connection(self.config["connection_url"])
         try:
             connection.open()
-            self.set_timeout = connection.set_timeout
             session = connection.session()
             self.receiver = session.receiver(self.config["queue_name"])
             self.receiver.capacity = 100; # Enable receiver prefetch
-            #print(self.receiver.capacity)
             self.receiver.set_message_listener(self.dispatch)
             self.sender = session.sender(self.config["queue_name"])
+
+            """
+            TODO Passing connection.set_timeout here is kind of ugly but I can't
+            think of a nicer way yet. The issue is that we want the state engine
+            to be able to support timeouts, however that is being called from
+            Pika's event loop, which isn't thread-safe and we want asynchronous
+            timeouts not blocking timeouts as when in an ASL Wait state we still
+            want to be able to process other events that might be available on
+            the event queue. This (hopefully temporary) approach is Pika specific.
+            """
+            self.set_timeout = connection.set_timeout
             connection.start(); # Blocks until event loop exits.
         except ConnectionError as e:
             self.logger.error(e)
@@ -110,10 +118,15 @@ class EventDispatcher(object):
 
         The message body *should* be a JSON string, but we trap any exception
         that may be thrown during conversion and simply dump the message and
-        log the failure
+        log the failure. Note that some messaging systems (such as Pika)
+        incorrectly, IMHO, encode strings as *opaque binary* on the messaging
+        fabric rather than string. This can lead to errors when doing things
+        like JSON decoding as json.loads(message.body) works fine in Python 3.6
+        but does not in earlier versions. This is kind of irksome given that
+        Python has a string type and supports introspection, but there you go.
         """
         try:
-            item = json.loads(message.body)
+            item = json.loads(message.body.decode("utf8"))
             self.unacknowledged_messages[self.message_count] = message
             self.state_engine.notify(item, self.message_count)
             self.message_count += 1
@@ -137,7 +150,11 @@ class EventDispatcher(object):
         Publish supplied item to the event queue hosted on the underlying
         messaging fabric. This method is mainly here to abstract some of the
         implementation details from the state engine.
+
+        Setting content_type to application/json isn't necessary for correct
+        operation, however it is the correct thing to do:
+        https://www.ietf.org/rfc/rfc4627.txt.
         """
-        message = Message(json.dumps(item))
+        message = Message(json.dumps(item), content_type="application/json")
         self.sender.send(message)
 
