@@ -40,12 +40,64 @@ aws stepfunctions --endpoint http://localhost:4584 start-execution --state-machi
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
+import datetime
 from asl_workflow_engine.amqp_0_9_1_messaging import Connection, Message
 from asl_workflow_engine.exceptions import *
 
 ASL = '{"Comment": "Test Step Function","StartAt": "StartState","States": {"StartState": {"Type": "Pass","Next": "ChoiceState"},"ChoiceState": {"Type": "Choice","Choices": [{"Variable": "$.lambda","StringEquals": "InternalErrorNotHandled","Next": "InternalErrorNotHandledLambda"},{"Variable": "$.lambda","StringEquals": "InternalErrorHandled","Next": "InternalErrorHandledLambda"},{"Variable": "$.lambda","StringEquals": "Success","Next": "SuccessLambda"},{"Variable": "$.lambda","StringEquals": "Timeout","Next": "TimeoutLambda"}],"Default": "FailState"},"FailState": {"Type": "Fail","Error": "NoLambdaError","Cause": "No Matches!"},"SuccessLambda": {"Type": "Task","Resource": "$SUCCESS_LAMBDA_ARN","Next": "EndState"},"InternalErrorNotHandledLambda": {"Type": "Task","Resource": "$INTERNAL_ERROR_NOT_HANDLED_LAMBDA_ARN","Next": "EndState"},"InternalErrorHandledLambda": {"Type": "Task","Resource": "$INTERNAL_ERROR_HANDLED_LAMBDA_ARN","Next": "EndState"},"TimeoutLambda": {"Type": "Task","Resource": "$TIMEOUT_LAMBDA_ARN","Next": "EndState"},"EndState": {"Type": "Pass","End": true}}}'
 
+
+"""
+See https://stackoverflow.com/questions/2150739/iso-time-iso-8601-in-python
+For info on creating ISO 8601 time format
+
+The application context is described in the AWS documentation:
+https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html 
+
+{
+    "Execution": {
+        "Id": <String>,
+        "Input": <Object>,
+        "StartTime": <String Format: ISO 8601>
+    },
+    "State": {
+        "EnteredTime": <String Format: ISO 8601>,
+        "Name": <String>,
+        "RetryCount": <Number>
+    },
+    "StateMachine": {
+        "Id": <String>,
+        "value": <Object representing ASL state machine>
+    },
+    "Task": {
+        "Token": <String>
+    }
+}
+
+The most important paths for state traversal are:
+$$.State.Name = the current state
+$$.StateMachine.value = (optional) contains the complete ASL state machine
+$$.StateMachine.Id = a unique reference to an ASL state machine
+"""
+context = '{"State": {"EnteredTime": "' + datetime.datetime.now().isoformat() + '", "Name": ""}, "StateMachine": {"Id": "arn:aws:states:local:1234:stateMachine:simple_state_machine1", "value": ' + ASL + '}}'
+
+#print("----------------------")
+#print(context)
+#print("----------------------")
+
+"""
 items = ['{"CurrentState": "", "Data": {"lambda":"Success"}, "ASL":' + ASL + ',"ASLRef": "arn:aws:states:local:1234:stateMachine:simple_state_machine1"}', '{"CurrentState": "", "Data": {"lambda":"InternalErrorNotHandled"}, "ASL":' + ASL + ',"ASLRef": "arn:aws:states:local:1234:stateMachine:simple_state_machine1"}', '{"CurrentState": "", "Data": {"lambda":"InternalErrorHandled"}, "ASL":' + ASL + ',"ASLRef": "arn:aws:states:local:1234:stateMachine:simple_state_machine1"}', '{"CurrentState": "", "Data": {"lambda":"Timeout"}, "ASL":' + ASL + ',"ASLRef": "arn:aws:states:local:1234:stateMachine:simple_state_machine1"}']
+"""
+
+items = ['{"$": {"lambda":"Success"}, "$$": ' + context + '}',
+         '{"$": {"lambda":"InternalErrorNotHandled"}, "$$": ' + context + '}',
+         '{"$": {"lambda":"InternalErrorHandled"}, "$$": ' + context + '}',
+         '{"$": {"lambda":"Timeout"}, "$$": ' + context + '}']
+
+#items = ['{"$": {"lambda":"Success"}, "$$": ' + context + '}']
+#items = ['{"$": {"lambda":"InternalErrorNotHandled"}, "$$": ' + context + '}']
+#items = ['{"$": {"lambda":"InternalErrorHandled"}, "$$": ' + context + '}']
+#items = ['{"$": {"lambda":"Timeout"}, "$$": ' + context + '}']
 
 if __name__ == '__main__':
     # Connect to event queue and send items.

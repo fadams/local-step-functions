@@ -126,6 +126,10 @@ class EventDispatcher(object):
         Python has a string type and supports introspection, but there you go.
         """
         try:
+            # TODO if state_engine.notify bombs out with an exception it is
+            # likely to be due to invalid data or ASL not being handled
+            # correctly. Should probably catch Exception, log error then
+            # acknowledge the message to prevent it being redelivered.
             item = json.loads(message.body.decode("utf8"))
             self.unacknowledged_messages[self.message_count] = message
             self.state_engine.notify(item, self.message_count)
@@ -145,6 +149,8 @@ class EventDispatcher(object):
         del self.unacknowledged_messages[id]
 
     def publish(self, item):
+        # TODO this import should be handled by the "Connection Factory for the
+        # event queue" code in the constructor.
         from asl_workflow_engine.amqp_0_9_1_messaging import Message
         """
         Publish supplied item to the event queue hosted on the underlying

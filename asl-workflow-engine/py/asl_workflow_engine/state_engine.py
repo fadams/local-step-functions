@@ -22,6 +22,11 @@ assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
 import json
 
+# https://github.com/kennknowles/python-jsonpath-rw
+# https://stackoverflow.com/questions/48629461/python-jsonpath-how-do-i-parse-with-jsonpath-correctly
+# Tested using jsonpath_rw jsonpath_rw
+from jsonpath_rw import parse # sudo pip3 install jsonpath_rw
+
 class StateEngine(object):
 
     def __init__(self, logger, config):
@@ -49,36 +54,70 @@ class StateEngine(object):
             self.logger.error("StateEngine ASL Cache does not contain valid JSON")
             raise
 
-    def notify(self, item, id):
+    def notify(self, event, id):
         """
-        :item item: Describes the Data, CurrentState and ASL State Machine
-        :type item: dict as described below.
+        :item event: Describes the data, current state and the ASL State Machine
+        :type event: dict as described below.
+        :item id: The ID of the event as given by the EventDispatcher, it is
+         primarily used for acknowledging the event.
+        :type id: A string representing the event ID, it may just be a number.
 
         {
-	        "CurrentState": <String representing current state ID>,
-	        "Data": <Object representing application data>,
-	        "ASL": <Object representing ASL state machine>,
-	        "ASLRef": <String representing unique ref to ASL>
+	        "$": <Object representing application data>,
+	        "$$": <Object representing application context>,
         }
+
+        The application context is described in the AWS documentation:
+        https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html 
+
+        {
+	        "Execution": {
+		        "Id": <String>,
+		        "Input": <Object>,
+		        "StartTime": <String Format: ISO 8601>
+	        },
+	        "State": {
+		        "EnteredTime": <String Format: ISO 8601>,
+		        "Name": <String>,
+		        "RetryCount": <Number>
+	        },
+	        "StateMachine": {
+		        "Id": <String>,
+		        "value": <Object representing ASL state machine>
+	        },
+	        "Task": {
+		        "Token": <String>
+	        }
+        }
+
+        The most important paths for state traversal are:
+        $$.State.Name = the current state
+        $$.StateMachine.value = (optional) contains the complete ASL state machine
+        $$.StateMachine.Id = a unique reference to an ASL state machine
         """
 
-        # Get ASL from item/cache/storage
+        #print(event)
+
+        context = event["$$"]
+        state_machine = context["StateMachine"]
+
+        # Get ASL from event/cache/storage
         """
         TODO abstract this into a separate class for handling caching/databasing
         of the ASL. The code below is overly simplistic and will likely go
         awry if multiple instances of the ASL Workflow Engine get started, as
         there is no file locking or any other concurrency protection.
         """
-        ASLRef = item["ASLRef"]
-        print(ASLRef)
+        state_machine_id = state_machine["Id"]
+        print(state_machine_id)
 
-        if ASLRef in self.asl_cache:
+        if state_machine_id in self.asl_cache:
             print("Using cached ASL")
-            ASL = self.asl_cache[ASLRef]
-            item["ASL"] = ASL
+            ASL = self.asl_cache[state_machine_id]
+            state_machine["value"] = ASL
         else:
-            ASL = item["ASL"]
-            self.asl_cache[ASLRef] = ASL
+            ASL = state_machine["value"]
+            self.asl_cache[state_machine_id] = ASL
             try:
                 with open(self.asl_cache_file, 'w') as fp:
                     json.dump(self.asl_cache, fp)
@@ -92,21 +131,20 @@ class StateEngine(object):
         as subsequent events only need to contain the ASL id, which should help
         keep the message size relatively modest.
         """
-        del item["ASL"]
+        del state_machine["value"]
 
-
-
-        # Determine the current state.
-        current_state = item["CurrentState"]
+        # Determine the current state from $$.State.Name.
+        # TODO also set to ASL["StartAt"] if $$.State.Name is None or unset.
+        current_state = context["State"]["Name"]
         current_state = ASL["StartAt"] if current_state == "" else current_state
         
         print("current_state = " + current_state)
 
         state = ASL["States"][current_state]
-        data = item["Data"]
+        data = event["$"]
 
-        print(state)
-        print(data)
+        print("state = " + str(state))
+        print("data = " + str(data))
         print(id)
 
         #-----------------------------------------------------------------------
@@ -127,20 +165,25 @@ class StateEngine(object):
             is treated as the output of a virtual task, and placed as prescribed
             by the “ResultPath” field, if any, to be passed on to the next state.
             If “Result” is not provided, the output is the input. Thus if neither
-            “Result” nor “ResultPath” are provided, the Pass state copies its
-            input through to its output.
+            neither “Result” nor “ResultPath” are provided, the Pass state
+            copies its input through to its output.
             """
             print("PASS")
-            print(item)
+            #print(event)
+            # TODO process Result/ResultPath field
 
             """
-            When processing has completed set the item's new CurrentState to the
-            next state in the state machine then publish the event and
-            acknowledge the current event.
+            When processing has completed set the event's new current state in
+            $$.State.Name to the next state in the state machine then publish
+            the event and acknowledge the current event.
             """
-#            next_state = state["Next"]
-#            item["CurrentState"] = next_state
-#            self.event_dispatcher.publish(item)
+            if (state.get("End")):
+                print("** END OF STATE MACHINE**")
+                # TODO output results
+            else:
+                next_state = state["Next"]
+                context["State"]["Name"] = next_state
+                self.event_dispatcher.publish(event)
 
             self.event_dispatcher.acknowledge(id)
 
@@ -166,8 +209,25 @@ class StateEngine(object):
             then the interpreter fails the state with a States.Timeout Error Name.
             """
             print("TASK")
-            print(item)
+            print(event)
 
+            # TODO
+
+
+
+
+            """
+            When processing has completed set the event's new current state in
+            $$.State.Name to the next state in the state machine then publish
+            the event and acknowledge the current event.
+            """
+            if (state.get("End")):
+                print("** END OF STATE MACHINE**")
+                # TODO output results
+            else:
+                next_state = state["Next"]
+                context["State"]["Name"] = next_state
+                self.event_dispatcher.publish(event)
 
             self.event_dispatcher.acknowledge(id)
 
@@ -175,20 +235,122 @@ class StateEngine(object):
             """
             A Choice state (identified by "Type":"Choice") adds branching logic
             to a state machine.
-    
+            """
+
+            """
+            The choose function implements the actual choice logic. We must
+            first extract the Variable field and use its value as JSONPath to
+            scan the input data for the actual value the we wish to match.
+            """
+            def choose(choice):
+                variable_field = choice.get("Variable")
+                print("Variable field = " + str(variable_field))
+
+                json_tag_val = parse(variable_field).find(data)          
+                #print(json_tag_val)
+                variable =  json_tag_val[0].value
+
+                #const variable = choice.Variable && jp.value(this.input, choice.Variable);
+
+                print("Variable value = " + variable)
+
+                next = choice.get("Next", True)
+
+
+                def asl_choice_And():
+                    # TODO Test me
+                    # Javascript if (choice.And.every(ch => this.process(ch)))
+                    if all(choose(ch) for ch in choice): return next
+                def asl_choice_Or():
+                    # TODO Test me
+                    # Javascript if (choice.Or.some(ch => this.process(ch)))
+                    if any(choose(ch) for ch in choice): return next
+                def asl_choice_Not():
+                    # TODO Test me
+                    # if (!this.process(choice.Not))
+                    if (not this.choose(choice["Not"])): return next
+
+                def asl_choice_BooleanEquals():
+                    if (variable == choice["BooleanEquals"]): return next
+                def asl_choice_NumericEquals():
+                    if (variable == choice["NumericEquals"]): return next
+                def asl_choice_NumericGreaterThan():
+                    if (variable > choice["NumericGreaterThan"]): return next
+                def asl_choice_NumericGreaterThanEquals():
+                    if (variable >= choice["NumericGreaterThanEquals"]): return next
+                def asl_choice_NumericLessThan():
+                    if (variable < choice["NumericLessThan"]): return next
+                def asl_choice_NumericLessThanEquals():
+                    if (variable <= choice["NumericLessThanEquals"]): return next
+                def asl_choice_StringEquals():
+                    if (variable == choice["StringEquals"]): return next
+                def asl_choice_StringGreaterThan():
+                    if (variable > choice["StringGreaterThan"]): return next
+                def asl_choice_StringGreaterThanEquals():
+                    if (variable >= choice["StringGreaterThanEquals"]): return next
+                def asl_choice_StringLessThan():
+                    if (variable < choice["StringLessThan"]): return next
+                def asl_choice_StringLessThanEquals():
+                    if (variable <= choice["StringLessThanEquals"]): return next
+                def asl_choice_TimestampEquals():
+                    if (variable == choice["TimestampEquals"]): return next
+                def asl_choice_TimestampGreaterThan():
+                    if (variable > choice["TimestampGreaterThan"]): return next
+                def asl_choice_TimestampGreaterThanEquals():
+                    if (variable >= choice["TimestampGreaterThanEquals"]): return next
+                def asl_choice_TimestampLessThan():
+                    if (variable < choice["TimestampLessThan"]): return next
+                def asl_choice_TimestampLessThanEquals():
+                    if (variable <= choice["TimestampLessThanEquals"]): return next
+
+                for key in choice:
+                    """
+                    Determine the ASL choice operator of the current choice and
+                    use that to dynamically invoke the appropriate choice handler.
+                    """
+                    next_state = locals().get("asl_choice_" + key, lambda: None)()
+                    print("Key: " + key + " ------------------------- next_state = " + str(next_state))
+                    if next_state: return next_state
+
+            """
             A Choice state state MUST have a “Choices” field whose value is a
             non-empty array. Each element of the array is called a Choice Rule -
             an object containing a comparison operation and a “Next” field,
             whose value MUST match a state name.
-
+            """
+            choices = state.get("Choices", []) # Sets to [] if key not present
+            
+            """
             The interpreter attempts pattern-matches against the Choice Rules in
             array order and transitions to the state specified in the “Next”
             field on the first Choice Rule where there is an exact match between
             the input value and a member of the comparison-operator array.
             """
-            print("CHOICE")
-            #print(item)
+            for choice in choices:
+                next_state = choose(choice)
+                if next_state: break
 
+            """
+            Choice states MAY have a “Default” field, which will execute if none
+            of the Choice Rules match. Using state.get("Default") will set the
+            value to None if the "Default" field is not present.
+            """
+            next_state = next_state if next_state else state.get("Default") 
+
+            print("-------- next_state = " + str(next_state))
+
+            """
+            The interpreter will raise a run-time States.NoChoiceMatched error
+            if a “Choice” state fails to match a Choice Rule and no “Default”
+            transition was specified. 
+            """
+            if next_state:
+                context["State"]["Name"] = next_state
+                self.event_dispatcher.publish(event)
+            else:
+                self.logger.error("States.NoChoiceMatched: {}".format(json.dumps(context)))
+                # TODO actually emit/publish an error to the caller when the
+                # mechanism for returning data/errors has been determined.
 
             self.event_dispatcher.acknowledge(id)
 
@@ -207,8 +369,24 @@ class StateEngine(object):
             “Timestamp”, or “TimestampPath”.
             """
             print("WAIT")
-            print(item)
-    
+            print(event)
+
+            """
+            TODO
+            Something like this might be the way to do Wait. The idea is that
+            the event instance, state and id for this call are wrapped in the
+            lambda's closure so when the timeout fires the correct event should
+            be published and the correct id acknowledged.
+
+            self.event_dispatcher.set_timeout(lambda:
+                                              next_state = state["Next"]
+                                              context["State"]["Name"] = next_state
+                                              self.event_dispatcher.publish(event)
+
+                                              self.event_dispatcher.acknowledge(id),
+
+                                              timeout)
+            """
     
             self.event_dispatcher.acknowledge(id)
     
@@ -221,7 +399,7 @@ class StateEngine(object):
             Because Succeed States are terminal states, they have no “Next” field.
             """
             print("SUCCEED")
-            print(item)
+            print(event)
 
 
             self.event_dispatcher.acknowledge(id)
@@ -239,7 +417,7 @@ class StateEngine(object):
             Because Fail States are terminal states, they have no “Next” field.
             """
             print("FAIL")
-            print(item)
+            print(event)
 
 
             self.event_dispatcher.acknowledge(id)
@@ -248,7 +426,7 @@ class StateEngine(object):
             """
             """
             print("PARALLEL")
-            print(item)
+            print(event)
 
 
             self.event_dispatcher.acknowledge(id)
@@ -260,7 +438,7 @@ class StateEngine(object):
 
         """
         Determine the ASL state type of the current state and use that to
-        dynamically invoke the appropriate ASL state sandler given state type.
+        dynamically invoke the appropriate ASL state handler given state type.
         The lambda provides a default handler in case of malformed ASL. 
         """
         state_type = ASL["States"][current_state]["Type"]
@@ -270,12 +448,15 @@ class StateEngine(object):
                         format(state_type)))()
 
 
-#        self.event_dispatcher.set_timeout(self.timeout, 500)
-#        self.event_dispatcher.set_timeout(self.timeout1, 1000)
+
+"""
+        self.event_dispatcher.set_timeout(self.timeout, 500)
+        self.event_dispatcher.set_timeout(self.timeout1, 1000)
 
 
     def timeout(self):
         print("----- TIMEOUT -----")
     def timeout1(self):
         print("----- TIMEOUT1 -----")
+"""
 
