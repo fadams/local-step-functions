@@ -89,15 +89,15 @@ context = '{"State": {"EnteredTime": "' + datetime.datetime.now().isoformat() + 
 items = ['{"CurrentState": "", "Data": {"lambda":"Success"}, "ASL":' + ASL + ',"ASLRef": "arn:aws:states:local:1234:stateMachine:simple_state_machine1"}', '{"CurrentState": "", "Data": {"lambda":"InternalErrorNotHandled"}, "ASL":' + ASL + ',"ASLRef": "arn:aws:states:local:1234:stateMachine:simple_state_machine1"}', '{"CurrentState": "", "Data": {"lambda":"InternalErrorHandled"}, "ASL":' + ASL + ',"ASLRef": "arn:aws:states:local:1234:stateMachine:simple_state_machine1"}', '{"CurrentState": "", "Data": {"lambda":"Timeout"}, "ASL":' + ASL + ',"ASLRef": "arn:aws:states:local:1234:stateMachine:simple_state_machine1"}']
 """
 
-items = ['{"$": {"lambda":"Success"}, "$$": ' + context + '}',
-         '{"$": {"lambda":"InternalErrorNotHandled"}, "$$": ' + context + '}',
-         '{"$": {"lambda":"InternalErrorHandled"}, "$$": ' + context + '}',
-         '{"$": {"lambda":"Timeout"}, "$$": ' + context + '}']
+items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}',
+         '{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}',
+         '{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}',
+         '{"data": {"lambda":"Timeout"}, "context": ' + context + '}']
 
-#items = ['{"$": {"lambda":"Success"}, "$$": ' + context + '}']
-#items = ['{"$": {"lambda":"InternalErrorNotHandled"}, "$$": ' + context + '}']
-#items = ['{"$": {"lambda":"InternalErrorHandled"}, "$$": ' + context + '}']
-#items = ['{"$": {"lambda":"Timeout"}, "$$": ' + context + '}']
+items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}']
+#items = ['{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}']
+#items = ['{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}']
+#items = ['{"data": {"lambda":"Timeout"}, "context": ' + context + '}']
 
 if __name__ == '__main__':
     # Connect to event queue and send items.

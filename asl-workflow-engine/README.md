@@ -40,15 +40,15 @@ The AWS documentation describes the format of the context object here: https://d
 Given these choices the format of the JSON objects on the event queue should look something like this:
 ```
 {
-	"$": <Object representing application data>,
-	"$$": <Object representing application context>,
+	"data": <Object representing application data>,
+	"context": <Object representing application context>,
 }
 ```
-The use of $ and $$ for the application data and application context respectively is intended to reflect the usage in the [Parameters](https://states-language.net/spec.html#parameters) section of the ASL specification.
+The `data` field contains application [Data](https://states-language.net/spec.html#data) as defined in the ASL Specification.
 
-The `$` field contains application [Data](https://states-language.net/spec.html#data) as defined in the ASL Specification.
+The `context` field contains application [Context](https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html) as defined above.
 
-The `$$` field contains application [Context](https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html) as defined above.
+The [Paths](https://states-language.net/spec.html#paths) section of the ASL specification describes the use of JSONPath root (`$`) to refer to the root of the data object and the [Parameters](https://states-language.net/spec.html#parameters) describes the use of `$$` to refer to the root of the context object.
 
 
 The `$$.State.Name` (i.e. the **current state**) field must contain either a state name valid in the ASL state machine being referred to in ASL, or null, or an empty string or be undefined. In the case of null or empty string or undefined it shall be assumed that the state transition will be to the ASL "StartAt" state.
@@ -58,7 +58,11 @@ The (otional) `$$.StateMachine.value` field contains a complete ASL state machin
 The `$$.StateMachine.Id` field contains a unique reference to an ASL state machine.
 
 Either one or both of `$$.StateMachine.value` or 
-`$$.StateMachine.Id` must be supplied. If both are supplied the state engine will attempt to cache (and in later iterations persist) the ASL. If only `$$.StateMachine.Id` is supplied the state engine will attempt to use a cached value and will fail if one is not present. If only `$$.StateMachine.value` is present the state engine will used that, but will be unable to cache it.
+`$$.StateMachine.Id` must be supplied.
+
+* If both are supplied the state engine will attempt to cache (and in later iterations persist) the ASL.
+* If only `$$.StateMachine.Id` is supplied the state engine will attempt to use a cached value and will fail if one is not present.
+* If only `$$.StateMachine.value` is present the state engine will used that, but will be unable to cache it.
 
 The format of `$$.StateMachine.Id` *may* simply be any unique ID, however ideally it *should* follow the pattern of [Amazon Resource Names (ARNs)](https://docs.aws.amazon.com/general/latest/gr/aws-arns-and-namespaces.html) and in particular *should* follow the stateMachine ARN form given in [syntax for Step Functions](https://docs.aws.amazon.com/general/latest/gr/aws-arns-and-namespaces.html#arn-syntax-step-functions) e.g.
 ```

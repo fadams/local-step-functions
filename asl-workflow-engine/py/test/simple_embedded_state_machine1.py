@@ -51,6 +51,8 @@ if __name__ == '__main__':
     # Initialise logger
     logger = init_logging(log_name='simple_embedded_state_machine1')
     config = {"state_engine": {"asl_cache": "ASL.json"}}
+
+    # TODO this no longer works 'cause I've moved to a proper context object
     state_engine = StateEngine(logger, config)
     for item in items:
         state_engine.notify(item)

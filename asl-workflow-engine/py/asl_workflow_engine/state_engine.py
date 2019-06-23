@@ -63,8 +63,8 @@ class StateEngine(object):
         :type id: A string representing the event ID, it may just be a number.
 
         {
-	        "$": <Object representing application data>,
-	        "$$": <Object representing application context>,
+	        "data": <Object representing application data>,
+	        "context": <Object representing application context>,
         }
 
         The application context is described in the AWS documentation:
@@ -98,7 +98,7 @@ class StateEngine(object):
 
         #print(event)
 
-        context = event["$$"]
+        context = event["context"]
         state_machine = context["StateMachine"]
 
         # Get ASL from event/cache/storage
@@ -141,7 +141,7 @@ class StateEngine(object):
         print("current_state = " + current_state)
 
         state = ASL["States"][current_state]
-        data = event["$"]
+        data = event["data"]
 
         print("state = " + str(state))
         print("data = " + str(data))
@@ -425,6 +425,8 @@ class StateEngine(object):
         def asl_state_Parallel():
             """
             """
+            # TODO
+
             print("PARALLEL")
             print(event)
 
