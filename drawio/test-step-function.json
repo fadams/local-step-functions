@@ -1,0 +1,64 @@
+{
+  "StartAt": "StartState",
+  "States": {
+    "StartState": {
+      "Type": "Pass",
+      "Next": "ChoiceState"
+    },
+    "ChoiceState": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.lambda",
+          "StringEquals": "InternalErrorNotHandled",
+          "Next": "InternalErrorNotHandledLambda"
+        },
+        {
+          "Variable": "$.lambda",
+          "StringEquals": "InternalErrorHandled",
+          "Next": "InternalErrorHandledLambda"
+        },
+        {
+          "Variable": "$.lambda",
+          "StringEquals": "Success",
+          "Next": "SuccessLambda"
+        },
+        {
+          "Variable": "$.lambda",
+          "StringEquals": "Timeout",
+          "Next": "TimeoutLambda"
+        }
+      ],
+      "Default": "FailState"
+    },
+    "InternalErrorNotHandledLambda": {
+      "Type": "Task",
+      "Resource": "$INTERNAL_ERROR_NOT_HANDLED_LAMBDA_ARN",
+      "Next": "EndState"
+    },
+    "InternalErrorHandledLambda": {
+      "Type": "Task",
+      "Resource": "$INTERNAL_ERROR_HANDLED_LAMBDA_ARN",
+      "Next": "EndState"
+    },
+    "SuccessLambda": {
+      "Type": "Task",
+      "Resource": "$SUCCESS_LAMBDA_ARN",
+      "Next": "EndState"
+    },
+    "TimeoutLambda": {
+      "Type": "Task",
+      "Resource": "$TIMEOUT_LAMBDA_ARN",
+      "Next": "EndState"
+    },
+    "FailState": {
+      "Type": "Fail",
+      "Error": "NoLambdaError",
+      "Cause": "No Matches!"
+    },
+    "EndState": {
+      "Type": "Pass",
+      "End": true
+    }
+  }
+}
