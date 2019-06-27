@@ -57,7 +57,8 @@ class StateEngine(object):
     def notify(self, event, id):
         """
         :item event: Describes the data, current state and the ASL State Machine
-        :type event: dict as described below.
+        :type event: dict as described below. N.B. note that the expected type
+         is a dictionary i.e. a JSON object and NOT a JSON string!
         :item id: The ID of the event as given by the EventDispatcher, it is
          primarily used for acknowledging the event.
         :type id: A string representing the event ID, it may just be a number.
