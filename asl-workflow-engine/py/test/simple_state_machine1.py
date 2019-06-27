@@ -44,7 +44,7 @@ import datetime
 from asl_workflow_engine.amqp_0_9_1_messaging import Connection, Message
 from asl_workflow_engine.exceptions import *
 
-ASL = '{"Comment": "Test Step Function","StartAt": "StartState","States": {"StartState": {"Type": "Pass","Next": "ChoiceState"},"ChoiceState": {"Type": "Choice","Choices": [{"Variable": "$.lambda","StringEquals": "InternalErrorNotHandled","Next": "InternalErrorNotHandledLambda"},{"Variable": "$.lambda","StringEquals": "InternalErrorHandled","Next": "InternalErrorHandledLambda"},{"Variable": "$.lambda","StringEquals": "Success","Next": "SuccessLambda"},{"Variable": "$.lambda","StringEquals": "Timeout","Next": "TimeoutLambda"}],"Default": "FailState"},"FailState": {"Type": "Fail","Error": "NoLambdaError","Cause": "No Matches!"},"SuccessLambda": {"Type": "Task","Resource": "$SUCCESS_LAMBDA_ARN","Next": "EndState"},"InternalErrorNotHandledLambda": {"Type": "Task","Resource": "$INTERNAL_ERROR_NOT_HANDLED_LAMBDA_ARN","Next": "EndState"},"InternalErrorHandledLambda": {"Type": "Task","Resource": "$INTERNAL_ERROR_HANDLED_LAMBDA_ARN","Next": "EndState"},"TimeoutLambda": {"Type": "Task","Resource": "$TIMEOUT_LAMBDA_ARN","Next": "EndState"},"EndState": {"Type": "Pass","End": true}}}'
+ASL = '{"Comment": "Test Step Function","StartAt": "StartState","States": {"StartState": {"Type": "Pass","Next": "ChoiceState"},"ChoiceState": {"Type": "Choice","Choices": [{"Variable": "$.lambda","StringEquals": "InternalErrorNotHandled","Next": "InternalErrorNotHandledLambda"},{"Variable": "$.lambda","StringEquals": "InternalErrorHandled","Next": "InternalErrorHandledLambda"},{"Variable": "$.lambda","StringEquals": "Success","Next": "SuccessLambda"},{"Variable": "$.lambda","StringEquals": "Timeout","Next": "TimeoutLambda"}],"Default": "FailState"},"FailState": {"Type": "Fail","Error": "NoLambdaError","Cause": "No Matches!"},"SuccessLambda": {"Type": "Task","Resource": "$SUCCESS_LAMBDA_ARN","Next": "WaitState"},"InternalErrorNotHandledLambda": {"Type": "Task","Resource": "$INTERNAL_ERROR_NOT_HANDLED_LAMBDA_ARN","Next": "EndState"},"InternalErrorHandledLambda": {"Type": "Task","Resource": "$INTERNAL_ERROR_HANDLED_LAMBDA_ARN","Next": "EndState"},"TimeoutLambda": {"Type": "Task","Resource": "$TIMEOUT_LAMBDA_ARN","Next": "EndState"},"EndState": {"Type": "Pass","End": true},"WaitState": {"Type": "Wait","Seconds":10,"Next": "EndState"}}}'
 
 
 """
@@ -85,16 +85,12 @@ context = '{"State": {"EnteredTime": "' + datetime.datetime.now().isoformat() + 
 #print(context)
 #print("----------------------")
 
-"""
-items = ['{"CurrentState": "", "Data": {"lambda":"Success"}, "ASL":' + ASL + ',"ASLRef": "arn:aws:states:local:1234:stateMachine:simple_state_machine1"}', '{"CurrentState": "", "Data": {"lambda":"InternalErrorNotHandled"}, "ASL":' + ASL + ',"ASLRef": "arn:aws:states:local:1234:stateMachine:simple_state_machine1"}', '{"CurrentState": "", "Data": {"lambda":"InternalErrorHandled"}, "ASL":' + ASL + ',"ASLRef": "arn:aws:states:local:1234:stateMachine:simple_state_machine1"}', '{"CurrentState": "", "Data": {"lambda":"Timeout"}, "ASL":' + ASL + ',"ASLRef": "arn:aws:states:local:1234:stateMachine:simple_state_machine1"}']
-"""
-
-items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}',
+items = ['{"data": {"lambda":"Success", "result":"Woo Hoo!"}, "context": ' + context + '}',
          '{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}',
          '{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}',
          '{"data": {"lambda":"Timeout"}, "context": ' + context + '}']
 
-items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}']
+#items = ['{"data": {"lambda":"Success", "result":"Woo Hoo!"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"Timeout"}, "context": ' + context + '}']

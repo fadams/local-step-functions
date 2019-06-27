@@ -24,7 +24,7 @@ import json
 
 # https://github.com/kennknowles/python-jsonpath-rw
 # https://stackoverflow.com/questions/48629461/python-jsonpath-how-do-i-parse-with-jsonpath-correctly
-# Tested using jsonpath_rw jsonpath_rw
+# Tested using jsonpath_rw 1.4.0
 from jsonpath_rw import parse # sudo pip3 install jsonpath_rw
 
 class StateEngine(object):
@@ -181,8 +181,7 @@ class StateEngine(object):
                 print("** END OF STATE MACHINE**")
                 # TODO output results
             else:
-                next_state = state["Next"]
-                context["State"]["Name"] = next_state
+                context["State"]["Name"] = state.get("Next")
                 self.event_dispatcher.publish(event)
 
             self.event_dispatcher.acknowledge(id)
@@ -225,8 +224,7 @@ class StateEngine(object):
                 print("** END OF STATE MACHINE**")
                 # TODO output results
             else:
-                next_state = state["Next"]
-                context["State"]["Name"] = next_state
+                context["State"]["Name"] = state.get("Next")
                 self.event_dispatcher.publish(event)
 
             self.event_dispatcher.acknowledge(id)
@@ -356,11 +354,37 @@ class StateEngine(object):
 
         def asl_state_Wait():
             """
-            A Wait state (identified by "Type":"Wait") causes the interpreter to
-            delay the machine from continuing for a specified time. The time can
-            be specified as a wait duration, specified in seconds, or an absolute
-            expiry time, specified as an ISO-8601 extended offset date-time
-            format string.
+            A Wait state (identified by "Type":"Wait") causes the interpreter
+            to delay the machine from continuing for a specified time.
+            """
+            print("WAIT")
+            print(event)
+
+            """
+            It's important for this function to be nested as we want the event,
+            state and id to be wrapped in its closure to be used when the
+            timeout actually fires.
+            """
+            def on_timeout():
+                print("----- TIMEOUT ----- id = " + str(id))
+                """
+                When processing has completed set the event's new current state
+                in $$.State.Name to the next state in the state machine then
+                publish the event and acknowledge the current event.
+                """
+                if (state.get("End")):
+                    print("** END OF STATE MACHINE**")
+                    # TODO output results
+                else:
+                    context["State"]["Name"] = state.get("Next")
+                    self.event_dispatcher.publish(event)
+
+                self.event_dispatcher.acknowledge(id)
+
+            """
+            The time can be specified as a wait duration, specified in seconds,
+            or an absolute expiry time, specified as an ISO-8601 extended offset
+            date-time format string.
 
             The wait duration does not need to be hardcoded and may also be a
             Reference Path to the data such as "TimestampPath": "$.expirydate"
@@ -368,28 +392,33 @@ class StateEngine(object):
             A Wait state MUST contain exactly one of ”Seconds”, “SecondsPath”,
             “Timestamp”, or “TimestampPath”.
             """
-            print("WAIT")
-            print(event)
+            seconds = state.get("Seconds")
+            seconds_path = state.get("SecondsPath")
+            timestamp = state.get("Timestamp")
+            timestamp_path = state.get("TimestampPath")
+            if seconds:
+                timeout = seconds * 1000
+            elif seconds_path:
+                # TODO - should just be a JSONPath parse
+                timeout = 1 # seconds_path * 1000
+            elif timestamp:
+                # TODO - Need to subtract current time from timestamp to
+                # find timeout duration
+                timeout = 1 # timestamp * 1000
+            elif timestamp_path:
+                # TODO - should just be a JSONPath parse to get Timestamp
+                # TODO - Need to subtract current time from timestamp to
+                # find timeout duration
+                timeout = 1 # timestamp_path * 1000
 
             """
-            TODO
-            Something like this might be the way to do Wait. The idea is that
+            Schedule the timeout. This is slightly subtle, the idea is that
             the event instance, state and id for this call are wrapped in the
-            lambda's closure so when the timeout fires the correct event should
-            be published and the correct id acknowledged.
-
-            self.event_dispatcher.set_timeout(lambda:
-                                              next_state = state["Next"]
-                                              context["State"]["Name"] = next_state
-                                              self.event_dispatcher.publish(event)
-
-                                              self.event_dispatcher.acknowledge(id),
-
-                                              timeout)
+            on_timeout function's closure, so when the timeout fires the correct
+            event should be published and the correct id acknowledged.
             """
-    
-            self.event_dispatcher.acknowledge(id)
-    
+            self.event_dispatcher.set_timeout(on_timeout, timeout)
+     
         def asl_state_Succeed():
             """
             The Succeed State (identified by "Type":"Succeed") terminates a state
@@ -448,17 +477,4 @@ class StateEngine(object):
                      lambda:
                         self.logger.error("StateEngine illegal state transition: {}".
                         format(state_type)))()
-
-
-
-"""
-        self.event_dispatcher.set_timeout(self.timeout, 500)
-        self.event_dispatcher.set_timeout(self.timeout1, 1000)
-
-
-    def timeout(self):
-        print("----- TIMEOUT -----")
-    def timeout1(self):
-        print("----- TIMEOUT1 -----")
-"""
 

@@ -44,7 +44,7 @@
     "SuccessLambda": {
       "Type": "Task",
       "Resource": "$SUCCESS_LAMBDA_ARN",
-      "Next": "EndState"
+      "Next": "WaitState"
     },
     "TimeoutLambda": {
       "Type": "Task",
@@ -59,6 +59,11 @@
     "EndState": {
       "Type": "Pass",
       "End": true
+    },
+    "WaitState": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "EndState"
     }
   }
 }
