@@ -86,10 +86,10 @@ class EventDispatcher(object):
         try:
             connection.open()
             session = connection.session()
-            self.receiver = session.receiver(self.config["queue_name"])
-            self.receiver.capacity = 100; # Enable receiver prefetch
-            self.receiver.set_message_listener(self.dispatch)
-            self.sender = session.sender(self.config["queue_name"])
+            self.consumer = session.consumer(self.config["queue_name"])
+            self.consumer.capacity = 100; # Enable consumer prefetch
+            self.consumer.set_message_listener(self.dispatch)
+            self.producer = session.producer(self.config["queue_name"])
 
             """
             TODO Passing connection.set_timeout here is kind of ugly but I can't
@@ -130,6 +130,7 @@ class EventDispatcher(object):
             # likely to be due to invalid data or ASL not being handled
             # correctly. Should probably catch Exception, log error then
             # acknowledge the message to prevent it being redelivered.
+            print(message.subject)
             item = json.loads(message.body.decode("utf8"))
             self.unacknowledged_messages[self.message_count] = message
             self.state_engine.notify(item, self.message_count)
@@ -162,5 +163,5 @@ class EventDispatcher(object):
         https://www.ietf.org/rfc/rfc4627.txt.
         """
         message = Message(json.dumps(item), content_type="application/json")
-        self.sender.send(message)
+        self.producer.send(message)
 

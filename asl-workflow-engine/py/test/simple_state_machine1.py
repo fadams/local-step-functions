@@ -90,7 +90,7 @@ items = ['{"data": {"lambda":"Success", "result":"Woo Hoo!"}, "context": ' + con
          '{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}',
          '{"data": {"lambda":"Timeout"}, "context": ' + context + '}']
 
-#items = ['{"data": {"lambda":"Success", "result":"Woo Hoo!"}, "context": ' + context + '}']
+items = ['{"data": {"lambda":"Success", "result":"Woo Hoo!"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"Timeout"}, "context": ' + context + '}']
@@ -101,14 +101,14 @@ if __name__ == '__main__':
     try:
         connection.open()
         session = connection.session()
-        sender = session.sender("asl_workflow_events")
+        producer = session.producer("asl_workflow_events")
         for item in items:
             """
             Setting content_type isn't necessary for correct operation,
             however it is the correct thing to do:
             https://www.ietf.org/rfc/rfc4627.txt.
             """
-            sender.send(Message(item, content_type="application/json"))
+            producer.send(Message(item, content_type="application/json"))
         connection.close();
     except ConnectionError as e:
         self.logger.error(e)

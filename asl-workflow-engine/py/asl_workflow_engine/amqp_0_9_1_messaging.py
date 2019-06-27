@@ -17,7 +17,7 @@
 # under the License.
 #
 """
-Provides a JMS-like Connection/Session/Sender/Receiver/Message abstraction for
+Provides a JMS-like Connection/Session/Producer/Consumer/Message abstraction for
 AMQP 0.9.1 connections (to RabbitMQ, though may work with other brokers).
 
 By using JMS-like semantics the intention is to have an API that is already
@@ -144,11 +144,11 @@ class Session(object):
     def __init__(self, connection, name, transactional):
         """
         Sessions provide a context for sending and receiving Messages. Messages
-        are sent and received using the Sender and Receiver objects associated
+        are sent and received using the Producer and Consumer objects associated
         with a Session.
 
-        Each Sender and Receiver is created by supplying either a target or
-        source address to the sender and receiver methods of the Session. 
+        Each Producer and Consumer is created by supplying either a target or
+        source address to the producer and consumer methods of the Session. 
         The address is supplied via a string syntax.
         """
         if not connection.is_open():
@@ -166,10 +166,10 @@ class Session(object):
         self.channel = connection.connection.channel()
 
         # Enable delivery confirmations https://www.rabbitmq.com/confirms.html
-        # Don't think we need/want this to be set, this is about passing a
+        # I don't think we need/want this to be set, this is about passing a
         # callback to be notified by the Broker when a message has been
-        # confirmed as received or rejected
-        self.channel.confirm_delivery()
+        # confirmed as received or rejected.
+        #self.channel.confirm_delivery()
 
     def acknowledge(self, message=None): 
         """
@@ -208,21 +208,21 @@ class Session(object):
             self.logger.info("Closing Session") # TODO log session name
             self.channel.close()
 
-    def sender(self, target, **options):
+    def producer(self, target=""):
         """
-        Creates a Sender used to send messages to the specified target.
+        Creates a Producer used to send messages to the specified target.
         :param target: The target to which messages will be sent
         :type target: str
         """
-        return Sender(self, target, options)
+        return Producer(self, target)
 
-    def receiver(self, source, **options):
+    def consumer(self, source):
         """
-        Creates a receiver used to fetch messages from the specified source.
+        Creates a Consumer used to fetch messages from the specified source.
         :param source: The source of messages
         :type source: str
         """
-        return Receiver(self, source, options)
+        return Consumer(self, source)
 
 #-------------------------------------------------------------------------------
 
@@ -234,45 +234,110 @@ class Destination(object):
         https://pika.readthedocs.io/en/stable/modules/channel.html
         Default values taken from exchange_declare, queue_declare, queue_bind
         """
-        self.exchange = {"name": "", "exchange_type": "direct", "passive": False,
-                         "durable": False, "auto_delete": False,
-                         "internal": False, "arguments": None}
-        self.queue = {"name": "", "passive": False, "durable": False,
-                      "exclusive": False, "auto_delete": False,
-                      "arguments": None}
-        self.bindings = [{"queue_name": "", "exchange_name": "",
-                          "routing_key": None, "arguments": None}]
+        self.declare = {"queue": "", "exchange": "", "exchange_type": "direct",
+                        "passive": False, "internal": False, "durable": False,
+                        "exclusive": False, "auto-delete": False,
+                        "arguments": None}
+
+        self.bindings = []
+        #self.bindings = [{"queue": "", "exchange": "",
+        #                  "key": None, "arguments": None}]
 
     def parse_address(self, address):
         """
-        """
-        #print("parse_address " + address)
-        # TODO do this properly
-        self.queue["name"] = address
+        Parses an address string with the following format:
 
-        self.bindings[0]["queue_name"] = address
-        self.bindings[0]["routing_key"] = address
+        <name> [ / <subject> ] [ ; <options> ]
+
+        Where options is of the form: { <key> : <value>, ... }
+
+        And values may be numbers, strings, maps (dictionaries) or lists
+
+        The options map permits the following parameters:
+
+        <name> [ / <subject> ] ; {
+            create: always | sender | receiver | never,
+            delete: always | sender | receiver | never,
+            node: {
+                type: queue | topic,
+                durable: True | False,
+                x-declare: { ... <declare-overrides> ... },
+                x-bindings: [<binding_1>, ... <binding_n>]
+            },
+            link: {
+                name: <link-name>,
+                durable: True | False,
+                reliability: unreliable | at-most-once | at-least-once | exactly-once,
+                x-declare: { ... <declare-overrides> ... },
+                x-bindings: [<binding_1>, ... <binding_n>],
+                x-subscribe: { ... <subscribe-overrides> ... }
+            }
+        }
+
+        Bindings are specified as a map with the following options:
+
+        {
+            exchange: <exchange>,
+            queue: <queue>,
+            key: <key>,
+            arguments: <arguments>
+        }
+
+        The x-declare map permits protocol specific keys and values to be
+        specified when exchanges or queues are declared. These keys and
+        values are passed through when creating a node or asserting facts
+        about an existing node.
+        """
+        kv = address.split(";")
+        options_string = kv[1] if len(kv) == 2 else "{}"
+        # TODO parse options string into x-bindings/x-declare, etc.
+        kv = kv[0].split("/")
+        self.subject = kv[1] if len(kv) == 2 else ""
+        self.name = kv[0]
+
+        #print(options_string)
+        #print(self.subject)
+        #print(self.name)
 
 #-------------------------------------------------------------------------------
 
-class Sender(Destination):
+class Producer(Destination):
 
-    def __init__(self, session, target, options):
+    def __init__(self, session, target):
         """
         """
         super().__init__() # Call Destination constructor
 
-        session.connection.logger.info("Creating Sender with address {}".format(target))
+        session.connection.logger.info("Creating Producer with address {}".format(target))
         self.session = session
 
         self.parse_address(target)
-        #print(self.exchange)
-        #print(self.queue)
+        #print(self.declare)
         #print(self.bindings)
 
         # TODO Declare queue, exchange, bindings as necessary
 
-    def send(self, message, sync=True, timeout=None):
+        # Check if an exchange with the name of this destination exists.
+        try:
+            # Use temporary channel as the channel gets closed on an exception.
+            temp_channel = self.session.connection.connection.channel()
+            temp_channel.exchange_declare(self.name, passive=True)
+            temp_channel.close()
+        except pika.exceptions.ChannelClosedByBroker as e:
+            #print(e.reply_code)
+            #print(e.reply_text)
+            # If 404 NOT_FOUND the specified exchange doesn't exist. If no
+            # exchange declare options are present then assume default direct.
+            if e.reply_code == 404:
+                # TODO check for exchange declare options
+                #print("Assuming default direct!")
+                self.subject = self.name
+                self.name = ""
+
+        #print("name = " + self.name)
+        #print("subject = " + self.subject)
+
+    def send(self, message):
         """
         For RabbitMQ AMQP Channel documentation see:
         https://pika.readthedocs.io/en/stable/modules/channel.html
@@ -282,7 +347,14 @@ class Sender(Destination):
                       mandatory=False)
         Delivery mode 2 makes the broker save the message to disk.
         """
-        #properties=pika.BasicProperties(delivery_mode=2)
+
+        print("message.subject = " + str(message.subject))
+        # If message.subject is set use that as the routing_key, otherwise use
+        # the Producer target default subject parsed from address string.
+        routing_key = message.subject if message.subject else self.subject
+
+        print("exchange = " + self.name)
+        print("routing_key = " + routing_key)
 
         properties=pika.BasicProperties(headers=message.properties,
                                         content_type=message.content_type,
@@ -299,15 +371,7 @@ class Sender(Destination):
                                         app_id=message.app_id,
                                         cluster_id=message.cluster_id)
 
-        # TODO This needs more thought, for example if target is something
-        # simple like amq.topic or something else that just specifies the
-        # exchange we need to find the subject either from the address or
-        # the message.subject field (if present)
-        print("exchange = " + self.exchange["name"])
-        print("routing_key = " + self.queue["name"])
-        routing_key = self.queue["name"]
-
-        res = self.session.channel.basic_publish(exchange=self.exchange["name"],
+        res = self.session.channel.basic_publish(exchange=self.name,
                                                  routing_key=routing_key,
                                                  body=message.body,
                                                  properties=properties)
@@ -315,14 +379,14 @@ class Sender(Destination):
 
 #-------------------------------------------------------------------------------
 
-class Receiver(Destination):
+class Consumer(Destination):
 
-    def __init__(self, session, source, options):
+    def __init__(self, session, source):
         """
         """
         super().__init__() # Call Destination constructor
 
-        session.connection.logger.info("Creating Receiver with address {}".format(source))
+        session.connection.logger.info("Creating Consumer with address {}".format(source))
         self.session = session
 
         # Set default capacity/message prefetch to 500
@@ -330,27 +394,26 @@ class Receiver(Destination):
         self.session.channel.basic_qos(prefetch_count=self._capacity)
 
         self.parse_address(source)
-        #print(self.exchange)
-        #print(self.queue)
+        #print(self.declare)
         #print(self.bindings)
 
         # Declare queue, exchange, bindings as necessary
 
         # exchange_declare(exchange, exchange_type='direct', passive=False, durable=False, auto_delete=False, internal=False, arguments=None, callback=None)
 
-        self.session.channel.queue_declare(queue=self.queue["name"],
-                                           passive=self.queue["passive"],
-                                           durable=self.queue["durable"],
-                                           exclusive=self.queue["exclusive"],
-                                           auto_delete=self.queue["auto_delete"],
-                                           arguments=self.queue["arguments"])
-        print("Bindings:")
+        self.session.channel.queue_declare(queue=self.name,
+                                           passive=self.declare["passive"],
+                                           durable=self.declare["durable"],
+                                           exclusive=self.declare["exclusive"],
+                                           auto_delete=self.declare["auto-delete"],
+                                           arguments=self.declare["arguments"])
+        #print("Bindings:")
         for binding in self.bindings:
             print(binding)
-            if binding["exchange_name"] == "" : continue # Can't bind to default
-            self.session.channel.queue_bind(queue=binding["queue_name"],
-                                            exchange=binding["exchange_name"], 
-                                            routing_key=binding["routing_key"],
+            if binding["exchange"] == "" : continue # Can't bind to default
+            self.session.channel.queue_bind(queue=binding["queue"],
+                                            exchange=binding["exchange"], 
+                                            routing_key=binding["key"],
                                             arguments=binding["arguments"])
 
     def set_message_listener(self, message_listener):
@@ -364,11 +427,11 @@ class Receiver(Destination):
         """
         self._message_listener = message_listener
         self.session.channel.basic_consume(on_message_callback=self.message_listener,   
-                                           queue=self.queue["name"])
+                                           queue=self.name)
 
     def message_listener(self, channel, method, properties, body):
         """
-        This is the Receiver's default message listener, its job is to create
+        This is the Consumer's default message listener, its job is to create
         a Message instance that encapsulates some of the AMQP details into
         something more akin to a JMS Message, then delegate to the registered
         message listener.
@@ -386,12 +449,6 @@ class Receiver(Destination):
             #delivery_tag = method.delivery_tag
             #print("***** Delivery tag = " + str(delivery_tag))
 
-            #print("----")
-            #print(properties)
-            #print("----")
-            #print(vars(properties))
-            #print("----")
-
             message = Message(body, properties=properties.headers,
                               content_type = properties.content_type,
                               content_encoding = properties.content_encoding,
@@ -408,7 +465,7 @@ class Receiver(Destination):
                               cluster_id = properties.cluster_id)
 
             # These two private attributes are added to Message to enable
-            # Message's acknowledge() methos
+            # Message's acknowledge() methods
             message._channel = channel
             message._delivery_tag = method.delivery_tag
             self._message_listener(message)
@@ -430,7 +487,7 @@ class Message(object):
                  content_encoding = None, durable = True, priority = None,
                  correlation_id = None, reply_to = None, expiration = None,
                  message_id = None, timestamp = None, type = None,
-                 user_id = None, app_id = None, cluster_id = None):
+                 user_id = None, app_id = None, cluster_id = None, subject = None):
         """
         """
         self.body = body
@@ -457,6 +514,28 @@ class Message(object):
         self.cluster_id = cluster_id
 
         if self.properties == None: self.properties = {}
+        self.subject = subject # Set subject *after* self.properties initialised.
+
+    """
+    Unlike AMQP 1.0 AMQP 0.9.1 doesn't have a Message subject, but it is a
+    useful concept as often we wish to publish messages to a generic producer
+    Node such as a topic exchange and have messages delivered based on their
+    subject. Although basic_publish allows one to achieve the same result it is
+    much more coupled with AMQP 0.9.1 (and AMQP 0.10) protocol details than
+    if it were a property of the Message, which is also more intuitive.
+    We map "subject" to a message property that is unlikely to collide with any
+    application set message properties, this will be used by the Producer.send()
+    but will also be available to consumers as a Message property.
+    """
+    @property
+    def subject(self):
+        return self.properties.get("x-amqp-0-9-1.subject")
+
+    @subject.setter
+    def subject(self, subject):
+        if subject:
+            self.properties["x-amqp-0-9-1.subject"] = subject
+            print(self.properties)
 
     def acknowledge(self):
         """
