@@ -41,6 +41,7 @@ import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
 import datetime
+from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.amqp_0_9_1_messaging import Connection, Message
 from asl_workflow_engine.exceptions import *
 
@@ -96,6 +97,9 @@ items = ['{"data": {"lambda":"Success", "result":"Woo Hoo!"}, "context": ' + con
 #items = ['{"data": {"lambda":"Timeout"}, "context": ' + context + '}']
 
 if __name__ == '__main__':
+    # Initialise logger
+    logger = init_logging(log_name='simple_state_machine1')
+
     # Connect to event queue and send items.
     connection = Connection("amqp://localhost:5672?connection_attempts=20&retry_delay=10&heartbeat=0")
     try:
@@ -110,8 +114,13 @@ if __name__ == '__main__':
             """
             producer.send(Message(item, content_type="application/json"))
         connection.close();
+    # Could catch MessagingError if we don't want to handle these separately
     except ConnectionError as e:
         self.logger.error(e)
     except SessionError as e:
+        self.logger.error(e)
+    except ConsumerError as e:
+        self.logger.error(e)
+    except ProducerError as e:
         self.logger.error(e)
 

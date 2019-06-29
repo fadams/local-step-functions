@@ -36,9 +36,9 @@ class ConnectionError(MessagingError):
 class SessionError(MessagingError):
     pass
 
-class SenderError(MessagingError):
+class ProducerError(MessagingError):
     pass
 
-class ReceiverError(MessagingError):
+class ConsumerError(MessagingError):
     pass
 

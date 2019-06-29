@@ -28,6 +28,9 @@ reasonably abstracted from the underlying messaging fabric, so that it should
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
+import uuid
+import json
+
 # Tested using Pika 1.0.1, may not work correctly with earlier versions.
 import pika # sudo pip3 install pika
 
@@ -47,7 +50,7 @@ class Connection(object):
         https://pika.readthedocs.io/en/stable/examples/using_urlparameters.html
         """
         self.logger = init_logging(log_name="amqp_0_9_1_messaging")
-        self.logger.info("Creating Connection with url {}".format(url))
+        self.logger.info("Creating Connection with url: {}".format(url))
     
         self.parameters = pika.URLParameters(url)
 
@@ -234,14 +237,18 @@ class Destination(object):
         https://pika.readthedocs.io/en/stable/modules/channel.html
         Default values taken from exchange_declare, queue_declare, queue_bind
         """
-        self.declare = {"queue": "", "exchange": "", "exchange_type": "direct",
+        self.declare = {"queue": "", "exchange": "", "exchange-type": "direct",
                         "passive": False, "internal": False, "durable": False,
                         "exclusive": False, "auto-delete": False,
                         "arguments": None}
 
+        # Defaults for subscription queues (exclusive and autodelete True)
+        self.link_declare = {"queue": "", "passive": False, "internal": False,
+                             "durable": False, "exclusive": True,
+                             "auto-delete": True, "arguments": None}
+
+        # [{"queue": "", "exchange": "", "key": None, "arguments": None}]
         self.bindings = []
-        #self.bindings = [{"queue": "", "exchange": "",
-        #                  "key": None, "arguments": None}]
 
     def parse_address(self, address):
         """
@@ -256,8 +263,6 @@ class Destination(object):
         The options map permits the following parameters:
 
         <name> [ / <subject> ] ; {
-            create: always | sender | receiver | never,
-            delete: always | sender | receiver | never,
             node: {
                 type: queue | topic,
                 durable: True | False,
@@ -269,10 +274,14 @@ class Destination(object):
                 durable: True | False,
                 reliability: unreliable | at-most-once | at-least-once | exactly-once,
                 x-declare: { ... <declare-overrides> ... },
-                x-bindings: [<binding_1>, ... <binding_n>],
-                x-subscribe: { ... <subscribe-overrides> ... }
+                x-bindings: [<binding_1>, ... <binding_n>]
             }
         }
+
+        The node refers to the AMQP node e.g. a queue or exchange being referred
+        to in the address whereas the link allows configuration of a logical
+        "subscriber queue" that will be created when the address node is an
+        exchange.
 
         Bindings are specified as a map with the following options:
 
@@ -287,6 +296,25 @@ class Destination(object):
         specified when exchanges or queues are declared. These keys and
         values are passed through when creating a node or asserting facts
         about an existing node.
+
+        For Producers the node implicitly defaults to a topic and for Consumers
+        it implicitly defaults to a queue, but this may be overridden by setting
+        exchange or queue in the x-declare object or by setting node type to
+        queue or topic.
+
+        Examples:
+        myqueue; {"node": {"x-declare": {"durable": true, "exclusive": true, "auto-delete": true}}}'
+        myqueue; {"node": {"x-declare": {"exchange": "test-headers", "exchange-type": "headers", "durable": true, "auto-delete": true}}}
+
+        myqueue; {"node": {"x-declare": {"durable": true, "auto-delete": true}, "x-bindings": [{"exchange": "amq.match", "queue": "myqueue", "key": "data1", "arguments": {"x-match": "all", "data-service": "amqp-delivery", "item-owner": "Sauron"}}]}}
+
+        myqueue; {"node": {"durable": true, "x-bindings": [{"exchange": "amq.match", "queue": "myqueue", "key": "data1", "arguments": {"x-match": "all", "data-service": "amqp-delivery", "item-owner": "Sauron"}}, {"exchange": "amq.match", "queue": "myqueue", "key": "data2", "arguments": {"x-match": "all", "data-service": "amqp-delivery", "item-owner": "Gandalf"}}]}}
+
+        news-service/sports
+
+        news-service/sports; {"node": {"x-declare": {"exchange": "news-service", "exchange-type": "topic"}}}
+
+        news-service/sports; {"node": {"x-declare": {"exchange": "news-service", "exchange-type": "topic"}}, "link": {"x-declare": {"queue": "news-queue", "exclusive": false}}}
         """
         kv = address.split(";")
         options_string = kv[1] if len(kv) == 2 else "{}"
@@ -295,9 +323,38 @@ class Destination(object):
         self.subject = kv[1] if len(kv) == 2 else ""
         self.name = kv[0]
 
+        options = json.loads(options_string)
+
         #print(options_string)
+        #print(options)
         #print(self.subject)
         #print(self.name)
+
+        node = options.get("node")
+        if node:
+            x_declare = node.get("x-declare")
+            if x_declare and type(x_declare) == type(self.declare):
+                self.declare.update(x_declare)
+                # If node type is set then set queue or exchange name in
+                # declare if not already explicitly set in x-declare
+                if node.get("type") == "queue" and not self.declare.get("queue"):
+                    self.declare["queue"] = self.name
+                if node.get("type") == "topic" and not self.declare.get("exchange"):
+                    self.declare["exchange"] = self.name
+            # Can set durable on node as a shortcut if we don't need any
+            # other declare overrides. 
+            if node.get("durable"):
+                self.declare["durable"] = True
+            # If x-bindings set populate Destination's bindings
+            x_bindings = node.get("x-bindings")
+            if x_bindings and type(x_bindings) == type(self.bindings):
+                self.bindings = x_bindings
+
+        link = options.get("link")
+        if link:
+            x_declare = link.get("x-declare")
+            if x_declare and type(x_declare) == type(self.link_declare):
+                self.link_declare.update(x_declare)
 
 #-------------------------------------------------------------------------------
 
@@ -305,15 +362,17 @@ class Producer(Destination):
 
     def __init__(self, session, target):
         """
+        A client uses a Producer object to send messages to a destination.
         """
         super().__init__() # Call Destination constructor
 
-        session.connection.logger.info("Creating Producer with address {}".format(target))
+        session.connection.logger.info("Creating Producer with address: {}".format(target))
         self.session = session
 
-        self.parse_address(target)
-        #print(self.declare)
-        #print(self.bindings)
+        try:
+            self.parse_address(target)
+        except ValueError as e:
+            raise ProducerError("Failed to parse address: {} {}".format(target, e))
 
         # TODO Declare queue, exchange, bindings as necessary
 
@@ -324,15 +383,10 @@ class Producer(Destination):
             temp_channel.exchange_declare(self.name, passive=True)
             temp_channel.close()
         except pika.exceptions.ChannelClosedByBroker as e:
-            #print(e.reply_code)
-            #print(e.reply_text)
-            # If 404 NOT_FOUND the specified exchange doesn't exist. If no
-            # exchange declare options are present then assume default direct.
+            # If 404 NOT_FOUND the specified exchange doesn't exist.
             if e.reply_code == 404:
-                # TODO check for exchange declare options
-                #print("Assuming default direct!")
                 self.subject = self.name
-                self.name = ""
+                self.name = "" # Set exchange to default direct.
 
         #print("name = " + self.name)
         #print("subject = " + self.subject)
@@ -383,38 +437,74 @@ class Consumer(Destination):
 
     def __init__(self, session, source):
         """
+        A client uses a Consumer object to receive messages from a destination.
         """
         super().__init__() # Call Destination constructor
 
-        session.connection.logger.info("Creating Consumer with address {}".format(source))
+        session.connection.logger.info("Creating Consumer with address: {}".format(source))
         self.session = session
 
         # Set default capacity/message prefetch to 500
         self._capacity = 500
         self.session.channel.basic_qos(prefetch_count=self._capacity)
 
-        self.parse_address(source)
-        #print(self.declare)
-        #print(self.bindings)
+        try:
+            self.parse_address(source)
+        except ValueError as e:
+            raise ConsumerError("Failed to parse address: {} {}".format(source, e))
 
-        # Declare queue, exchange, bindings as necessary
+        # Check if an exchange with the name of this destination exists.
+        exchange = None
+        try:
+            # Use temporary channel as the channel gets closed on an exception.
+            temp_channel = self.session.connection.connection.channel()
+            temp_channel.exchange_declare(self.name, passive=True)
+            temp_channel.close()
+            exchange = self.name
+        except pika.exceptions.ChannelClosedByBroker as e:
+            if self.subject:
+                if self.name == self.declare.get("exchange"):
+                    exchange = self.name
+                else:
+                    raise ConsumerError(e.reply_text)
 
-        # exchange_declare(exchange, exchange_type='direct', passive=False, durable=False, auto_delete=False, internal=False, arguments=None, callback=None)
+        if exchange: # Is this address an exchange?
+            # Destination is an exchange, create subscription queue and
+            # add binding between exchange and queue with subject as key.
+            if self.declare.get("queue"): self.name = self.declare.get("queue")
+            elif self.link_declare.get("queue"): self.name = self.link_declare.get("queue")
+            else: self.name = str(uuid.uuid4())
+
+            if len(self.bindings) == 0:
+                self.bindings.append({"queue": self.name, "exchange": exchange,
+                                      "key": self.subject})
+
+        # Declare queue, exchange and bindings as necessary
+        if self.declare.get("exchange"):
+            # Exchange declare - unusual scenario for Consumer, but handle it.
+            self.session.channel.exchange_declare(exchange=self.declare["exchange"],
+                                                  exchange_type=self.declare["exchange-type"],
+                                                  passive=self.declare["passive"],
+                                                  durable=self.declare["durable"],
+                                                  auto_delete=self.declare["auto-delete"],
+                                                  arguments=self.declare["arguments"])
+        # Queue declare
+        declare = self.declare
+        if exchange and not self.declare.get("queue"): declare = self.link_declare
 
         self.session.channel.queue_declare(queue=self.name,
-                                           passive=self.declare["passive"],
-                                           durable=self.declare["durable"],
-                                           exclusive=self.declare["exclusive"],
-                                           auto_delete=self.declare["auto-delete"],
-                                           arguments=self.declare["arguments"])
-        #print("Bindings:")
+                                           passive=declare["passive"],
+                                           durable=declare["durable"],
+                                           exclusive=declare["exclusive"],
+                                           auto_delete=declare["auto-delete"],
+                                           arguments=declare["arguments"])
+
         for binding in self.bindings:
-            print(binding)
             if binding["exchange"] == "" : continue # Can't bind to default
             self.session.channel.queue_bind(queue=binding["queue"],
                                             exchange=binding["exchange"], 
-                                            routing_key=binding["key"],
-                                            arguments=binding["arguments"])
+                                            routing_key=binding.get("key"),
+                                            arguments=binding.get("arguments"))
 
     def set_message_listener(self, message_listener):
         """
@@ -446,9 +536,6 @@ class Consumer(Destination):
         """
         if hasattr(self, "_message_listener"):
             # Now call the registered message listener
-            #delivery_tag = method.delivery_tag
-            #print("***** Delivery tag = " + str(delivery_tag))
-
             message = Message(body, properties=properties.headers,
                               content_type = properties.content_type,
                               content_encoding = properties.content_encoding,
@@ -489,9 +576,12 @@ class Message(object):
                  message_id = None, timestamp = None, type = None,
                  user_id = None, app_id = None, cluster_id = None, subject = None):
         """
+        Provides an abstraction for messages comprising a body, application
+        properties and a set of headers used by the messaging fabric to identify
+        and route messages and provide additional metadata.
         """
         self.body = body
-        self.properties = properties # This holds the message header key/value pairs
+        self.properties = properties # Holds application property key/value pairs
 
         # Values below from:
         # pika.BasicProperties(delivery_mode=2)
@@ -535,7 +625,7 @@ class Message(object):
     def subject(self, subject):
         if subject:
             self.properties["x-amqp-0-9-1.subject"] = subject
-            print(self.properties)
+            #print(self.properties)
 
     def acknowledge(self):
         """
