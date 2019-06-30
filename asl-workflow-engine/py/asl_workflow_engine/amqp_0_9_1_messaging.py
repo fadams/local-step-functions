@@ -219,7 +219,7 @@ class Session(object):
         """
         return Producer(self, target)
 
-    def consumer(self, source):
+    def consumer(self, source=""):
         """
         Creates a Consumer used to fetch messages from the specified source.
         :param source: The source of messages
@@ -266,6 +266,7 @@ class Destination(object):
             node: {
                 type: queue | topic,
                 durable: True | False,
+                auto-delete: True | False,
                 x-declare: { ... <declare-overrides> ... },
                 x-bindings: [<binding_1>, ... <binding_n>]
             },
@@ -279,9 +280,9 @@ class Destination(object):
         }
 
         The node refers to the AMQP node e.g. a queue or exchange being referred
-        to in the address whereas the link allows configuration of a logical
+        to in the address, whereas the link allows configuration of a logical
         "subscriber queue" that will be created when the address node is an
-        exchange.
+        exchange such as, for example, news-service/sports.
 
         Bindings are specified as a map with the following options:
 
@@ -314,7 +315,7 @@ class Destination(object):
 
         news-service/sports; {"node": {"x-declare": {"exchange": "news-service", "exchange-type": "topic"}}}
 
-        news-service/sports; {"node": {"x-declare": {"exchange": "news-service", "exchange-type": "topic"}}, "link": {"x-declare": {"queue": "news-queue", "exclusive": false}}}
+        news-service/sports; {"node": {"x-declare": {"exchange": "news-service", "exchange-type": "topic", "auto-delete": true}}, "link": {"x-declare": {"queue": "news-queue", "exclusive": false}}}
         """
         kv = address.split(";")
         options_string = kv[1] if len(kv) == 2 else "{}"
@@ -341,10 +342,12 @@ class Destination(object):
                     self.declare["queue"] = self.name
                 if node.get("type") == "topic" and not self.declare.get("exchange"):
                     self.declare["exchange"] = self.name
-            # Can set durable on node as a shortcut if we don't need any
-            # other declare overrides. 
+            # Can set durable and auto-delete on node as a shortcut if we don't
+            # need any other declare overrides. 
             if node.get("durable"):
                 self.declare["durable"] = True
+            if node.get("auto-delete"):
+                self.declare["auto-delete"] = True
             # If x-bindings set populate Destination's bindings
             x_bindings = node.get("x-bindings")
             if x_bindings and type(x_bindings) == type(self.bindings):
@@ -374,8 +377,6 @@ class Producer(Destination):
         except ValueError as e:
             raise ProducerError("Failed to parse address: {} {}".format(target, e))
 
-        # TODO Declare queue, exchange, bindings as necessary
-
         # Check if an exchange with the name of this destination exists.
         try:
             # Use temporary channel as the channel gets closed on an exception.
@@ -385,11 +386,21 @@ class Producer(Destination):
         except pika.exceptions.ChannelClosedByBroker as e:
             # If 404 NOT_FOUND the specified exchange doesn't exist.
             if e.reply_code == 404:
-                self.subject = self.name
-                self.name = "" # Set exchange to default direct.
+                # If no exchange declared assume default direct exchange.
+                if self.name != self.declare.get("exchange"):
+                    self.subject = self.name
+                    self.name = "" # Set exchange to default direct.
 
-        #print("name = " + self.name)
-        #print("subject = " + self.subject)
+        if self.declare.get("exchange"):
+            # Exchange declare.
+            self.session.channel.exchange_declare(exchange=self.declare["exchange"],
+                                                  exchange_type=self.declare["exchange-type"],
+                                                  passive=self.declare["passive"],
+                                                  durable=self.declare["durable"],
+                                                  auto_delete=self.declare["auto-delete"],
+                                                  arguments=self.declare["arguments"])
+        print("name = " + self.name)
+        print("subject = " + self.subject)
 
     def send(self, message):
         """
