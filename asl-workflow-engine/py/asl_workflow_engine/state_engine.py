@@ -158,6 +158,9 @@ class StateEngine(object):
         """
         def asl_state_Pass():
             """
+            https://states-language.net/spec.html#pass-state
+            https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-pass-state.html
+
             The Pass State (identified by "Type":"Pass") simply passes its input
             to its output, performing no work. Pass States are useful when
             constructing and debugging state machines.
@@ -189,6 +192,9 @@ class StateEngine(object):
 
         def asl_state_Task():
             """
+            https://states-language.net/spec.html#task-state
+            https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-task-state.html
+
             The Task State (identified by "Type":"Task") causes the interpreter
             to execute the work identified by the state’s “Resource” field.
 
@@ -209,29 +215,52 @@ class StateEngine(object):
             then the interpreter fails the state with a States.Timeout Error Name.
             """
             print("TASK")
+            print(state)
             print(event)
 
             # TODO
 
-
-
-
             """
-            When processing has completed set the event's new current state in
-            $$.State.Name to the next state in the state machine then publish
-            the event and acknowledge the current event.
+            It's important for this function to be nested as we want the event,
+            state and id to be wrapped in its closure, to be used when the
+            task actually returns.
             """
-            if (state.get("End")):
-                print("** END OF STATE MACHINE**")
-                # TODO output results
-            else:
-                context["State"]["Name"] = state.get("Next")
-                self.event_dispatcher.publish(event)
+            def on_response(results):
+                print("----- TASK RESPONSE ----- id = " + str(id))
+                print(results)
+                """
+                When processing has completed set the event's new current state
+                in $$.State.Name to the next state in the state machine then
+                publish the event and acknowledge the current event.
+                """
+                if (state.get("End")):
+                    print("** END OF STATE MACHINE**")
+                    # TODO output results
+                else:
+                    context["State"]["Name"] = state.get("Next")
+                    self.event_dispatcher.publish(event)
 
-            self.event_dispatcher.acknowledge(id)
+                self.event_dispatcher.acknowledge(id)
+
+            resource = state.get("Resource")
+
+            # TODO input path processing.
+            """
+            https://states-language.net/spec.html#parameters
+
+            If the “Parameters” field is provided, its value, after the
+            extraction and embedding, becomes the effective input.
+            """
+            parameters = state.get("Parameters")
+
+            # TODO create a TaskDispatcher class.
+            self.event_dispatcher.execute_task(resource, parameters, on_response)
 
         def asl_state_Choice():
             """
+            https://states-language.net/spec.html#choice-state
+            https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-choice-state.html
+
             A Choice state (identified by "Type":"Choice") adds branching logic
             to a state machine.
             """
@@ -355,6 +384,9 @@ class StateEngine(object):
 
         def asl_state_Wait():
             """
+            https://states-language.net/spec.html#wait-state
+            https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-wait-state.html
+
             A Wait state (identified by "Type":"Wait") causes the interpreter
             to delay the machine from continuing for a specified time.
             """
@@ -363,7 +395,7 @@ class StateEngine(object):
 
             """
             It's important for this function to be nested as we want the event,
-            state and id to be wrapped in its closure to be used when the
+            state and id to be wrapped in its closure, to be used when the
             timeout actually fires.
             """
             def on_timeout():
@@ -422,6 +454,9 @@ class StateEngine(object):
      
         def asl_state_Succeed():
             """
+            https://states-language.net/spec.html#succeed-state
+            https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-succeed-state.html
+
             The Succeed State (identified by "Type":"Succeed") terminates a state
             machine successfully. The Succeed State is a useful target for Choice-
             state branches that don't do anything but terminate the machine.
@@ -436,6 +471,9 @@ class StateEngine(object):
 
         def asl_state_Fail():
             """
+            https://states-language.net/spec.html#fail-state
+            https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-fail-state.html
+
             The Fail State (identified by "Type":"Fail") terminates the machine
             and marks it as a failure.
     
@@ -454,6 +492,9 @@ class StateEngine(object):
 
         def asl_state_Parallel():
             """
+            https://states-language.net/spec.html#parallel-state
+            https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-parallel-state.html
+
             """
             # TODO
 

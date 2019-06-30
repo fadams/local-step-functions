@@ -165,3 +165,11 @@ class EventDispatcher(object):
         message = Message(json.dumps(item), content_type="application/json")
         self.producer.send(message)
 
+    def execute_task(self, resource, parameters, callback):
+        print("-------- Calling execute_task")
+
+        # TODO
+
+        results = {"result": "test results"}
+        callback(results)
+

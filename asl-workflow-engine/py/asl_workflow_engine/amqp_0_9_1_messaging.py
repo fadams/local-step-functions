@@ -399,8 +399,8 @@ class Producer(Destination):
                                                   durable=self.declare["durable"],
                                                   auto_delete=self.declare["auto-delete"],
                                                   arguments=self.declare["arguments"])
-        print("name = " + self.name)
-        print("subject = " + self.subject)
+        #print("name = " + self.name)
+        #print("subject = " + self.subject)
 
     def send(self, message):
         """
@@ -413,13 +413,14 @@ class Producer(Destination):
         Delivery mode 2 makes the broker save the message to disk.
         """
 
-        print("message.subject = " + str(message.subject))
+        #print("message.subject = " + str(message.subject))
+        
         # If message.subject is set use that as the routing_key, otherwise use
         # the Producer target default subject parsed from address string.
         routing_key = message.subject if message.subject else self.subject
 
-        print("exchange = " + self.name)
-        print("routing_key = " + routing_key)
+        #print("exchange = " + self.name)
+        #print("routing_key = " + routing_key)
 
         properties=pika.BasicProperties(headers=message.properties,
                                         content_type=message.content_type,
