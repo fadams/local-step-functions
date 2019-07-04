@@ -45,7 +45,7 @@ class Worker(threading.Thread):
         reply = {"reply": self.getName() + " reply"}
 
         """
-        Create the response message by reusing the request not that this
+        Create the response message by reusing the request note that this
         approach retains the correlation_id which is necessary. If a fresh
         Message instance is created we would need to get the correlation_id
         from the request Message and use that value in the response message.
@@ -54,6 +54,7 @@ class Worker(threading.Thread):
         message.reply_to = None
         message.body = json.dumps(reply)
         self.producer.send(message)
+        message.acknowledge() # Acknowledges the original request
 
     def run(self):
         # Connect to worker queue and process data.
@@ -75,7 +76,7 @@ class Worker(threading.Thread):
 
 if __name__ == '__main__':
     workers = ["SuccessLambda", "TimeoutLambda", "InternalErrorHandledLambda", "InternalErrorNotHandledLambda"]
-    workers = ["SuccessLambda"]
+    #workers = ["SuccessLambda"]
     for w in workers:
         worker = Worker(name = w)
         worker.start()

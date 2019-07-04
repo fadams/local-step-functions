@@ -82,12 +82,12 @@ $$.StateMachine.Id = a unique reference to an ASL state machine
 """
 context = '{"State": {"EnteredTime": "' + datetime.datetime.now().isoformat() + '", "Name": ""}, "StateMachine": {"Id": "arn:aws:states:local:1234:stateMachine:simple_state_machine1", "Value": ' + ASL + '}}'
 
-items = ['{"data": {"lambda":"Success", "result":"Woo Hoo!"}, "context": ' + context + '}',
+items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}',
          '{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}',
          '{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}',
          '{"data": {"lambda":"Timeout"}, "context": ' + context + '}']
 
-#items = ['{"data": {"lambda":"Success", "result":"Woo Hoo!"}, "context": ' + context + '}']
+#items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"Timeout"}, "context": ' + context + '}']

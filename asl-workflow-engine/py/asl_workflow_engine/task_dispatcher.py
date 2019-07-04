@@ -41,29 +41,24 @@ class TaskDispatcher(object):
         # TODO validate that config contains the keys we need.
 
         """
-        Some services that we have Task integrations with might be request/
+        Some services that we integrate Task States with might be request/
         response in the ASL sense, as in we would want to not move to the next
         state until the response has been received, but they might be async
-        in implementation terms such as the case for rpcmessage. This is
+        in implementation terms, such as the case for rpcmessage. This is
         conceptually RPC like so logically behaves like a Lambda call, but is
         implemented over a messaging fabric with queues.
+
         In order to deal with this we need to be able to associate requests
         with their subsequent responses, so this dictionary maps requests
         with their callbacks using correlation IDs.
         """
         self.unmatched_requests = {}
 
-    #def connect(self, connection): # TODO should be able to create multiple sessions
     def connect(self, session):
         """
-        Connect to the messaging fabric to enable "rpcmessage" Task types
-        as described in execute_task.
+        Connect to the messaging fabric to enable Task States to integrate with
+        "rpcmessage" based services as described in execute_task.
         """
-        #print(connection)
-
-        #session = connection.session()
-        #print(session)
-
         self.reply_to = session.consumer()
         self.reply_to.capacity = 100; # Enable consumer prefetch
         self.reply_to.set_message_listener(self.handle_response)
@@ -77,13 +72,21 @@ class TaskDispatcher(object):
         """
         This is a message listener receiving messages from the reply_to queue
         for this workflow engine instance.
+        TODO cater for the case where requests are sent but responses never
+        arrive, this scenario will cause self.unmatched_requests to "leak" as
+        correlation_id keys get added but not removed. This situation should be
+        improved as we add code to handle Task state "rainy day" scenarios such
+        as Timeouts etc. so park for now, but something to be aware of.
         """
-        print("-------- handle_response --------")
-        print(message)
-
         correlation_id = message.correlation_id
-        self.unmatched_requests[correlation_id](message.body)
-        del self.unmatched_requests[correlation_id]
+        requestor = self.unmatched_requests.get(correlation_id)
+        if requestor:
+            if callable(requestor): requestor(message.body)
+            del self.unmatched_requests[correlation_id]
+        else:
+            self.logger.info("Response {} has no matching requestor".format(message))
+
+        message.acknowledge()
 
     def execute_task(self, resource_arn, parameters, callback):
         # TODO this import should be handled by the "Connection Factory for the
@@ -146,8 +149,10 @@ class TaskDispatcher(object):
         an environment variable and the real ARN will be looked up from there.
         """
 
-        # If resource_arn starts with $ then attempt to look up its value from
-        # the environment, and if that fails return its original value.
+        """
+        If resource_arn starts with $ then attempt to look up its value from
+        the environment, and if that fails return its original value.
+        """
         if resource_arn.startswith("$"):
             resource_arn = os.environ.get(resource_arn[1:], resource_arn)
         # If resource_arn still starts with $ its value isn't in the environment
@@ -155,18 +160,15 @@ class TaskDispatcher(object):
             self.logger.error("Specified Task Resource {} is not available on the environment".format(resource_arn))
             # TODO Handle error as per https://states-language.net/spec.html#errors
 
-        print("-------- Calling TaskDispatcher execute_task")
+
         """
-        Given the required service from the resource ARN dynamically invoke the
+        Given the required service from the resource_arn dynamically invoke the
         appropriate service handler. The lambda provides a default handler. 
         """
-        #print(resource_arn)
-        #print(parameters)
-
         arn = parse_arn(resource_arn)
-        service = arn["service"]
-        resource_type = arn["resource_type"]
-        resource = arn["resource"]
+        service = arn["service"] # e.g. rpcmessage, fn, openfaas, lambda
+        resource_type = arn["resource_type"] # Should be function most times
+        resource = arn["resource"] # function-name
 
         """
         Define nested functions as handlers for each supported service type.
@@ -192,19 +194,22 @@ class TaskDispatcher(object):
             operation, however it is the correct thing to do:
             https://www.ietf.org/rfc/rfc4627.txt.
             """
-            print("asl_service_rpcmessage")
-            print(service)
-            print(resource_type)
-            print(resource)
+            #print("asl_service_rpcmessage")
+            #print(service)
+            #print(resource_type)
+            #print(resource)
+            #print(parameters)
+            # TODO deal with the case of delivering to a different broker.
 
+            # Associate response callback with this request via correlation ID
             correlation_id = str(uuid.uuid4())
             self.unmatched_requests[correlation_id] = callback
-            #message = Message(json.dumps(item), content_type="application/json")
-            message = Message("Hello Wembley", content_type="application/json",
+            message = Message(json.dumps(parameters), content_type="application/json",
                               subject=resource, reply_to=self.reply_to.name,
                               correlation_id=correlation_id)
-            print(message)
+            #print(message)
             self.producer.send(message)
+            # N.B. The service response message is handled by handle_response()
 
         #def asl_service_openfaas():
         #    print("asl_service_openfaas")

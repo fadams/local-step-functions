@@ -86,12 +86,12 @@ context = '{"State": {"EnteredTime": "' + datetime.datetime.now().isoformat() + 
 #print(context)
 #print("----------------------")
 
-items = ['{"data": {"lambda":"Success", "result":"Woo Hoo!"}, "context": ' + context + '}',
+items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}',
          '{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}',
          '{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}',
          '{"data": {"lambda":"Timeout"}, "context": ' + context + '}']
 
-items = ['{"data": {"lambda":"Success", "result":"Woo Hoo!"}, "context": ' + context + '}']
+#items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"Timeout"}, "context": ' + context + '}']

@@ -83,10 +83,10 @@ class EventDispatcher(object):
         try:
             connection.open()
             session = connection.session()
-            self.consumer = session.consumer(self.config["queue_name"])
-            self.consumer.capacity = 100; # Enable consumer prefetch
-            self.consumer.set_message_listener(self.dispatch)
-            self.producer = session.producer(self.config["queue_name"])
+            event_consumer = session.consumer(self.config["queue_name"])
+            event_consumer.capacity = 100; # Enable consumer prefetch
+            event_consumer.set_message_listener(self.dispatch)
+            self.event_producer = session.producer(self.config["queue_name"])
 
             """
             TODO Passing connection.set_timeout here is kind of ugly but I can't
@@ -100,11 +100,10 @@ class EventDispatcher(object):
             self.set_timeout = connection.set_timeout
 
             """
-            Share messaging connection with state_engine.task_dispatcher. This
+            Share messaging session with state_engine.task_dispatcher. This
             is to allow rpcmessage invocations that share the same message
             fabric instance as the event queue to reuse connections etc.
             """
-            #state_engine.task_dispatcher.connect(connection)
             state_engine.task_dispatcher.connect(session)
 
             connection.start(); # Blocks until event loop exits.
@@ -132,7 +131,6 @@ class EventDispatcher(object):
         Python has a string type and supports introspection, but there you go.
         """
         try:
-            #print(message.subject)
             item = json.loads(message.body.decode("utf8"))
             self.unacknowledged_messages[self.message_count] = message
             self.state_engine.notify(item, self.message_count)
@@ -145,8 +143,8 @@ class EventDispatcher(object):
             If state_engine.notify bombs out with an exception it is likely to
             be due to invalid data or the ASL not being handled correctly.
             It's hard to know the best course of action, but for now catch the
-            Exception, log error then acknowledge the message to prevent it
-            being endlessly redelivered.
+            Exception, log error then acknowledge the "poison" message to
+            prevent it from being endlessly redelivered.
             """
             self.logger.error("Message {} caused the exception: {}:{} - dropping the message!".format(message.body, type(e).__name__, str(e)))
             message.acknowledge()
@@ -175,5 +173,5 @@ class EventDispatcher(object):
         https://www.ietf.org/rfc/rfc4627.txt.
         """
         message = Message(json.dumps(item), content_type="application/json")
-        self.producer.send(message)
+        self.event_producer.send(message)
 

@@ -198,14 +198,6 @@ class StateEngine(object):
             https://states-language.net/spec.html#task-state
             https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-task-state.html
 
-            The Task State (identified by "Type":"Task") causes the interpreter
-            to execute the work identified by the state’s “Resource” field.
-
-            A Task State MUST include a “Resource” field, whose value MUST be a
-            URI that uniquely identifies the specific task to execute. The
-            States language does not constrain the URI scheme nor any other part
-            of the URI.
-
             Tasks can optionally specify timeouts. Timeouts (the “TimeoutSeconds”
             and “HeartbeatSeconds” fields) are specified in seconds and MUST be
             positive integers. If provided, the “HeartbeatSeconds” interval MUST
@@ -221,16 +213,17 @@ class StateEngine(object):
             print(state)
             print(event)
 
-            # TODO
+            # TODO handle InputPath processing
 
             """
             It's important for this function to be nested as we want the event,
             state and id to be wrapped in its closure, to be used when the
-            task actually returns.
+            service integrated to the Task *actually* returns its results.
             """
             def on_response(results):
                 print("----- TASK RESPONSE ----- id = " + str(id))
                 print(results)
+                # TODO OutputPath and ResultPath processing
                 """
                 When processing has completed set the event's new current state
                 in $$.State.Name to the next state in the state machine then
@@ -245,6 +238,15 @@ class StateEngine(object):
 
                 self.event_dispatcher.acknowledge(id)
 
+            """
+            The Task State (identified by "Type":"Task") causes the interpreter
+            to execute the work identified by the state’s “Resource” field.
+
+            A Task State MUST include a “Resource” field, whose value MUST be a
+            URI that uniquely identifies the specific task to execute. The
+            States language does not constrain the URI scheme nor any other part
+            of the URI.
+            """
             resource = state.get("Resource")
 
             # TODO input path processing.
@@ -255,7 +257,9 @@ class StateEngine(object):
             extraction and embedding, becomes the effective input.
             """
             parameters = state.get("Parameters")
+            parameters = parameters if parameters else data
 
+            print(parameters)
             self.task_dispatcher.execute_task(resource, parameters, on_response)
 
         def asl_state_Choice():
