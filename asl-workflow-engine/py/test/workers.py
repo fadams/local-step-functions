@@ -23,6 +23,7 @@
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
+import json
 import threading
 import time
 
@@ -39,6 +40,20 @@ class Worker(threading.Thread):
 
     def handler(self, message):
         print(self.getName() + " working")
+        print(message)
+
+        reply = {"reply": self.getName() + " reply"}
+
+        """
+        Create the response message by reusing the request not that this
+        approach retains the correlation_id which is necessary. If a fresh
+        Message instance is created we would need to get the correlation_id
+        from the request Message and use that value in the response message.
+        """
+        message.subject = message.reply_to
+        message.reply_to = None
+        message.body = json.dumps(reply)
+        self.producer.send(message)
 
     def run(self):
         # Connect to worker queue and process data.
@@ -49,6 +64,7 @@ class Worker(threading.Thread):
             self.consumer = session.consumer(self.getName() + '; {"node": {"auto-delete": true}}')
             self.consumer.capacity = 100; # Enable consumer prefetch
             self.consumer.set_message_listener(self.handler)
+            self.producer = session.producer()
 
             #self.set_timeout = connection.set_timeout
             connection.start(); # Blocks until event loop exits.

@@ -29,7 +29,7 @@ The AWS documentation describes the format of the context object here: https://d
 	},
 	"StateMachine": {
 		"Id": <String>,
-		"value": <Object representing ASL state machine>
+		"Value": <Object representing ASL state machine>
 	},
 	"Task": {
 		"Token": <String>
@@ -53,16 +53,16 @@ The [Paths](https://states-language.net/spec.html#paths) section of the ASL spec
 
 The `$$.State.Name` (i.e. the **current state**) field must contain either a state name valid in the ASL state machine being referred to in ASL, or null, or an empty string or be undefined. In the case of null or empty string or undefined it shall be assumed that the state transition will be to the ASL "StartAt" state.
 
-The (otional) `$$.StateMachine.value` field contains a complete ASL state machine as defined in the [Amazon States Language Specification](https://states-language.net/spec.html).
+The (otional) `$$.StateMachine.Value` field contains a complete ASL state machine as defined in the [Amazon States Language Specification](https://states-language.net/spec.html).
 
 The `$$.StateMachine.Id` field contains a unique reference to an ASL state machine.
 
-Either one or both of `$$.StateMachine.value` or 
+Either one or both of `$$.StateMachine.Value` or 
 `$$.StateMachine.Id` must be supplied.
 
 * If both are supplied the state engine will attempt to cache (and in later iterations persist) the ASL.
 * If only `$$.StateMachine.Id` is supplied the state engine will attempt to use a cached value and will fail if one is not present.
-* If only `$$.StateMachine.value` is present the state engine will used that, but will be unable to cache it.
+* If only `$$.StateMachine.Value` is present the state engine will used that, but will be unable to cache it.
 
 The format of `$$.StateMachine.Id` *may* simply be any unique ID, however ideally it *should* follow the pattern of [Amazon Resource Names (ARNs)](https://docs.aws.amazon.com/general/latest/gr/aws-arns-and-namespaces.html) and in particular *should* follow the stateMachine ARN form given in [syntax for Step Functions](https://docs.aws.amazon.com/general/latest/gr/aws-arns-and-namespaces.html#arn-syntax-step-functions) e.g.
 ```

@@ -16,9 +16,6 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-# Run with:
-# PYTHONPATH=.. python3 event_dispatcher.py
-#
 
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
@@ -32,7 +29,7 @@ class EventDispatcher(object):
         """
         :param logger: The Workflow Engine logger
         :type logger: logger
-        :param config: Event queue configuration dictionary
+        :param config: Configuration dictionary
         :type config: dict
         """
         self.logger = logger
@@ -101,6 +98,15 @@ class EventDispatcher(object):
             the event queue. This (hopefully temporary) approach is Pika specific.
             """
             self.set_timeout = connection.set_timeout
+
+            """
+            Share messaging connection with state_engine.task_dispatcher. This
+            is to allow rpcmessage invocations that share the same message
+            fabric instance as the event queue to reuse connections etc.
+            """
+            #state_engine.task_dispatcher.connect(connection)
+            state_engine.task_dispatcher.connect(session)
+
             connection.start(); # Blocks until event loop exits.
         except ConnectionError as e:
             self.logger.error(e)
@@ -126,17 +132,23 @@ class EventDispatcher(object):
         Python has a string type and supports introspection, but there you go.
         """
         try:
-            # TODO if state_engine.notify bombs out with an exception it is
-            # likely to be due to invalid data or ASL not being handled
-            # correctly. Should probably catch Exception, log error then
-            # acknowledge the message to prevent it being redelivered.
-            print(message.subject)
+            #print(message.subject)
             item = json.loads(message.body.decode("utf8"))
             self.unacknowledged_messages[self.message_count] = message
             self.state_engine.notify(item, self.message_count)
             self.message_count += 1
         except ValueError as e:
-            self.logger.info("Message {} does not contain valid JSON".format(message.body))
+            self.logger.error("Message {} does not contain valid JSON".format(message.body))
+            message.acknowledge()
+        except Exception as e:
+            """
+            If state_engine.notify bombs out with an exception it is likely to
+            be due to invalid data or the ASL not being handled correctly.
+            It's hard to know the best course of action, but for now catch the
+            Exception, log error then acknowledge the message to prevent it
+            being endlessly redelivered.
+            """
+            self.logger.error("Message {} caused the exception: {}:{} - dropping the message!".format(message.body, type(e).__name__, str(e)))
             message.acknowledge()
 
     def acknowledge(self, id):
@@ -164,12 +176,4 @@ class EventDispatcher(object):
         """
         message = Message(json.dumps(item), content_type="application/json")
         self.producer.send(message)
-
-    def execute_task(self, resource, parameters, callback):
-        print("-------- Calling execute_task")
-
-        # TODO
-
-        results = {"result": "test results"}
-        callback(results)
 

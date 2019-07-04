@@ -33,22 +33,22 @@
     },
     "InternalErrorNotHandledLambda": {
       "Type": "Task",
-      "Resource": "$INTERNAL_ERROR_NOT_HANDLED_LAMBDA_ARN",
+      "Resource": "arn:aws:rpcmessage:local::function:InternalErrorNotHandledLambda",
       "Next": "EndState"
     },
     "InternalErrorHandledLambda": {
       "Type": "Task",
-      "Resource": "$INTERNAL_ERROR_HANDLED_LAMBDA_ARN",
+      "Resource": "arn:aws:rpcmessage:local::function:InternalErrorHandledLambda",
       "Next": "EndState"
     },
     "SuccessLambda": {
       "Type": "Task",
-      "Resource": "$SUCCESS_LAMBDA_ARN",
+      "Resource": "arn:aws:rpcmessage:local::function:SuccessLambda",
       "Next": "WaitState"
     },
     "TimeoutLambda": {
       "Type": "Task",
-      "Resource": "$TIMEOUT_LAMBDA_ARN",
+      "Resource": "arn:aws:rpcmessage:local::function:TimeoutLambda",
       "Next": "EndState"
     },
     "FailState": {

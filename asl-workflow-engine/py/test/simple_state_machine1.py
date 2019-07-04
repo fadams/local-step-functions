@@ -45,7 +45,7 @@ from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.amqp_0_9_1_messaging import Connection, Message
 from asl_workflow_engine.exceptions import *
 
-ASL = '{"Comment": "Test Step Function","StartAt": "StartState","States": {"StartState": {"Type": "Pass","Next": "ChoiceState"},"ChoiceState": {"Type": "Choice","Choices": [{"Variable": "$.lambda","StringEquals": "InternalErrorNotHandled","Next": "InternalErrorNotHandledLambda"},{"Variable": "$.lambda","StringEquals": "InternalErrorHandled","Next": "InternalErrorHandledLambda"},{"Variable": "$.lambda","StringEquals": "Success","Next": "SuccessLambda"},{"Variable": "$.lambda","StringEquals": "Timeout","Next": "TimeoutLambda"}],"Default": "FailState"},"FailState": {"Type": "Fail","Error": "NoLambdaError","Cause": "No Matches!"},"SuccessLambda": {"Type": "Task","Resource": "$SUCCESS_LAMBDA_ARN","Next": "WaitState"},"InternalErrorNotHandledLambda": {"Type": "Task","Resource": "$INTERNAL_ERROR_NOT_HANDLED_LAMBDA_ARN","Next": "EndState"},"InternalErrorHandledLambda": {"Type": "Task","Resource": "$INTERNAL_ERROR_HANDLED_LAMBDA_ARN","Next": "EndState"},"TimeoutLambda": {"Type": "Task","Resource": "$TIMEOUT_LAMBDA_ARN","Next": "EndState"},"EndState": {"Type": "Pass","End": true},"WaitState": {"Type": "Wait","Seconds":10,"Next": "EndState"}}}'
+ASL = '{"Comment": "Test Step Function","StartAt": "StartState","States": {"StartState": {"Type": "Pass","Next": "ChoiceState"},"ChoiceState": {"Type": "Choice","Choices": [{"Variable": "$.lambda","StringEquals": "InternalErrorNotHandled","Next": "InternalErrorNotHandledLambda"},{"Variable": "$.lambda","StringEquals": "InternalErrorHandled","Next": "InternalErrorHandledLambda"},{"Variable": "$.lambda","StringEquals": "Success","Next": "SuccessLambda"},{"Variable": "$.lambda","StringEquals": "Timeout","Next": "TimeoutLambda"}],"Default": "FailState"},"FailState": {"Type": "Fail","Error": "NoLambdaError","Cause": "No Matches!"},"SuccessLambda": {"Type": "Task","Resource": "arn:aws:rpcmessage:local::function:SuccessLambda","Next": "WaitState"},"InternalErrorNotHandledLambda": {"Type": "Task","Resource": "arn:aws:rpcmessage:local::function:InternalErrorNotHandledLambda","Next": "EndState"},"InternalErrorHandledLambda": {"Type": "Task","Resource": "arn:aws:rpcmessage:local::function:InternalErrorHandledLambda","Next": "EndState"},"TimeoutLambda": {"Type": "Task","Resource": "arn:aws:rpcmessage:local::function:TimeoutLambda","Next": "EndState"},"EndState": {"Type": "Pass","End": true},"WaitState": {"Type": "Wait","Seconds":10,"Next": "EndState"}}}'
 
 
 """
@@ -68,7 +68,7 @@ https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.
     },
     "StateMachine": {
         "Id": <String>,
-        "value": <Object representing ASL state machine>
+        "Value": <Object representing ASL state machine>
     },
     "Task": {
         "Token": <String>
@@ -77,10 +77,10 @@ https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.
 
 The most important paths for state traversal are:
 $$.State.Name = the current state
-$$.StateMachine.value = (optional) contains the complete ASL state machine
+$$.StateMachine.Value = (optional) contains the complete ASL state machine
 $$.StateMachine.Id = a unique reference to an ASL state machine
 """
-context = '{"State": {"EnteredTime": "' + datetime.datetime.now().isoformat() + '", "Name": ""}, "StateMachine": {"Id": "arn:aws:states:local:1234:stateMachine:simple_state_machine1", "value": ' + ASL + '}}'
+context = '{"State": {"EnteredTime": "' + datetime.datetime.now().isoformat() + '", "Name": ""}, "StateMachine": {"Id": "arn:aws:states:local:1234:stateMachine:simple_state_machine1", "Value": ' + ASL + '}}'
 
 #print("----------------------")
 #print(context)
@@ -105,7 +105,7 @@ if __name__ == '__main__':
     try:
         connection.open()
         session = connection.session()
-        producer = session.producer("asl_workflow_events")
+        producer = session.producer("asl_workflow_events") # event queue
         for item in items:
             """
             Setting content_type isn't necessary for correct operation,

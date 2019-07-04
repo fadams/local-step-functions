@@ -28,7 +28,6 @@ reasonably abstracted from the underlying messaging fabric, so that it should
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import uuid
 import json
 
 # Tested using Pika 1.0.1, may not work correctly with earlier versions.
@@ -479,13 +478,14 @@ class Consumer(Destination):
                     exchange = self.name
                 else:
                     raise ConsumerError(e.reply_text)
+            # Otherwise we assume default direct exchange
 
         if exchange: # Is this address an exchange?
             # Destination is an exchange, create subscription queue and
             # add binding between exchange and queue with subject as key.
             if self.declare.get("queue"): self.name = self.declare.get("queue")
             elif self.link_declare.get("queue"): self.name = self.link_declare.get("queue")
-            else: self.name = str(uuid.uuid4())
+            else: self.name = ""
 
             if len(self.bindings) == 0:
                 self.bindings.append({"queue": self.name, "exchange": exchange,
@@ -503,13 +503,20 @@ class Consumer(Destination):
         # Queue declare
         declare = self.declare
         if exchange and not self.declare.get("queue"): declare = self.link_declare
+        if self.name == "": declare["auto-delete"] = True
 
-        self.session.channel.queue_declare(queue=self.name,
-                                           passive=declare["passive"],
-                                           durable=declare["durable"],
-                                           exclusive=declare["exclusive"],
-                                           auto_delete=declare["auto-delete"],
-                                           arguments=declare["arguments"])
+        result = self.session.channel.queue_declare(queue=self.name,
+                                                    passive=declare["passive"],
+                                                    durable=declare["durable"],
+                                                    exclusive=declare["exclusive"],
+                                                    auto_delete=declare["auto-delete"],
+                                                    arguments=declare["arguments"])
+        """
+        Get the queue name from the result of the queue_declare to deal with
+        the case of server created names when we pass queue="" to queue_declare
+        see https://www.rabbitmq.com/tutorials/tutorial-three-python.html
+        """
+        self.name = result.method.queue
 
         for binding in self.bindings:
             if binding["exchange"] == "" : continue # Can't bind to default
@@ -601,8 +608,6 @@ class Message(object):
         # https://stackoverflow.com/questions/18403623/rabbitmq-amqp-basicproperties-builder-values
         self.content_type = content_type
         self.content_encoding = content_encoding
-        #self.headers = None # same as self.properties
-        #self.delivery_mode = None # Probably use bool self.durable instead
         self.durable = durable
         self.priority = priority
         self.correlation_id = correlation_id
@@ -617,6 +622,22 @@ class Message(object):
 
         if self.properties == None: self.properties = {}
         self.subject = subject # Set subject *after* self.properties initialised.
+
+    def __repr__(self):
+        args = []
+        for name in ["content_type", "content_encoding", "priority",
+                     "message_id", "user_id", "app_id", "cluster_id",
+                     "reply_to", "correlation_id", "priority", "expiration",
+                     "durable", "properties"]:
+            value = self.__dict__[name]
+            if value is not None: args.append("%s=%r" % (name, value))
+        if self.subject: args.append("subject=%r" % self.subject)
+        if self.body is not None:
+            if args:
+                args.append("body=%r" % self.body)
+            else:
+                args.append(repr(self.body))
+        return "Message(%s)" % ", ".join(args)
 
     """
     Unlike AMQP 1.0 AMQP 0.9.1 doesn't have a Message subject, but it is a

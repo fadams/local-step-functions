@@ -26,6 +26,7 @@ import json
 # https://stackoverflow.com/questions/48629461/python-jsonpath-how-do-i-parse-with-jsonpath-correctly
 # Tested using jsonpath_rw 1.4.0
 from jsonpath_rw import parse # sudo pip3 install jsonpath_rw
+from asl_workflow_engine.task_dispatcher import TaskDispatcher
 
 class StateEngine(object):
 
@@ -53,6 +54,8 @@ class StateEngine(object):
         except ValueError as e:
             self.logger.error("StateEngine ASL Cache does not contain valid JSON")
             raise
+
+        self.task_dispatcher = TaskDispatcher(logger, config)
 
     def notify(self, event, id):
         """
@@ -84,7 +87,7 @@ class StateEngine(object):
 	        },
 	        "StateMachine": {
 		        "Id": <String>,
-		        "value": <Object representing ASL state machine>
+		        "Value": <Object representing ASL state machine>
 	        },
 	        "Task": {
 		        "Token": <String>
@@ -93,7 +96,7 @@ class StateEngine(object):
 
         The most important paths for state traversal are:
         $$.State.Name = the current state
-        $$.StateMachine.value = (optional) contains the complete ASL state machine
+        $$.StateMachine.Value = (optional) contains the complete ASL state machine
         $$.StateMachine.Id = a unique reference to an ASL state machine
         """
 
@@ -115,9 +118,9 @@ class StateEngine(object):
         if state_machine_id in self.asl_cache:
             print("Using cached ASL")
             ASL = self.asl_cache[state_machine_id]
-            state_machine["value"] = ASL
+            state_machine["Value"] = ASL
         else:
-            ASL = state_machine["value"]
+            ASL = state_machine["Value"]
             self.asl_cache[state_machine_id] = ASL
             try:
                 with open(self.asl_cache_file, 'w') as fp:
@@ -132,7 +135,7 @@ class StateEngine(object):
         as subsequent events only need to contain the ASL id, which should help
         keep the message size relatively modest.
         """
-        del state_machine["value"]
+        del state_machine["Value"]
 
         # Determine the current state from $$.State.Name.
         # TODO also set to ASL["StartAt"] if $$.State.Name is None or unset.
@@ -153,7 +156,7 @@ class StateEngine(object):
         Define nested functions as handlers for each supported ASL state type.
         Using nested functions so we can use the context extracted in notify.
 
-        That the methods are prefixed with "asl_state_" as a mitigation against
+        That the methods are prefixed with "asl_state_" is a mitigation against
         accidentally or deliberately placing an invalid State type in the ASL.
         """
         def asl_state_Pass():
@@ -253,8 +256,7 @@ class StateEngine(object):
             """
             parameters = state.get("Parameters")
 
-            # TODO create a TaskDispatcher class.
-            self.event_dispatcher.execute_task(resource, parameters, on_response)
+            self.task_dispatcher.execute_task(resource, parameters, on_response)
 
         def asl_state_Choice():
             """
