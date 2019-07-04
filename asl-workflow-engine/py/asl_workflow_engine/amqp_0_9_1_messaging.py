@@ -90,10 +90,20 @@ class Connection(object):
     def session(self, name=None, transactional=False):
         """
         Creates a Session object.
+
+        TODO add code so connection can store and retrieve sessions by name.
+        TODO with JMS calling createSession should create a Session instance
+        and each Session's Consumer MessageListener will run in a different
+        thread. Pika is single threaded and moreover generally not thread-safe
+        so to have similar behaviour it is (generally) necessary to have a
+        separate Pika *connection* per thread. We should threfore create a new
+        connection for each session, but for now only support a single Session
+        such that the first call to session() will create the Session and
+        subsequent calls will return that Session.
         """
-        # TODO add code so connection can store and retrieve sessions by name.
-        self.session = Session(self, name, transactional)
-        return self.session
+        if not hasattr(self, "_session"):
+            self._session = Session(self, name, transactional)
+        return self._session
 
     def set_timeout(self, callback, delay):
         """
@@ -133,9 +143,9 @@ class Connection(object):
         start_consuming call is a method on channel, but it blocks, so how to
         consume on other channels in that case??
         """
-        if hasattr(self, "session"):
+        if hasattr(self, "_session"):
             try:
-                self.session.channel.start_consuming()
+                self._session.channel.start_consuming()
             except pika.exceptions.ConnectionClosedByBroker as e:
                 raise ConnectionError(e)
 
