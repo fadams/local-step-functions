@@ -206,6 +206,14 @@ class Session(object):
         else:
             message.acknowledge()
 
+    def recover(self, requeue=False):
+        """
+        Restarts message delivery with the oldest unacknowledged message. 
+        This method asks the server to redeliver all unacknowledged messages on
+        a specified channel. Zero or more messages may be redelivered.
+        """
+        self.channel.basic_recover(requeue)
+
     def is_open(self): 
         """ 
         Return True if the session is open, False otherwise. 
@@ -568,6 +576,7 @@ class Consumer(Destination):
             message = Message(body, properties=properties.headers,
                               content_type = properties.content_type,
                               content_encoding = properties.content_encoding,
+                              redelivered = method.redelivered,
                               durable = (properties.delivery_mode == 2),
                               priority = properties.priority,
                               correlation_id = properties.correlation_id,
@@ -579,7 +588,6 @@ class Consumer(Destination):
                               user_id = properties.user_id,
                               app_id = properties.app_id,
                               cluster_id = properties.cluster_id)
-
             # These two private attributes are added to Message to enable
             # Message's acknowledge() methods
             message._channel = channel
@@ -599,11 +607,11 @@ class Consumer(Destination):
 
 class Message(object):
 
-    def __init__(self, body=None, properties=None, content_type = None,
-                 content_encoding = None, durable = True, priority = None,
-                 correlation_id = None, reply_to = None, expiration = None,
-                 message_id = None, timestamp = None, type = None,
-                 user_id = None, app_id = None, cluster_id = None, subject = None):
+    def __init__(self, body=None, properties=None, content_type=None,
+                 content_encoding=None, redelivered=False, durable=True,
+                 priority=None, correlation_id=None, reply_to=None,
+                 expiration=None, message_id=None, timestamp=None, type=None,
+                 user_id=None, app_id=None, cluster_id=None, subject=None):
         """
         Provides an abstraction for messages comprising a body, application
         properties and a set of headers used by the messaging fabric to identify
@@ -618,6 +626,7 @@ class Message(object):
         # https://stackoverflow.com/questions/18403623/rabbitmq-amqp-basicproperties-builder-values
         self.content_type = content_type
         self.content_encoding = content_encoding
+        self.redelivered = redelivered
         self.durable = durable
         self.priority = priority
         self.correlation_id = correlation_id
@@ -636,9 +645,9 @@ class Message(object):
     def __repr__(self):
         args = []
         for name in ["content_type", "content_encoding", "priority",
-                     "message_id", "user_id", "app_id", "cluster_id",
-                     "reply_to", "correlation_id", "priority", "expiration",
-                     "durable", "properties"]:
+                     "message_id", "type", "user_id", "app_id", "cluster_id",
+                     "reply_to", "correlation_id", "expiration", "timestamp",
+                     "redelivered", "durable", "properties"]:
             value = self.__dict__[name]
             if value is not None: args.append("%s=%r" % (name, value))
         if self.subject: args.append("subject=%r" % self.subject)
