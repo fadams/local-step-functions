@@ -20,13 +20,96 @@
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
+import re
 import json
 
-# https://github.com/kennknowles/python-jsonpath-rw
-# https://stackoverflow.com/questions/48629461/python-jsonpath-how-do-i-parse-with-jsonpath-correctly
-# Tested using jsonpath_rw 1.4.0
-from jsonpath_rw import parse # sudo pip3 install jsonpath_rw
+"""
+http://www.ultimate.com/phil/python/#jsonpath
+https://goessner.net/articles/JsonPath/
+Tested using jsonpath 0.82. Note jsponpath_rw was tried but doesn't seem to
+correctly support many of the test cases from the goessner link above
+"""
+from jsonpath import jsonpath # sudo pip3 install jsonpath
+
 from asl_workflow_engine.task_dispatcher import TaskDispatcher
+
+def apply_jsonpath(input, path="$"):
+    """
+    Performs the InputPath and OutputPath logic described in the ASL spec.
+    https://states-language.net/spec.html#filters
+    This is mostly just calling jsonpath() and applying the specified defaults.
+    """
+    if input == None or path == None: return {}
+    if path == "$": return input
+    result = jsonpath(input, path)
+    if result == False: return {}
+    if len(result) == 1: return result[0]
+    return result
+
+def apply_resultpath(input, result, path="$"):
+    """
+    Performs the ResultPath logic described in the ASL spec.
+    https://states-language.net/spec.html#filters
+
+    The value of “ResultPath” MUST be a Reference Path, which specifies the raw
+    input’s combination with or replacement by the state’s result.
+
+    The ResultPath field’s value is a Reference Path that specifies where to
+    place the result, relative to the raw input. If the input has a field which
+    matches the ResultPath value, then in the output, that field is discarded
+    and overwritten by the state output. Otherwise, a new field is created in
+    the state output.
+
+    If the value of of ResultPath is null, that means that the state’s own raw
+    output is discarded and its raw input becomes its result.
+    """
+
+    matches = re.findall(r"[^$.[\]]+", "$.ledgers.branch[0].pending.count")#path) # Regex to split the reference paths
+    print(matches)
+
+
+    #matches = re.findall(r"[^$.]+", "$.ledgers.branch[0].pending.count")#path) # Regex to split the reference paths
+    #print(matches)
+
+
+    def createNestedObject(target, keys, default):
+        nestedObject = target
+        if len(keys) == 1:
+            nestedObject[keys[0]] = default
+        else:
+            key = keys.pop(0)
+            print(key)
+            print(type(nestedObject))
+            print(isinstance(nestedObject, dict))
+            if (isinstance(nestedObject, dict)):
+                nestedObject[key] = createNestedObject(nestedObject.get(key, {}),
+                                                       keys, default)
+            elif (isinstance(nestedObject, list)):
+                print("Handle list")
+        return nestedObject
+
+    print("----------")
+    print(input)
+    print(result)
+    print(path)
+    print("++++++++++")
+
+    if input == None: input = {}
+    if path == None: return input
+    #if path == "$": return result
+
+    test = {
+        "ledgers": {
+            "branch": [{}]
+        }
+    }
+    print(test)
+
+    #no = createNestedObject({}, matches, result)
+    no = createNestedObject(test, matches, result)
+    print(no)
+
+
 
 class StateEngine(object):
 
@@ -99,9 +182,6 @@ class StateEngine(object):
         $$.StateMachine.Value = (optional) contains the complete ASL state machine
         $$.StateMachine.Id = a unique reference to an ASL state machine
         """
-
-        #print(event)
-
         context = event["context"]
         state_machine = context["StateMachine"]
 
@@ -141,12 +221,28 @@ class StateEngine(object):
         # TODO also set to ASL["StartAt"] if $$.State.Name is None or unset.
         current_state = context["State"]["Name"]
         current_state = ASL["StartAt"] if current_state == "" else current_state
-        
-        print("current_state = " + current_state)
-
         state = ASL["States"][current_state]
-        data = event["data"]
 
+        """
+        https://states-language.net/spec.html#data
+        https://docs.aws.amazon.com/step-functions/latest/dg/concepts-state-machine-data.html
+
+        The interpreter passes data between states to perform calculations or to
+        dynamically control the state machine’s flow. All such data MUST be
+        expressed in JSON.
+
+        When a state machine is started, the caller can provide an initial JSON
+        text as input, which is passed to the machine's start state as input. If
+        no input is provided, the default is an empty JSON object, {}. As each
+        state is executed, it receives a JSON text as input and can produce
+        arbitrary output, which MUST be a JSON text. When two states are linked
+        by a transition, the output from the first state is passed as input to
+        the second state. The output from the machine's terminal state is
+        treated as its output. 
+        """
+        data = event.get("data", {}) # Note default to empty JSON object
+
+        print("current_state = " + current_state)
         print("state = " + str(state))
         print("data = " + str(data))
         print(id)
@@ -167,7 +263,13 @@ class StateEngine(object):
             The Pass State (identified by "Type":"Pass") simply passes its input
             to its output, performing no work. Pass States are useful when
             constructing and debugging state machines.
-    
+            """
+            print(event)
+
+            input = apply_jsonpath(data, state.get("InputPath", "$"))
+            print(input)
+
+            """
             A Pass State MAY have a field named “Result”. If present, its value
             is treated as the output of a virtual task, and placed as prescribed
             by the “ResultPath” field, if any, to be passed on to the next state.
@@ -175,19 +277,22 @@ class StateEngine(object):
             neither “Result” nor “ResultPath” are provided, the Pass state
             copies its input through to its output.
             """
-            print("PASS")
-            #print(event)
-            # TODO process Result/ResultPath field
+            result = state.get("Result", input)
+            print(result)
 
-            """
-            When processing has completed set the event's new current state in
-            $$.State.Name to the next state in the state machine then publish
-            the event and acknowledge the current event.
-            """
+
+            output = apply_resultpath(input, result, state.get("ResultPath", "$"))
+
+            event["Data"] = apply_jsonpath(output, state.get("OutputPath", "$"))
+            print(event["Data"])
+
+            state["End"] = True # Temporary just to test jsonpath stuff
+
             if (state.get("End")):
                 print("** END OF STATE MACHINE**")
                 # TODO output results
             else:
+                # Set event's new current state in $$.State.Name to Next state.
                 context["State"]["Name"] = state.get("Next")
                 self.event_dispatcher.publish(event)
 
@@ -224,15 +329,12 @@ class StateEngine(object):
                 print("----- TASK RESPONSE ----- id = " + str(id))
                 print(results)
                 # TODO OutputPath and ResultPath processing
-                """
-                When processing has completed set the event's new current state
-                in $$.State.Name to the next state in the state machine then
-                publish the event and acknowledge the current event.
-                """
+
                 if (state.get("End")):
                     print("** END OF STATE MACHINE**")
                     # TODO output results
                 else:
+                    # Set event's new current state in $$.State.Name to Next state.
                     context["State"]["Name"] = state.get("Next")
                     self.event_dispatcher.publish(event)
 
@@ -280,13 +382,8 @@ class StateEngine(object):
                 variable_field = choice.get("Variable")
                 print("Variable field = " + str(variable_field))
 
-                json_tag_val = parse(variable_field).find(data)          
-                #print(json_tag_val)
-                variable =  json_tag_val[0].value
-
-                #const variable = choice.Variable && jp.value(this.input, choice.Variable);
-
-                print("Variable value = " + variable)
+                variable = jsonpath(data, variable_field)[0]
+                print("Variable value = " + str(variable))
 
                 next = choice.get("Next", True)
 
@@ -406,15 +503,12 @@ class StateEngine(object):
             """
             def on_timeout():
                 print("----- TIMEOUT ----- id = " + str(id))
-                """
-                When processing has completed set the event's new current state
-                in $$.State.Name to the next state in the state machine then
-                publish the event and acknowledge the current event.
-                """
+
                 if (state.get("End")):
                     print("** END OF STATE MACHINE**")
                     # TODO output results
                 else:
+                    # Set event's new current state in $$.State.Name to Next state.
                     context["State"]["Name"] = state.get("Next")
                     self.event_dispatcher.publish(event)
 
