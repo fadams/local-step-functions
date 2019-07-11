@@ -91,7 +91,7 @@ items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}',
          '{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}',
          '{"data": {"lambda":"Timeout"}, "context": ' + context + '}']
 
-items = ['{"data": {"lambda":"Success", "cats": ["persian", "siamese"]}, "context": ' + context + '}']
+#items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"Timeout"}, "context": ' + context + '}']

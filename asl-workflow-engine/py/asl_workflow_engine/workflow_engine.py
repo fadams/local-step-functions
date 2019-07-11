@@ -54,7 +54,7 @@ class WorkflowEngine(object):
         # Load the configuration file. TODO it probably makes sense to also add
         # a mechanism to override config values with values obtained from the
         # command line or environment variables, the latter being especially
-        # useful if we wand to deploy this application to Kubernetes.
+        # useful if we want to deploy this application to Kubernetes.
         try:
             with open(configuration_file, 'r') as fp:
                 config = json.load(fp)

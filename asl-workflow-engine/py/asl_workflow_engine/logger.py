@@ -38,6 +38,10 @@ def init_logging(log_name):
     :return: Logger to use
     """
     logger = logging.getLogger(log_name)
+
+    # If logger already has handlers just return it as it is already initialised
+    if logger.hasHandlers(): return logger
+
     logger.setLevel(logging.DEBUG)
 
     formatter = logging.Formatter('[%(asctime)s] %(levelname)-8s - %(name)-15s : %(message)s')

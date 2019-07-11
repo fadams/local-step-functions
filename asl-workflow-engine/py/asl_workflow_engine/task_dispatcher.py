@@ -81,8 +81,11 @@ class TaskDispatcher(object):
         correlation_id = message.correlation_id
         requestor = self.unmatched_requests.get(correlation_id)
         if requestor:
-            if callable(requestor): requestor(message.body)
-            del self.unmatched_requests[correlation_id]
+            try:
+                del self.unmatched_requests[correlation_id]
+                if callable(requestor): requestor(json.loads(message.body.decode("utf8")))
+            except ValueError as e:
+                self.logger.error("Response {} does not contain valid JSON".format(message.body))
         else:
             self.logger.info("Response {} has no matching requestor".format(message))
 

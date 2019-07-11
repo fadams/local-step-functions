@@ -46,7 +46,7 @@ class Worker(threading.Thread):
 
         """
         Create the response message by reusing the request note that this
-        approach retains the correlation_id which is necessary. If a fresh
+        approach retains the correlation_id, which is necessary. If a fresh
         Message instance is created we would need to get the correlation_id
         from the request Message and use that value in the response message.
         """
@@ -69,6 +69,7 @@ class Worker(threading.Thread):
 
             #self.set_timeout = connection.set_timeout
             connection.start(); # Blocks until event loop exits.
+
         except MessagingError as e:
             self.logger.error(e)
 

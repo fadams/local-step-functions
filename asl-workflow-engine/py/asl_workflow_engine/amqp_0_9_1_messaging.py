@@ -50,7 +50,6 @@ class Connection(object):
         """
         self.logger = init_logging(log_name="amqp_0_9_1_messaging")
         self.logger.info("Creating Connection with url: {}".format(url))
-    
         self.parameters = pika.URLParameters(url)
 
     def open(self, timeout=None):

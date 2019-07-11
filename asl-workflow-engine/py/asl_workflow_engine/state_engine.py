@@ -33,6 +33,9 @@ from jsonpath import jsonpath # sudo pip3 install jsonpath
 
 from asl_workflow_engine.task_dispatcher import TaskDispatcher
 
+class ResultPathMatchFailure(Exception):
+    pass
+
 def apply_jsonpath(input, path="$"):
     """
     Performs the InputPath and OutputPath logic described in the ASL spec.
@@ -63,53 +66,31 @@ def apply_resultpath(input, result, path="$"):
     If the value of of ResultPath is null, that means that the state’s own raw
     output is discarded and its raw input becomes its result.
     """
-
-    matches = re.findall(r"[^$.[\]]+", "$.ledgers.branch[0].pending.count")#path) # Regex to split the reference paths
-    print(matches)
-
-
-    #matches = re.findall(r"[^$.]+", "$.ledgers.branch[0].pending.count")#path) # Regex to split the reference paths
-    #print(matches)
-
-
-    def createNestedObject(target, keys, default):
-        nestedObject = target
-        if len(keys) == 1:
-            nestedObject[keys[0]] = default
+    def update_path(target, keys, default):
+        if len(keys) == 0: return default
+        key = keys.pop(0)
+        if (isinstance(target, list)):
+            try:
+                i = int(key)
+                target[i] = update_path(target[i], keys, default)
+            except (ValueError, IndexError) as e:
+                raise ResultPathMatchFailure(e)
+        elif (isinstance(target, dict)):
+            try:
+                int(key)
+                raise ResultPathMatchFailure("object index {} is not a valid key string".format(key))
+            except ValueError:
+                target[key] = update_path(target.get(key, {}), keys, default)
         else:
-            key = keys.pop(0)
-            print(key)
-            print(type(nestedObject))
-            print(isinstance(nestedObject, dict))
-            if (isinstance(nestedObject, dict)):
-                nestedObject[key] = createNestedObject(nestedObject.get(key, {}),
-                                                       keys, default)
-            elif (isinstance(nestedObject, list)):
-                print("Handle list")
-        return nestedObject
-
-    print("----------")
-    print(input)
-    print(result)
-    print(path)
-    print("++++++++++")
+            raise ResultPathMatchFailure("cannot use key {} to index a primitive type".format(key))
+        return target
 
     if input == None: input = {}
     if path == None: return input
-    #if path == "$": return result
+    if path == "$": return result
 
-    test = {
-        "ledgers": {
-            "branch": [{}]
-        }
-    }
-    print(test)
-
-    #no = createNestedObject({}, matches, result)
-    no = createNestedObject(test, matches, result)
-    print(no)
-
-
+    matches = re.findall(r"[^$.[\]]+", path) # Regex to split the reference paths
+    return update_path(input, matches, result)
 
 class StateEngine(object):
 
@@ -264,29 +245,25 @@ class StateEngine(object):
             to its output, performing no work. Pass States are useful when
             constructing and debugging state machines.
             """
-            print(event)
+            #print(event)
 
             input = apply_jsonpath(data, state.get("InputPath", "$"))
-            print(input)
+            # TODO implement Pass state Parameters
 
             """
             A Pass State MAY have a field named “Result”. If present, its value
             is treated as the output of a virtual task, and placed as prescribed
             by the “ResultPath” field, if any, to be passed on to the next state.
+
             If “Result” is not provided, the output is the input. Thus if neither
             neither “Result” nor “ResultPath” are provided, the Pass state
             copies its input through to its output.
             """
-            result = state.get("Result", input)
-            print(result)
+            result = state.get("Result", input) # Default is input as per spec.
 
-
+            # Pass state applies ResultPath to *effective* input not raw input
             output = apply_resultpath(input, result, state.get("ResultPath", "$"))
-
-            event["Data"] = apply_jsonpath(output, state.get("OutputPath", "$"))
-            print(event["Data"])
-
-            state["End"] = True # Temporary just to test jsonpath stuff
+            event["data"] = apply_jsonpath(output, state.get("OutputPath", "$"))
 
             if (state.get("End")):
                 print("** END OF STATE MACHINE**")
@@ -303,6 +280,7 @@ class StateEngine(object):
             https://states-language.net/spec.html#task-state
             https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-task-state.html
 
+            TODO Timeouts & Hearbeats:
             Tasks can optionally specify timeouts. Timeouts (the “TimeoutSeconds”
             and “HeartbeatSeconds” fields) are specified in seconds and MUST be
             positive integers. If provided, the “HeartbeatSeconds” interval MUST
@@ -318,27 +296,31 @@ class StateEngine(object):
             print(state)
             print(event)
 
-            # TODO handle InputPath processing
-
             """
             It's important for this function to be nested as we want the event,
             state and id to be wrapped in its closure, to be used when the
-            service integrated to the Task *actually* returns its results.
+            service integrated to the Task *actually* returns its result.
             """
-            def on_response(results):
+            def on_response(result):
                 print("----- TASK RESPONSE ----- id = " + str(id))
-                print(results)
-                # TODO OutputPath and ResultPath processing
+                print(result)
+
+                # Task state applies ResultPath to "raw input"
+                output = apply_resultpath(data, result, state.get("ResultPath", "$"))
+                event["data"] = apply_jsonpath(output, state.get("OutputPath", "$"))
 
                 if (state.get("End")):
                     print("** END OF STATE MACHINE**")
-                    # TODO output results
+                    # TODO output result
                 else:
                     # Set event's new current state in $$.State.Name to Next state.
                     context["State"]["Name"] = state.get("Next")
                     self.event_dispatcher.publish(event)
 
                 self.event_dispatcher.acknowledge(id)
+
+
+            input = apply_jsonpath(data, state.get("InputPath", "$"))
 
             """
             The Task State (identified by "Type":"Task") causes the interpreter
@@ -351,15 +333,15 @@ class StateEngine(object):
             """
             resource = state.get("Resource")
 
-            # TODO input path processing.
             """
+            TODO implement parameters correctly
             https://states-language.net/spec.html#parameters
 
             If the “Parameters” field is provided, its value, after the
             extraction and embedding, becomes the effective input.
             """
             parameters = state.get("Parameters")
-            parameters = parameters if parameters else data
+            parameters = parameters if parameters else input
 
             print(parameters)
             self.task_dispatcher.execute_task(resource, parameters, on_response)
