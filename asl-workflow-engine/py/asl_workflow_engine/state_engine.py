@@ -105,7 +105,7 @@ class StateEngine(object):
         Holds a cache of ASL objects keyed by ASLRef which represents the ARN
         of the ASL State Machine. TODO eventually the ASL should be stored in
         a key/value database of some sort, but for now we'll use a dictionary
-        as a cache and store in a JSON file (TODO as well, but less TODO...)
+        as a cache and store in a JSON file.
         """
         self.asl_cache_file = self.config["asl_cache"]
         print("self.asl_cache_file = " + self.asl_cache_file)
@@ -173,15 +173,14 @@ class StateEngine(object):
         awry if multiple instances of the ASL Workflow Engine get started, as
         there is no file locking or any other concurrency protection.
         """
-        state_machine_id = state_machine["Id"]
+        state_machine_id = state_machine.get("Id")
+        ASL = state_machine.get("Value")
         print(state_machine_id)
 
-        if state_machine_id in self.asl_cache:
+        if ASL == None and state_machine_id in self.asl_cache:
             print("Using cached ASL")
-            ASL = self.asl_cache[state_machine_id]
-            state_machine["Value"] = ASL
+            ASL = self.asl_cache.get(state_machine_id)
         else:
-            ASL = state_machine["Value"]
             self.asl_cache[state_machine_id] = ASL
             try:
                 with open(self.asl_cache_file, 'w') as fp:
@@ -189,14 +188,14 @@ class StateEngine(object):
                 self.logger.info("Creating ASL Cache: {}".format(self.asl_cache_file))
             except IOError as e:
                 raise
-
+            
         """
         After the first state in the state machine has been processed the ASL
         should be cached, so if it was passed in the context it may be deleted
         as subsequent events only need to contain the ASL id, which should help
         keep the message size relatively modest.
         """
-        del state_machine["Value"]
+        if "Value" in state_machine: del state_machine["Value"]
 
         # Determine the current state from $$.State.Name.
         # TODO also set to ASL["StartAt"] if $$.State.Name is None or unset.

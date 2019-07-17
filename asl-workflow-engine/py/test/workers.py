@@ -76,7 +76,7 @@ class Worker(threading.Thread):
         connection.close();
 
 if __name__ == '__main__':
-    workers = ["SuccessLambda", "TimeoutLambda", "InternalErrorHandledLambda", "InternalErrorNotHandledLambda"]
+    workers = ["SuccessLambda", "TimeoutLambda", "InternalErrorHandledLambda", "InternalErrorNotHandledLambda", "mime-id",]
     #workers = ["SuccessLambda"]
     for w in workers:
         worker = Worker(name = w)

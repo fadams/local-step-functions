@@ -1,0 +1,17 @@
+{
+  "Comment": "A Simple step function to perform MIME ID followed by untar",
+  "StartAt": "MimeID",
+  "States": {
+    "MimeID": {
+      "Type": "Task",
+      "Resource": "arn:aws:rpcmessage:local::function:mime-id",
+      "ResultPath": null,
+      "Next": "BsdtarUnzip"
+    },
+    "BsdtarUnzip": {
+      "Type": "Task",
+      "Resource": "arn:aws:rpcmessage:local::function:bsdtar-unzip",
+      "End": true
+    }
+  }
+}
