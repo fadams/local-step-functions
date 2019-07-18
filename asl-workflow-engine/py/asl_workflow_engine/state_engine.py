@@ -24,8 +24,9 @@ import re
 import json
 
 """
-http://www.ultimate.com/phil/python/#jsonpath
+ASL paths use JSONPath
 https://goessner.net/articles/JsonPath/
+http://www.ultimate.com/phil/python/#jsonpath
 Tested using jsonpath 0.82. Note jsponpath_rw was tried but doesn't seem to
 correctly support many of the test cases from the goessner link above
 """
@@ -33,7 +34,13 @@ from jsonpath import jsonpath # sudo pip3 install jsonpath
 
 from asl_workflow_engine.task_dispatcher import TaskDispatcher
 
+class NoChoiceMatched(Exception):
+    pass
+
 class ResultPathMatchFailure(Exception):
+    pass
+
+class ParameterPathFailure(Exception):
     pass
 
 def apply_jsonpath(input, path="$"):
@@ -91,6 +98,88 @@ def apply_resultpath(input, result, path="$"):
 
     matches = re.findall(r"[^$.[\]]+", path) # Regex to split the reference paths
     return update_path(input, matches, result)
+
+def evaluate_parameters(source, input, context):
+    """
+    https://states-language.net/spec.html#parameters
+    The value of “Parameters” after processing becomes the effective input.
+
+    If any JSON object within the value of Parameters (however deeply nested)
+    has a field whose name ends with the characters “.$”, its value MUST begin
+    with a "$".
+
+    If the value begins with “$$”, the first dollar sign is stripped and the
+    remainder MUST be a PATH. In this case, the Path is applied to the Context
+    Object and the result is called the Extracted Value.
+
+    If the value begins with only one “$”, the value MUST be a path. In this
+    case, the Path is applied to the effective input and the result is called
+    the Extracted Value.
+
+    If the path is legal but cannot be applied successfully the Interpreter
+    fails the execution with an Error Name of “States.ParameterPathFailure”.
+
+    When a field name ends with “.$” and its value can be used to generate an
+    Extracted Value as described above, the field is replaced within the
+    Parameters value by another field whose name is the original name minus the
+    “.$” suffix, and whose value is the Extracted Value.
+
+    This implementation extends the ASL specification a little as it also
+    supports replacement of JSON array values such that for [0, 1, "$.map.c.$"]
+    the third item would be replaced by the result of applying the JSONpath of
+    $.map.c to the input.
+    """
+
+    def evaluate(k, v=None):
+        """
+        Evaluate and expand fields whose name ends with “.$” as described above
+        """
+        if isinstance(k, str) and k.endswith(".$"):
+            k = k[:-2] # strip ".$" from end
+            v_is_path = True
+        else: v_is_path = False
+
+        if v: is_tuple = True
+        else:
+            v = k
+            is_tuple = False
+
+        if v_is_path:
+            if not v.startswith("$"):
+                raise ParameterPathFailure("{} must be a JSONPath".format(v))
+            if v.startswith("$$"): # Use Context object, not input
+                v = v[1:] # Strip leading "$" from context path
+                v = apply_jsonpath(context, v)
+            else: v = apply_jsonpath(input, v)
+
+        if is_tuple: return k, v
+        else: return v
+
+    def clone(source):
+        """
+        Recursively crawl the JSON source item creating a clone of its structure
+        but evaluating and expanding fields whose name ends with “.$”
+        """
+        if isinstance(source, list):
+            target = []
+            for item in source:
+                if isinstance(item, (dict, list)):
+                    target.append(clone(item))
+                else:
+                    target.append(evaluate(item))
+        elif isinstance(source, dict):
+            target = {}
+            for k, v in source.items():
+                if isinstance(v, (dict, list)):
+                    target[k] = clone(v)
+                else:
+                    k, v = evaluate(k, v)
+                    target[k] = v
+        return target
+
+    if not source: return input
+    return clone(source)
+
 
 class StateEngine(object):
 
@@ -248,6 +337,15 @@ class StateEngine(object):
 
             input = apply_jsonpath(data, state.get("InputPath", "$"))
             # TODO implement Pass state Parameters
+            """
+            https://states-language.net/spec.html#parameters
+
+            If the “Parameters” field is provided, its value, after the
+            extraction and embedding, becomes the effective input.
+            """
+            parameters = evaluate_parameters(state.get("Parameters"), input, context)
+
+            print(parameters)
 
             """
             A Pass State MAY have a field named “Result”. If present, its value
@@ -258,7 +356,7 @@ class StateEngine(object):
             neither “Result” nor “ResultPath” are provided, the Pass state
             copies its input through to its output.
             """
-            result = state.get("Result", input) # Default is input as per spec.
+            result = state.get("Result", parameters) # Default is effective input as per spec.
 
             # Pass state applies ResultPath to *effective* input not raw input
             output = apply_resultpath(input, result, state.get("ResultPath", "$"))
@@ -333,14 +431,12 @@ class StateEngine(object):
             resource = state.get("Resource")
 
             """
-            TODO implement parameters correctly
             https://states-language.net/spec.html#parameters
 
             If the “Parameters” field is provided, its value, after the
             extraction and embedding, becomes the effective input.
             """
-            parameters = state.get("Parameters")
-            parameters = parameters if parameters else input
+            parameters = evaluate_parameters(state.get("Parameters"), input, context)
 
             print(parameters)
             self.task_dispatcher.execute_task(resource, parameters, on_response)
