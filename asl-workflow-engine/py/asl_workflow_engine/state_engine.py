@@ -99,7 +99,7 @@ def apply_resultpath(input, result, path="$"):
     matches = re.findall(r"[^$.[\]]+", path) # Regex to split the reference paths
     return update_path(input, matches, result)
 
-def evaluate_parameters(source, input, context):
+def evaluate_parameters(input, context, parameters):
     """
     https://states-language.net/spec.html#parameters
     The value of “Parameters” after processing becomes the effective input.
@@ -155,21 +155,21 @@ def evaluate_parameters(source, input, context):
         if is_tuple: return k, v
         else: return v
 
-    def clone(source):
+    def clone(parameters):
         """
-        Recursively crawl the JSON source item creating a clone of its structure
-        but evaluating and expanding fields whose name ends with “.$”
+        Recursively crawl the source JSON parameters creating a clone of its
+        structure but evaluating and expanding fields whose name ends with “.$”
         """
-        if isinstance(source, list):
+        if isinstance(parameters, list):
             target = []
-            for item in source:
+            for item in parameters:
                 if isinstance(item, (dict, list)):
                     target.append(clone(item))
                 else:
                     target.append(evaluate(item))
-        elif isinstance(source, dict):
+        elif isinstance(parameters, dict):
             target = {}
-            for k, v in source.items():
+            for k, v in parameters.items():
                 if isinstance(v, (dict, list)):
                     target[k] = clone(v)
                 else:
@@ -177,8 +177,8 @@ def evaluate_parameters(source, input, context):
                     target[k] = v
         return target
 
-    if not source: return input
-    return clone(source)
+    if not parameters: return input
+    return clone(parameters)
 
 
 class StateEngine(object):
@@ -336,15 +336,14 @@ class StateEngine(object):
             #print(event)
 
             input = apply_jsonpath(data, state.get("InputPath", "$"))
-            # TODO implement Pass state Parameters
+
             """
             https://states-language.net/spec.html#parameters
 
             If the “Parameters” field is provided, its value, after the
             extraction and embedding, becomes the effective input.
             """
-            parameters = evaluate_parameters(state.get("Parameters"), input, context)
-
+            parameters = evaluate_parameters(input, context, state.get("Parameters"))
             print(parameters)
 
             """
@@ -358,8 +357,8 @@ class StateEngine(object):
             """
             result = state.get("Result", parameters) # Default is effective input as per spec.
 
-            # Pass state applies ResultPath to *effective* input not raw input
-            output = apply_resultpath(input, result, state.get("ResultPath", "$"))
+            # Pass state applies ResultPath to "raw input"
+            output = apply_resultpath(data, result, state.get("ResultPath", "$"))
             event["data"] = apply_jsonpath(output, state.get("OutputPath", "$"))
 
             if (state.get("End")):
@@ -436,7 +435,7 @@ class StateEngine(object):
             If the “Parameters” field is provided, its value, after the
             extraction and embedding, becomes the effective input.
             """
-            parameters = evaluate_parameters(state.get("Parameters"), input, context)
+            parameters = evaluate_parameters(input, context, state.get("Parameters"))
 
             print(parameters)
             self.task_dispatcher.execute_task(resource, parameters, on_response)
