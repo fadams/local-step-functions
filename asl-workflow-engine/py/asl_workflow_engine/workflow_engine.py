@@ -21,9 +21,9 @@
 #
 """
 This is the main application entry point to the ASL Workflow Engine.
-This class reads the JSON configuration file config.json and stores the
-config object for the rest of the application to use, it then creates and starts
-an EventDispatcher.
+This class reads the JSON configuration file config.json and stores the config
+object for the rest of the application to use, it then creates and starts an
+StateEngine and EventDispatcher.
 
 TODO start a Web Server to handle AWS CLI/SDK REST API invocations for Step
 Functions and any other infrastructure services needed to manage ASL state
