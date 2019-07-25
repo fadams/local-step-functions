@@ -36,8 +36,6 @@ def create_arn(resource="", arn="arn", partition="aws", service="", region="", a
         resource = resource_type + ":" + resource 
     return "{}:{}:{}:{}:{}:{}".format(arn, partition, service, region, account, resource)
 
-#delivery_mode=2 if message.durable else 1
-
 def parse_arn(arn):
     """
     Parse an ARN into a dictionary comprising the component parts of the ARN

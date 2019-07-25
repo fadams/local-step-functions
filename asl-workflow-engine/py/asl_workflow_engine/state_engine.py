@@ -20,195 +20,98 @@
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import re
 import json
+import time
 
-"""
-ASL paths use JSONPath
-https://goessner.net/articles/JsonPath/
-http://www.ultimate.com/phil/python/#jsonpath
-Tested using jsonpath 0.82. Note jsponpath_rw was tried but doesn't seem to
-correctly support many of the test cases from the goessner link above
-"""
-from jsonpath import jsonpath # sudo pip3 install jsonpath
+from asl_workflow_engine.state_engine_paths import apply_jsonpath, \
+                                                   apply_resultpath, \
+                                                   evaluate_parameters
 
+from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.task_dispatcher import TaskDispatcher
 
-class NoChoiceMatched(Exception):
-    pass
+from asl_workflow_engine.asl_exceptions import *
+from asl_workflow_engine.arn import *
 
-class ResultPathMatchFailure(Exception):
-    pass
 
-class ParameterPathFailure(Exception):
-    pass
 
-def apply_jsonpath(input, path="$"):
-    """
-    Performs the InputPath and OutputPath logic described in the ASL spec.
-    https://states-language.net/spec.html#filters
-    This is mostly just calling jsonpath() and applying the specified defaults.
-    """
-    if input == None or path == None: return {}
-    if path == "$": return input
-    result = jsonpath(input, path)
-    if result == False: return {}
-    if len(result) == 1: return result[0]
-    return result
 
-def apply_resultpath(input, result, path="$"):
-    """
-    Performs the ResultPath logic described in the ASL spec.
-    https://states-language.net/spec.html#filters
 
-    The value of “ResultPath” MUST be a Reference Path, which specifies the raw
-    input’s combination with or replacement by the state’s result.
+import collections
 
-    The ResultPath field’s value is a Reference Path that specifies where to
-    place the result, relative to the raw input. If the input has a field which
-    matches the ResultPath value, then in the output, that field is discarded
-    and overwritten by the state output. Otherwise, a new field is created in
-    the state output.
+"""
+This class implements dict semantics, but uses a messaging fabric to replicate
+CRUD operations across instances and stores to a "transaction log" on the
+master instance in order to persist any required changes.
 
-    If the value of of ResultPath is null, that means that the state’s own raw
-    output is discarded and its raw input becomes its result.
-    """
-    def update_path(target, keys, default):
-        if len(keys) == 0: return default
-        key = keys.pop(0)
-        if (isinstance(target, list)):
-            try:
-                i = int(key)
-                target[i] = update_path(target[i], keys, default)
-            except (ValueError, IndexError) as e:
-                raise ResultPathMatchFailure(e)
-        elif (isinstance(target, dict)):
-            try:
-                int(key)
-                raise ResultPathMatchFailure("object index {} is not a valid key string".format(key))
-            except ValueError:
-                target[key] = update_path(target.get(key, {}), keys, default)
-        else:
-            raise ResultPathMatchFailure("cannot use key {} to index a primitive type".format(key))
-        return target
+https://stackoverflow.com/questions/3387691/how-to-perfectly-override-a-dict
 
-    if input == None: input = {}
-    if path == None: return input
-    if path == "$": return result
+TODO focussing on storage ATM need to look at replication stuff soon.
+"""
+class ReplicatedDict(collections.MutableMapping):
+    def __init__(self, config, *args, **kwargs):
+        self.logger = init_logging(log_name='asl_workflow_engine')
+        self.logger.info("Creating ReplicatedDict")
 
-    matches = re.findall(r"[^$.[\]]+", path) # Regex to split the reference paths
-    return update_path(input, matches, result)
+        self.asl_cache_file = config["asl_cache"]
+        print("self.asl_cache_file = " + self.asl_cache_file)
 
-def evaluate_parameters(input, context, parameters):
-    """
-    https://states-language.net/spec.html#parameters
-    The value of “Parameters” after processing becomes the effective input.
+        try:
+            with open(self.asl_cache_file, 'r') as fp:
+                self.store = json.load(fp)
+            self.logger.info("ReplicatedDict loading: {}".format(self.asl_cache_file))
+        except IOError as e:
+            self.store = {}
+        except ValueError as e:
+            self.logger.error("ReplicatedDict {} does not contain valid JSON".format(self.asl_cache_file))
+            raise
 
-    If any JSON object within the value of Parameters (however deeply nested)
-    has a field whose name ends with the characters “.$”, its value MUST begin
-    with a "$".
+        #self.store = dict()
+        #self.update(dict(*args, **kwargs))  # use the free update to set keys
 
-    If the value begins with “$$”, the first dollar sign is stripped and the
-    remainder MUST be a PATH. In this case, the Path is applied to the Context
-    Object and the result is called the Extracted Value.
+    def __str__(self):
+        return str(self.store)
 
-    If the value begins with only one “$”, the value MUST be a path. In this
-    case, the Path is applied to the effective input and the result is called
-    the Extracted Value.
+    def __getitem__(self, key):
+        return self.store[key]
 
-    If the path is legal but cannot be applied successfully the Interpreter
-    fails the execution with an Error Name of “States.ParameterPathFailure”.
+    def __setitem__(self, key, value):
+        self.store[key] = value
+        try:
+            with open(self.asl_cache_file, 'w') as fp:
+                json.dump(self.store, fp)
+            self.logger.info("Updating ReplicatedDict: {}".format(self.asl_cache_file))
+        except IOError as e:
+            raise
 
-    When a field name ends with “.$” and its value can be used to generate an
-    Extracted Value as described above, the field is replaced within the
-    Parameters value by another field whose name is the original name minus the
-    “.$” suffix, and whose value is the Extracted Value.
+    def __delitem__(self, key):
+        del self.store[key]
 
-    This implementation extends the ASL specification a little as it also
-    supports replacement of JSON array values such that for [0, 1, "$.map.c.$"]
-    the third item would be replaced by the result of applying the JSONpath of
-    $.map.c to the input.
-    """
+    def __iter__(self):
+        return iter(self.store)
 
-    def evaluate(k, v=None):
-        """
-        Evaluate and expand fields whose name ends with “.$” as described above
-        """
-        if isinstance(k, str) and k.endswith(".$"):
-            k = k[:-2] # strip ".$" from end
-            v_is_path = True
-        else: v_is_path = False
+    def __len__(self):
+        return len(self.store)
 
-        if v: is_tuple = True
-        else:
-            v = k
-            is_tuple = False
 
-        if v_is_path:
-            if not v.startswith("$"):
-                raise ParameterPathFailure("{} must be a JSONPath".format(v))
-            if v.startswith("$$"): # Use Context object, not input
-                v = v[1:] # Strip leading "$" from context path
-                v = apply_jsonpath(context, v)
-            else: v = apply_jsonpath(input, v)
 
-        if is_tuple: return k, v
-        else: return v
-
-    def clone(parameters):
-        """
-        Recursively crawl the source JSON parameters creating a clone of its
-        structure but evaluating and expanding fields whose name ends with “.$”
-        """
-        if isinstance(parameters, list):
-            target = []
-            for item in parameters:
-                if isinstance(item, (dict, list)):
-                    target.append(clone(item))
-                else:
-                    target.append(evaluate(item))
-        elif isinstance(parameters, dict):
-            target = {}
-            for k, v in parameters.items():
-                if isinstance(v, (dict, list)):
-                    target[k] = clone(v)
-                else:
-                    k, v = evaluate(k, v)
-                    target[k] = v
-        return target
-
-    if not parameters: return input
-    return clone(parameters)
 
 
 class StateEngine(object):
 
-    def __init__(self, logger, config):
+    def __init__(self, config):
         """
         """
-        self.logger = logger
+        self.logger = init_logging(log_name='asl_workflow_engine')
         self.logger.info("Creating StateEngine")
-        self.config = config["state_engine"] # TODO Handle missing config
 
         """
-        Holds a cache of ASL objects keyed by ASLRef which represents the ARN
-        of the ASL State Machine. TODO eventually the ASL should be stored in
-        a key/value database of some sort, but for now we'll use a dictionary
-        as a cache and store in a JSON file.
+        Holds a cache of ASL objects keyed by the ARN of the ASL State Machine.
+        This behaves like a dict semantically, but replicates the contents
+        across all instances in the cluster so that we can horizontally scale.
         """
-        self.asl_cache_file = self.config["asl_cache"]
-        print("self.asl_cache_file = " + self.asl_cache_file)
-        try:
-            with open(self.asl_cache_file, 'r') as fp:
-                self.asl_cache = json.load(fp)
-            self.logger.info("StateEngine loading ASL Cache")
-        except IOError as e:
-            self.asl_cache = {}
-        except ValueError as e:
-            self.logger.error("StateEngine ASL Cache does not contain valid JSON")
-            raise
-
-        self.task_dispatcher = TaskDispatcher(logger, config)
+        self.asl_cache = ReplicatedDict(config["state_engine"])
+        self.task_dispatcher = TaskDispatcher(config)
 
     def notify(self, event, id):
         """
@@ -240,7 +143,7 @@ class StateEngine(object):
 	        },
 	        "StateMachine": {
 		        "Id": <String>,
-		        "Value": <Object representing ASL state machine>
+		        "Definition": <Object representing ASL state machine>
 	        },
 	        "Task": {
 		        "Token": <String>
@@ -249,42 +152,35 @@ class StateEngine(object):
 
         The most important paths for state traversal are:
         $$.State.Name = the current state
-        $$.StateMachine.Value = (optional) contains the complete ASL state machine
+        $$.StateMachine.Definition = (optional) contains the complete ASL state machine
         $$.StateMachine.Id = a unique reference to an ASL state machine
         """
         context = event["context"]
         state_machine = context["StateMachine"]
-
-        # Get ASL from event/cache/storage
-        """
-        TODO abstract this into a separate class for handling caching/databasing
-        of the ASL. The code below is overly simplistic and will likely go
-        awry if multiple instances of the ASL Workflow Engine get started, as
-        there is no file locking or any other concurrency protection.
-        """
         state_machine_id = state_machine.get("Id")
-        ASL = state_machine.get("Value")
         print(state_machine_id)
 
-        if ASL == None and state_machine_id in self.asl_cache:
-            print("Using cached ASL")
-            ASL = self.asl_cache.get(state_machine_id)
-        else:
-            self.asl_cache[state_machine_id] = ASL
-            try:
-                with open(self.asl_cache_file, 'w') as fp:
-                    json.dump(self.asl_cache, fp)
-                self.logger.info("Creating ASL Cache: {}".format(self.asl_cache_file))
-            except IOError as e:
-                raise
-            
         """
-        After the first state in the state machine has been processed the ASL
-        should be cached, so if it was passed in the context it may be deleted
-        as subsequent events only need to contain the ASL id, which should help
-        keep the message size relatively modest.
+        If ASL is present in optional state_machine["Definition"] store that as
+        if it were a CreateStateMachine API call. TODO the roleArn added here is
+        not a valid IAM role ARN. This way of adding State Nachines "by value"
+        embedded in the context was mainly added to enable development of some
+        features prior to the addition of the REST API, so it might eventually
+        be deprecated, alternatively the approach could be enhanced to allow
+        a valid roleArn to be added from config or indeed be embedded in the
+        context in a similar way to how state_machine["Definition"] is.
         """
-        if "Value" in state_machine: del state_machine["Value"]
+        if "Definition" in state_machine:
+            arn = parse_arn(state_machine_id)
+            self.asl_cache[state_machine_id] = {
+                "name": arn["resource"],
+                "definition": state_machine["Definition"],
+                "creationDate": time.time(),
+                "roleArn": "arn:aws:iam:::role/dummy-role/dummy"
+            }
+            del state_machine["Definition"]
+
+        ASL = self.asl_cache.get(state_machine_id)["definition"]
 
         # Determine the current state from $$.State.Name.
         # TODO also set to ASL["StartAt"] if $$.State.Name is None or unset.
@@ -458,7 +354,7 @@ class StateEngine(object):
                 variable_field = choice.get("Variable")
                 print("Variable field = " + str(variable_field))
 
-                variable = jsonpath(data, variable_field)[0]
+                variable = apply_jsonpath(data, variable_field)
                 print("Variable value = " + str(variable))
 
                 next = choice.get("Next", True)
@@ -690,7 +586,7 @@ class StateEngine(object):
         dynamically invoke the appropriate ASL state handler given state type.
         The lambda provides a default handler in case of malformed ASL. 
         """
-        state_type = ASL["States"][current_state]["Type"]
+        state_type = state["Type"]
         locals().get("asl_state_" + state_type,
                      lambda:
                         self.logger.error("StateEngine illegal state transition: {}".

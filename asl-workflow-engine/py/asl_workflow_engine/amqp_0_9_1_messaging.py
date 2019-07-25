@@ -34,7 +34,7 @@ import json
 import pika # sudo pip3 install pika
 
 from asl_workflow_engine.logger import init_logging
-from asl_workflow_engine.exceptions import *
+from asl_workflow_engine.messaging_exceptions import *
 
 class Connection(object):
 
@@ -394,18 +394,19 @@ class Producer(Destination):
             raise ProducerError("Failed to parse address: {} {}".format(target, e))
 
         # Check if an exchange with the name of this destination exists.
-        try:
-            # Use temporary channel as the channel gets closed on an exception.
-            temp_channel = self.session.connection.connection.channel()
-            temp_channel.exchange_declare(self.name, passive=True)
-            temp_channel.close()
-        except pika.exceptions.ChannelClosedByBroker as e:
-            # If 404 NOT_FOUND the specified exchange doesn't exist.
-            if e.reply_code == 404:
-                # If no exchange declared assume default direct exchange.
-                if self.name != self.declare.get("exchange"):
-                    self.subject = self.name
-                    self.name = "" # Set exchange to default direct.
+        if self.name:
+            try:
+                # Use temporary channel as the channel gets closed on an exception.
+                temp_channel = self.session.connection.connection.channel()
+                temp_channel.exchange_declare(self.name, passive=True)
+                temp_channel.close()
+            except pika.exceptions.ChannelClosedByBroker as e:
+                # If 404 NOT_FOUND the specified exchange doesn't exist.
+                if e.reply_code == 404:
+                    # If no exchange declared assume default direct exchange.
+                    if self.name != self.declare.get("exchange"):
+                        self.subject = self.name
+                        self.name = "" # Set exchange to default direct.
 
         if self.declare.get("exchange"):
             # Exchange declare.
@@ -483,19 +484,20 @@ class Consumer(Destination):
 
         # Check if an exchange with the name of this destination exists.
         exchange = None
-        try:
-            # Use temporary channel as the channel gets closed on an exception.
-            temp_channel = self.session.connection.connection.channel()
-            temp_channel.exchange_declare(self.name, passive=True)
-            temp_channel.close()
-            exchange = self.name
-        except pika.exceptions.ChannelClosedByBroker as e:
-            if self.subject:
-                if self.name == self.declare.get("exchange"):
-                    exchange = self.name
-                else:
-                    raise ConsumerError(e.reply_text)
-            # Otherwise we assume default direct exchange
+        if self.name:
+            try:
+                # Use temporary channel as the channel gets closed on an exception.
+                temp_channel = self.session.connection.connection.channel()
+                temp_channel.exchange_declare(self.name, passive=True)
+                temp_channel.close()
+                exchange = self.name
+            except pika.exceptions.ChannelClosedByBroker as e:
+                if self.subject:
+                    if self.name == self.declare.get("exchange"):
+                        exchange = self.name
+                    else:
+                        raise ConsumerError(e.reply_text)
+                # Otherwise we assume default direct exchange
 
         if exchange: # Is this address an exchange?
             # Destination is an exchange, create subscription queue and

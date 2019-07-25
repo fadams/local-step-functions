@@ -28,8 +28,8 @@ import threading
 import time
 
 from asl_workflow_engine.logger import init_logging
-from asl_workflow_engine.exceptions import *
 from asl_workflow_engine.amqp_0_9_1_messaging import Connection, Message
+from asl_workflow_engine.messaging_exceptions import *
 
 class Worker(threading.Thread):
 

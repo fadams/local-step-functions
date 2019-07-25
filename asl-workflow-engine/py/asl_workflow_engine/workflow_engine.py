@@ -34,9 +34,11 @@ import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
 import json
+import threading # Run REST API in its own thread
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.state_engine import StateEngine
 from asl_workflow_engine.event_dispatcher import EventDispatcher
+from asl_workflow_engine.rest_api import RestAPI
 
 class WorkflowEngine(object):
 
@@ -66,9 +68,19 @@ class WorkflowEngine(object):
             logger.error("Configuration file does not contain valid JSON")
             raise
 
-        state_engine = StateEngine(logger, config)
-        event_dispatcher = EventDispatcher(logger, state_engine, config)
+        self.state_engine = StateEngine(config)
+        self.event_dispatcher = EventDispatcher(self.state_engine, config)
+        self.rest_api = RestAPI(self.state_engine, config)
+
+    def start(self):
+        self.event_dispatcher.start()
 
 if __name__ == "__main__":
-    workflow_engine = WorkflowEngine('config.json')
+    workflow_engine = WorkflowEngine("config.json")
+    app = workflow_engine.rest_api.create_app()
+    # https://stackoverflow.com/questions/31264826/start-a-flask-application-in-separate-thread/31265602#31265602
+    threading.Thread(target=app.run,
+                     kwargs={"host": workflow_engine.rest_api.host,
+                             "port": workflow_engine.rest_api.port}).start()
+    workflow_engine.start()
 

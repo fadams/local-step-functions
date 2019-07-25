@@ -21,18 +21,19 @@ import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
 import json
-from asl_workflow_engine.exceptions import *
+from asl_workflow_engine.logger import init_logging
+from asl_workflow_engine.messaging_exceptions import *
 
 class EventDispatcher(object):
 
-    def __init__(self, logger, state_engine, config):
+    def __init__(self, state_engine, config):
         """
         :param logger: The Workflow Engine logger
         :type logger: logger
         :param config: Configuration dictionary
         :type config: dict
         """
-        self.logger = logger
+        self.logger = init_logging(log_name='asl_workflow_engine')
         self.logger.info("Creating EventDispatcher")
         self.config = config["event_queue"] # TODO Handle missing config
         # TODO validate that config contains the keys we need.
@@ -61,6 +62,7 @@ class EventDispatcher(object):
 #        print(self.config["connection_url"])
 #        print(self.config["connection_options"])
 
+    def start(self):
         # Connection Factory for the event queue. The idea is to eventually
         # allow the ASL workflow engine to connect to alternative event queue
         # implementations in order to allow maximum flexibility.
@@ -104,7 +106,7 @@ class EventDispatcher(object):
             is to allow rpcmessage invocations that share the same message
             fabric instance as the event queue to reuse connections etc.
             """
-            state_engine.task_dispatcher.connect(session)
+            self.state_engine.task_dispatcher.start(session)
 
             connection.start(); # Blocks until event loop exits.
         except ConnectionError as e:

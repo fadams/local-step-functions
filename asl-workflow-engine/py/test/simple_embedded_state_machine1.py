@@ -46,7 +46,77 @@ import json
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.state_engine import StateEngine
 
-ASL = '{"Comment": "Test Step Function","StartAt": "StartState","States": {"StartState": {"Type": "Pass","Next": "ChoiceState"},"ChoiceState": {"Type": "Choice","Choices": [{"Variable": "$.lambda","StringEquals": "InternalErrorNotHandled","Next": "InternalErrorNotHandledLambda"},{"Variable": "$.lambda","StringEquals": "InternalErrorHandled","Next": "InternalErrorHandledLambda"},{"Variable": "$.lambda","StringEquals": "Success","Next": "SuccessLambda"},{"Variable": "$.lambda","StringEquals": "Timeout","Next": "TimeoutLambda"}],"Default": "FailState"},"FailState": {"Type": "Fail","Error": "NoLambdaError","Cause": "No Matches!"},"SuccessLambda": {"Type": "Task","Resource": "arn:aws:rpcmessage:local::function:SuccessLambda","Next": "WaitState"},"InternalErrorNotHandledLambda": {"Type": "Task","Resource": "arn:aws:rpcmessage:local::function:InternalErrorNotHandledLambda","Next": "EndState"},"InternalErrorHandledLambda": {"Type": "Task","Resource": "arn:aws:rpcmessage:local::function:InternalErrorHandledLambda","Next": "EndState"},"TimeoutLambda": {"Type": "Task","Resource": "arn:aws:rpcmessage:local::function:TimeoutLambda","Next": "EndState"},"EndState": {"Type": "Pass","End": true},"WaitState": {"Type": "Wait","Seconds":10,"Next": "EndState"}}}'
+ASL = """{
+    "Comment": "Test Step Function",
+    "StartAt": "StartState",
+    "States": {
+        "StartState": {
+            "Type": "Pass",
+            "Next": "ChoiceState"
+        },
+        "ChoiceState": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.lambda",
+                    "StringEquals": "InternalErrorNotHandled",
+                    "Next": "InternalErrorNotHandledLambda"
+                },
+                {
+                    "Variable": "$.lambda",
+                    "StringEquals": "InternalErrorHandled",
+                    "Next": "InternalErrorHandledLambda"
+                },
+                {
+                    "Variable": "$.lambda",
+                    "StringEquals": "Success",
+                    "Next": "SuccessLambda"
+                },
+                {
+                    "Variable": "$.lambda",
+                    "StringEquals": "Timeout",
+                    "Next": "TimeoutLambda"
+                }
+            ],
+            "Default": "FailState"
+        },
+        "FailState": {
+            "Type": "Fail",
+            "Error": "NoLambdaError",
+            "Cause": "No Matches!"
+        },
+        "SuccessLambda": {
+            "Type": "Task",
+            "Resource": "arn:aws:rpcmessage:local::function:SuccessLambda",
+            "Next": "WaitState"
+        },
+        "InternalErrorNotHandledLambda": {
+            "Type": "Task",
+            "Resource": "arn:aws:rpcmessage:local::function:InternalErrorNotHandledLambda",
+            "Next": "EndState"
+        },
+        "InternalErrorHandledLambda": {
+            "Type": "Task",
+            "Resource": "arn:aws:rpcmessage:local::function:InternalErrorHandledLambda",
+            "Next": "EndState"
+        },
+        "TimeoutLambda": {
+            "Type": "Task",
+            "Resource": "arn:aws:rpcmessage:local::function:TimeoutLambda",
+            "Next": "EndState"
+        },
+        "EndState": {
+            "Type": "Pass",
+            "End": true
+        },
+        "WaitState": {
+            "Type": "Wait",
+            "Seconds":10,
+            "Next": "EndState"
+        }
+    }
+}"""
+
 
 """
 See https://stackoverflow.com/questions/2150739/iso-time-iso-8601-in-python
@@ -68,7 +138,7 @@ https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.
     },
     "StateMachine": {
         "Id": <String>,
-        "Value": <Object representing ASL state machine>
+        "Definition": <Object representing ASL state machine>
     },
     "Task": {
         "Token": <String>
@@ -77,10 +147,10 @@ https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.
 
 The most important paths for state traversal are:
 $$.State.Name = the current state
-$$.StateMachine.Value = (optional) contains the complete ASL state machine
+$$.StateMachine.Definition = (optional) contains the complete ASL state machine
 $$.StateMachine.Id = a unique reference to an ASL state machine
 """
-context = '{"State": {"EnteredTime": "' + datetime.datetime.now().isoformat() + '", "Name": ""}, "StateMachine": {"Id": "arn:aws:states:local:1234:stateMachine:simple_state_machine1", "Value": ' + ASL + '}}'
+context = '{"State": {"EnteredTime": "' + datetime.datetime.now().isoformat() + '", "Name": ""}, "StateMachine": {"Id": "arn:aws:states:local:1234:stateMachine:simple_state_machine1", "Definition": ' + ASL + '}}'
 
 items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}',
          '{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}',

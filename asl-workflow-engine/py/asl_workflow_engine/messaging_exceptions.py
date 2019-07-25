@@ -17,10 +17,7 @@
 # under the License.
 #
 """
-Defines the exceptions raised by asl_workflow_engine.
-TODO the usefulness and granularity of these exceptions will need to evolve
-as it's difficult to foresee all of the failure scenarios until we've gone
-through a few iterations.
+Defines the exceptions raised by the messaging subsystem.
 """
 
 import sys

@@ -28,7 +28,7 @@ assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 import datetime
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.amqp_0_9_1_messaging import Connection, Message
-from asl_workflow_engine.exceptions import *
+from asl_workflow_engine.messaging_exceptions import *
 
 ASL = """{
   "Comment": "A Simple step function to perform MIME ID followed by untar",
@@ -69,7 +69,7 @@ https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.
     },
     "StateMachine": {
         "Id": <String>,
-        "Value": <Object representing ASL state machine>
+        "Definition": <Object representing ASL state machine>
     },
     "Task": {
         "Token": <String>
@@ -78,10 +78,10 @@ https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.
 
 The most important paths for state traversal are:
 $$.State.Name = the current state
-$$.StateMachine.Value = (optional) contains the complete ASL state machine
+$$.StateMachine.Definition = (optional) contains the complete ASL state machine
 $$.StateMachine.Id = a unique reference to an ASL state machine
 """
-context = '{"State": {"EnteredTime": "' + datetime.datetime.now().isoformat() + '", "Name": ""}, "StateMachine": {"Id": "arn:aws:states:local:1234:stateMachine:id_then_unzip", "Value": ' + ASL + '}}'
+context = '{"State": {"EnteredTime": "' + datetime.datetime.now().isoformat() + '", "Name": ""}, "StateMachine": {"Id": "arn:aws:states:local:1234:stateMachine:id_then_unzip", "Definition": ' + ASL + '}}'
 
 #print("----------------------")
 #print(context)

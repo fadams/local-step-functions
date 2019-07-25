@@ -23,19 +23,20 @@ assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 import json
 import os
 import uuid
-from asl_workflow_engine.exceptions import *
+from asl_workflow_engine.logger import init_logging
+from asl_workflow_engine.messaging_exceptions import *
 from asl_workflow_engine.arn import *
 
 class TaskDispatcher(object):
 
-    def __init__(self, logger, config):
+    def __init__(self, config):
         """
         :param logger: The Workflow Engine logger
         :type logger: logger
         :param config: Configuration dictionary
         :type config: dict
         """
-        self.logger = logger
+        self.logger = init_logging(log_name='asl_workflow_engine')
         self.logger.info("Creating TaskDispatcher")
         #self.config = config["task_dispatcher"] # TODO Handle missing config
         # TODO validate that config contains the keys we need.
@@ -54,7 +55,7 @@ class TaskDispatcher(object):
         """
         self.unmatched_requests = {}
 
-    def connect(self, session):
+    def start(self, session):
         """
         Connect to the messaging fabric to enable Task States to integrate with
         "rpcmessage" based services as described in execute_task.
