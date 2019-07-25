@@ -16,9 +16,6 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-# Run with:
-# PYTHONPATH=.. python3 rest_api.py
-#
 """
 This implements the REST API for the ASL Workflow Engine. The intention is to
 implement the AWS Step Functions API as described in the AWS documentation:
@@ -28,6 +25,8 @@ By implementing the AWS REST API semantics it becomes possible to use Amazon's
 CLI and SDK so applications can use this ASL Workflow Engine as an alternative
 to Amazon's for scenarios such as hybrid cloud workloads.
 
+
+Example actions using AWS CLI:
 
 # List state machines
 aws stepfunctions --endpoint http://localhost:4584 list-state-machines --max-results 20
@@ -60,17 +59,14 @@ aws stepfunctions --endpoint http://localhost:4584 get-execution-history --execu
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import re
-import json
-import time
-import logging
+import re, json, time, datetime, uuid, logging
 from flask import Flask, escape, request, jsonify, abort
 
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.arn import *
 
 class RestAPI(object):
-    def __init__(self, state_engine, config):
+    def __init__(self, state_engine, event_dispatcher, config):
         """
         """
         self.logger = init_logging(log_name='asl_workflow_engine')
@@ -82,6 +78,7 @@ class RestAPI(object):
             self.region = config.get("region", "local")
 
         self.asl_cache = state_engine.asl_cache
+        self.event_dispatcher = event_dispatcher
 
     def create_app(self):
         app = Flask(__name__)
@@ -135,30 +132,30 @@ class RestAPI(object):
                 """
                 name = params.get("name")
                 if not isinstance(name, str) or \
-                       len(name) < 1 or len(name) > 256 or \
+                       len(name) < 1 or len(name) > 80 or \
                        re.search(r"^.*[ <>{}[\]?*\"#%\\^|~`$&,;:/].*$", name):
                     self.logger.error("RestAPI CreateStateMachine: {} is an invalid name".format(name))
                     return "InvalidName", 400
 
-                roleArn = params.get("roleArn")
-                if not isinstance(roleArn, str) or \
-                       len(roleArn) < 1 or len(roleArn) > 256 or \
-                       not re.search(r"^arn:aws:iam::[0-9]+:role\/.+$", roleArn):
-                    self.logger.error("RestAPI CreateStateMachine: {} is an invalid Role ARN".format(roleArn))
+                role_arn = params.get("roleArn")
+                if not isinstance(role_arn, str) or \
+                       len(role_arn) < 1 or len(role_arn) > 256 or \
+                       not re.search(r"^arn:aws:iam::[0-9]+:role\/.+$", role_arn):
+                    self.logger.error("RestAPI CreateStateMachine: {} is an invalid Role ARN".format(role_arn))
                     return "InvalidArn", 400
 
                 # Form stateMachineArn from roleArn and name
-                arn = parse_arn(roleArn)
-                stateMachineArn = create_arn(service="states",
-                                             region=self.region,
-                                             account=arn["account"], 
-                                             resource_type="stateMachine",
-                                             resource=name)
+                arn = parse_arn(role_arn)
+                state_machine_arn = create_arn(service="states",
+                                               region=self.region,
+                                               account=arn["account"], 
+                                               resource_type="stateMachine",
+                                               resource=name)
 
                 # Look up stateMachineArn
-                match = self.asl_cache.get(stateMachineArn)
+                match = self.asl_cache.get(state_machine_arn)
                 if match:
-                    self.logger.error("RestAPI CreateStateMachine: State Machine {} already exists".format(stateMachineArn))
+                    self.logger.error("RestAPI CreateStateMachine: State Machine {} already exists".format(state_machine_arn))
                     return "StateMachineAlreadyExists", 400
 
                 try:
@@ -166,19 +163,23 @@ class RestAPI(object):
                 except ValueError as e:
                     self.logger.error("RestAPI CreateStateMachine: State Machine definition {} does not contain valid JSON".format(params.get("definition")))
 
+                if not (name and role_arn and definition):
+                    self.logger.error("RestAPI CreateStateMachine: name, roleArn and definition must be specified")
+                    return "MissingRequiredParameter", 400
+
                 # TODO ASL Validator??
 
-                creationDate = time.time()
-                self.asl_cache[stateMachineArn] = {
+                creation_date = time.time()
+                self.asl_cache[state_machine_arn] = {
                     "name": name,
                     "definition": definition,
-                    "creationDate": creationDate,
-                    "roleArn": roleArn
+                    "creationDate": creation_date,
+                    "roleArn": role_arn
                 }
 
                 resp = {
-                    "creationDate": creationDate,
-                    "stateMachineArn": stateMachineArn
+                    "creationDate": creation_date,
+                    "stateMachineArn": state_machine_arn
                 }
 
                 return jsonify(resp), 200
@@ -188,7 +189,7 @@ class RestAPI(object):
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_ListStateMachines.html
                 """
                 # TODO handle nextToken stuff
-                nextToken = ""
+                next_token = ""
 
                 resp = {
                     "stateMachines": [
@@ -199,7 +200,7 @@ class RestAPI(object):
                         } for k, v in self.asl_cache.items()
                     ]
                 }
-                if nextToken: resp["nextToken"] = nextToken
+                if next_token: resp["nextToken"] = next_token
 
                 return jsonify(resp), 200
 
@@ -207,19 +208,23 @@ class RestAPI(object):
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeStateMachine.html
                 """
-                stateMachineArn = params.get("stateMachineArn")
-                if not isinstance(stateMachineArn, str) or \
-                       len(stateMachineArn) < 1 or \
-                       len(stateMachineArn) > 256 or \
+                state_machine_arn = params.get("stateMachineArn")
+                if not isinstance(state_machine_arn, str) or \
+                       len(state_machine_arn) < 1 or \
+                       len(state_machine_arn) > 256 or \
                        not re.search(r"^arn:aws:states:.+:[0-9]+:stateMachine:.+$",
-                                     stateMachineArn):
-                    self.logger.error("RestAPI DescribeStateMachine: {} is an invalid State Machine ARN".format(stateMachineArn))
+                                     state_machine_arn):
+                    self.logger.error("RestAPI DescribeStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
                     return "InvalidArn", 400
 
+                if not state_machine_arn:
+                    self.logger.error("RestAPI DescribeStateMachine: stateMachineArn must be specified")
+                    return "MissingRequiredParameter", 400
+
                 # Look up stateMachineArn
-                match = self.asl_cache.get(stateMachineArn)
+                match = self.asl_cache.get(state_machine_arn)
                 if not match:
-                    self.logger.error("RestAPI DescribeStateMachine: State Machine {} does not exist".format(stateMachineArn))
+                    self.logger.error("RestAPI DescribeStateMachine: State Machine {} does not exist".format(state_machine_arn))
                     return "StateMachineDoesNotExist", 400
 
                 resp = {
@@ -227,7 +232,7 @@ class RestAPI(object):
                     "definition": match["definition"],
                     "name": match["name"],
                     "roleArn": match["roleArn"],
-                    "stateMachineArn": stateMachineArn,
+                    "stateMachineArn": state_machine_arn,
                     "status": "ACTIVE"
                 }
 
@@ -253,33 +258,29 @@ class RestAPI(object):
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_UpdateStateMachine.html
                 """
-                if not params.get("roleArn") and not params.get("definition"):
-                    self.logger.error("RestAPI UpdateStateMachine: either roleArn or definition must be specified")
-                    return "MissingRequiredParameter", 400
-
-                stateMachineArn = params.get("stateMachineArn")
-                if not isinstance(stateMachineArn, str) or \
-                       len(stateMachineArn) < 1 or \
-                       len(stateMachineArn) > 256 or \
+                state_machine_arn = params.get("stateMachineArn")
+                if not isinstance(state_machine_arn, str) or \
+                       len(state_machine_arn) < 1 or \
+                       len(state_machine_arn) > 256 or \
                        not re.search(r"^arn:aws:states:.+:[0-9]+:stateMachine:.+$",
-                                     stateMachineArn):
-                    self.logger.error("RestAPI UpdateStateMachine: {} is an invalid State Machine ARN".format(stateMachineArn))
+                                     state_machine_arn):
+                    self.logger.error("RestAPI UpdateStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
                     return "InvalidArn", 400
 
                 # Look up stateMachineArn
-                match = self.asl_cache.get(stateMachineArn)
+                match = self.asl_cache.get(state_machine_arn)
                 if not match:
-                    self.logger.error("RestAPI UpdateStateMachine: State Machine {} does not exist".format(stateMachineArn))
+                    self.logger.error("RestAPI UpdateStateMachine: State Machine {} does not exist".format(state_machine_arn))
                     return "StateMachineDoesNotExist", 400
 
-                roleArn = params.get("roleArn")
-                if roleArn:
-                    if not isinstance(roleArn, str) or \
-                           len(roleArn) < 1 or len(roleArn) > 256 or \
-                           not re.search(r"^arn:aws:iam::[0-9]+:role\/.+$", roleArn):
-                        self.logger.error("RestAPI UpdateStateMachine: {} is an invalid Role ARN".format(roleArn))
+                role_arn = params.get("roleArn")
+                if role_arn:
+                    if not isinstance(role_arn, str) or \
+                           len(role_arn) < 1 or len(role_arn) > 256 or \
+                           not re.search(r"^arn:aws:iam::[0-9]+:role\/.+$", role_arn):
+                        self.logger.error("RestAPI UpdateStateMachine: {} is an invalid Role ARN".format(role_arn))
                         return "InvalidArn", 400
-                    match["roleArn"] = roleArn
+                    match["roleArn"] = role_arn
 
                 if params.get("definition"):
                     try:
@@ -289,13 +290,17 @@ class RestAPI(object):
                     # TODO ASL Validator??
                     match["definition"] = definition
 
-                updateDate = time.time()
-                match["creationDate"] = updateDate
+                if not role_arn and not definition:
+                    self.logger.error("RestAPI UpdateStateMachine: either roleArn or definition must be specified")
+                    return "MissingRequiredParameter", 400
 
-                self.asl_cache[stateMachineArn] = match
+                update_date = time.time()
+                match["creationDate"] = update_date
+
+                self.asl_cache[state_machine_arn] = match
 
                 resp = {
-                    "updateDate": updateDate
+                    "updateDate": update_date
                 }
 
                 return jsonify(resp), 200
@@ -308,11 +313,84 @@ class RestAPI(object):
 
                 return "", 200
 
+            def aws_api_StartExecution():
+                """
+                https://docs.aws.amazon.com/step-functions/latest/apireference/API_StartExecution.html
+                """
+                print(params)
+
+                state_machine_arn = params.get("stateMachineArn")
+                if not isinstance(state_machine_arn, str) or \
+                       len(state_machine_arn) < 1 or \
+                       len(state_machine_arn) > 256 or \
+                       not re.search(r"^arn:aws:states:.+:[0-9]+:stateMachine:.+$",
+                                     state_machine_arn):
+                    self.logger.error("RestAPI DescribeStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
+                    return "InvalidArn", 400
+
+                if not state_machine_arn:
+                    self.logger.error("RestAPI StartExecution: stateMachineArn must be specified")
+                    return "MissingRequiredParameter", 400
+
+                name = params.get("name", str(uuid.uuid4()))
+                if not isinstance(name, str) or \
+                       len(name) < 1 or len(name) > 80 or \
+                       re.search(r"^.*[ <>{}[\]?*\"#%\\^|~`$&,;:/].*$", name):
+                    self.logger.error("RestAPI StartExecution: {} is an invalid name".format(name))
+                    return "InvalidName", 400
+
+                input = params.get("input", {})
+                try:
+                    input = json.loads(input)
+                except ValueError as e:
+                    self.logger.error("RestAPI StartExecution: input {} does not contain valid JSON".format(input))
+                    return "InvalidExecutionInput", 400
+
+                # Look up stateMachineArn
+                match = self.asl_cache.get(state_machine_arn)
+                if not match:
+                    self.logger.error("RestAPI StartExecution: State Machine {} does not exist".format(state_machine_arn))
+                    return "StateMachineDoesNotExist", 400
+
+                """
+                The application context is described in the AWS documentation:
+                https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
+                """
+                context = {
+                    "State": {
+                        "EnteredTime": datetime.datetime.now().isoformat(),
+                        "Name": ""
+                    },
+                    "StateMachine": {
+                        "Id": state_machine_arn
+                    }
+                }
+
+                event = {
+                    "data": input,
+                    "context": context
+                }
+
+                """
+                threadsafe=True is important here as the RestAPI runs in a
+                different thread to the main event_dispatcher loop.
+                """
+                self.event_dispatcher.publish(event, threadsafe=True)
+
+                resp = {
+                    "executionArn": "string",
+                    "startDate": time.time()
+                }
+
+                return jsonify(resp), 200
+
             def aws_api_InvalidAction():
                 self.logger.error("RestAPI invalid action: {}".format(action))
                 return "InvalidAction", 400
 
             #-------------------------------------------------------------------
+
+            # Use the API action to dynamically invoke the appropriate handler.
             try:
                 value, code = locals().get("aws_api_" + action,
                                        aws_api_InvalidAction)()

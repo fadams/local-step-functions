@@ -161,7 +161,7 @@ class EventDispatcher(object):
         message.acknowledge()
         del self.unacknowledged_messages[id]
 
-    def publish(self, item):
+    def publish(self, item, threadsafe=False):
         # TODO this import should be handled by the "Connection Factory for the
         # event queue" code in the constructor.
         from asl_workflow_engine.amqp_0_9_1_messaging import Message
@@ -175,5 +175,5 @@ class EventDispatcher(object):
         https://www.ietf.org/rfc/rfc4627.txt.
         """
         message = Message(json.dumps(item), content_type="application/json")
-        self.event_producer.send(message)
+        self.event_producer.send(message, threadsafe)
 

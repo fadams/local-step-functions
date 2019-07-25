@@ -419,7 +419,7 @@ class Producer(Destination):
         #print("name = " + self.name)
         #print("subject = " + self.subject)
 
-    def send(self, message):
+    def send(self, message, threadsafe=False):
         """
         For RabbitMQ AMQP Channel documentation see:
         https://pika.readthedocs.io/en/stable/modules/channel.html
@@ -429,36 +429,41 @@ class Producer(Destination):
                       mandatory=False)
         Delivery mode 2 makes the broker save the message to disk.
         """
-
-        #print("message.subject = " + str(message.subject))
+        def publish():
+            """
+            The main purpose of this nested function is to make it fairly easy
+            to either directly call the underlying pika basic_publish or defer
+            to connection.add_callback_threadsafe as a callback.
+            """
         
-        # If message.subject is set use that as the routing_key, otherwise use
-        # the Producer target default subject parsed from address string.
-        routing_key = message.subject if message.subject else self.subject
+            # If message.subject is set use that as the routing_key, otherwise use
+            # the Producer target default subject parsed from address string.
+            routing_key = message.subject if message.subject else self.subject
 
-        #print("exchange = " + self.name)
-        #print("routing_key = " + routing_key)
+            properties=pika.BasicProperties(headers=message.properties,
+                                            content_type=message.content_type,
+                                            content_encoding=message.content_encoding,
+                                            delivery_mode=2 if message.durable else 1,
+                                            priority=message.priority,
+                                            correlation_id=message.correlation_id,
+                                            reply_to=message.reply_to,
+                                            expiration=message.expiration,
+                                            message_id=message.message_id,
+                                            timestamp=message.timestamp,
+                                            type=message.type,
+                                            user_id=message.user_id,
+                                            app_id=message.app_id,
+                                            cluster_id=message.cluster_id)
 
-        properties=pika.BasicProperties(headers=message.properties,
-                                        content_type=message.content_type,
-                                        content_encoding=message.content_encoding,
-                                        delivery_mode=2 if message.durable else 1,
-                                        priority=message.priority,
-                                        correlation_id=message.correlation_id,
-                                        reply_to=message.reply_to,
-                                        expiration=message.expiration,
-                                        message_id=message.message_id,
-                                        timestamp=message.timestamp,
-                                        type=message.type,
-                                        user_id=message.user_id,
-                                        app_id=message.app_id,
-                                        cluster_id=message.cluster_id)
+            self.session.channel.basic_publish(exchange=self.name,
+                                               routing_key=routing_key,
+                                               body=message.body,
+                                               properties=properties)
 
-        res = self.session.channel.basic_publish(exchange=self.name,
-                                                 routing_key=routing_key,
-                                                 body=message.body,
-                                                 properties=properties)
-        return res
+        if threadsafe:
+            self.session.connection.connection.add_callback_threadsafe(publish)
+        else:
+            publish()
 
 #-------------------------------------------------------------------------------
 

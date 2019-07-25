@@ -68,9 +68,9 @@ class WorkflowEngine(object):
             logger.error("Configuration file does not contain valid JSON")
             raise
 
-        self.state_engine = StateEngine(config)
-        self.event_dispatcher = EventDispatcher(self.state_engine, config)
-        self.rest_api = RestAPI(self.state_engine, config)
+        state_engine = StateEngine(config)
+        self.event_dispatcher = EventDispatcher(state_engine, config)
+        self.rest_api = RestAPI(state_engine, self.event_dispatcher, config)
 
     def start(self):
         self.event_dispatcher.start()

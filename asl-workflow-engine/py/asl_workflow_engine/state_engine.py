@@ -35,8 +35,19 @@ from asl_workflow_engine.arn import *
 
 
 
-
-
+"""
+TODO move ReplicatedDict to its own file and start to look at actual
+replication. Current train of thought is to use messaging fabric such that
+updates are published as messages and all servers in the cluster subscribe
+to updates. The exact mechanism needs some thought. Also some use cases
+such as state machines write infrequently but read often so replication on
+update is likely best in that case, however other use cases such as getting
+execution history might read infrequently, but execution updates happen every
+state change so in those cases it may be better to have each node in the
+cluster maintain their own "chunk" and only achieve consistency on read.
+Lost to think about to do a nice implementation, but not urgent yet - just
+things to bear in mind so other decisions don't make clustering harder.
+"""
 import collections
 
 """
@@ -92,6 +103,7 @@ class ReplicatedDict(collections.MutableMapping):
 
     def __len__(self):
         return len(self.store)
+
 
 
 
