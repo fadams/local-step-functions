@@ -40,7 +40,6 @@ aws stepfunctions --endpoint http://localhost:4584 start-execution --state-machi
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import datetime
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.amqp_0_9_1_messaging import Connection, Message
 from asl_workflow_engine.messaging_exceptions import *
@@ -118,9 +117,6 @@ ASL = """{
 
 
 """
-See https://stackoverflow.com/questions/2150739/iso-time-iso-8601-in-python
-For info on creating ISO 8601 time format
-
 The application context is described in the AWS documentation:
 https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html 
 
@@ -149,11 +145,7 @@ $$.State.Name = the current state
 $$.StateMachine.Definition = (optional) contains the complete ASL state machine
 $$.StateMachine.Id = a unique reference to an ASL state machine
 """
-context = '{"State": {"EnteredTime": "' + datetime.datetime.now().isoformat() + '", "Name": ""}, "StateMachine": {"Id": "arn:aws:states:local:1234:stateMachine:simple_state_machine1", "Definition": ' + ASL + '}}'
-
-#print("----------------------")
-#print(context)
-#print("----------------------")
+context = '{"StateMachine": {"Id": "arn:aws:states:local:1234:stateMachine:simple_state_machine1", "Definition": ' + ASL + '}}'
 
 items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}',
          '{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}',

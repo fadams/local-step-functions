@@ -25,7 +25,6 @@
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import datetime
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.amqp_0_9_1_messaging import Connection, Message
 from asl_workflow_engine.messaging_exceptions import *
@@ -81,11 +80,7 @@ $$.State.Name = the current state
 $$.StateMachine.Definition = (optional) contains the complete ASL state machine
 $$.StateMachine.Id = a unique reference to an ASL state machine
 """
-context = '{"State": {"EnteredTime": "' + datetime.datetime.now().isoformat() + '", "Name": ""}, "StateMachine": {"Id": "arn:aws:states:local:1234:stateMachine:id_then_unzip", "Definition": ' + ASL + '}}'
-
-#print("----------------------")
-#print(context)
-#print("----------------------")
+context = '{"StateMachine": {"Id": "arn:aws:states:local:1234:stateMachine:id_then_unzip", "Definition": ' + ASL + '}}'
 
 items = ['{"data": {"zipfile": "s3://37199-dev/CFX/input-data/akismet.2.5.3.zip", "destination": "s3://37199-dev/CFX/processed-data"}, "context": ' + context + '}']
 

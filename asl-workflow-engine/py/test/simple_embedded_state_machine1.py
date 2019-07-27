@@ -41,7 +41,6 @@ import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
 from threading import Timer
-import datetime
 import json
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.state_engine import StateEngine
@@ -119,9 +118,6 @@ ASL = """{
 
 
 """
-See https://stackoverflow.com/questions/2150739/iso-time-iso-8601-in-python
-For info on creating ISO 8601 time format
-
 The application context is described in the AWS documentation:
 https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html 
 
@@ -150,7 +146,7 @@ $$.State.Name = the current state
 $$.StateMachine.Definition = (optional) contains the complete ASL state machine
 $$.StateMachine.Id = a unique reference to an ASL state machine
 """
-context = '{"State": {"EnteredTime": "' + datetime.datetime.now().isoformat() + '", "Name": ""}, "StateMachine": {"Id": "arn:aws:states:local:1234:stateMachine:simple_state_machine1", "Definition": ' + ASL + '}}'
+context = '{"StateMachine": {"Id": "arn:aws:states:local:1234:stateMachine:simple_state_machine1", "Definition": ' + ASL + '}}'
 
 items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}',
          '{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}',

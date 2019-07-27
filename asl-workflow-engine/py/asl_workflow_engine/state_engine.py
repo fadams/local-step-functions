@@ -20,8 +20,7 @@
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import json
-import time
+import json, time, datetime
 
 from asl_workflow_engine.state_engine_paths import apply_jsonpath, \
                                                    apply_resultpath, \
@@ -124,6 +123,16 @@ class StateEngine(object):
         """
         self.asl_cache = ReplicatedDict(config["state_engine"])
         self.task_dispatcher = TaskDispatcher(config)
+        # self.event_dispatcher set by EventDispatcher
+
+    def change_state(self, next_state, event):
+        """
+        Set event's new current state in $$.State.Name to Next state.
+        """
+        state = event["context"]["State"]
+        state["Name"] = next_state
+        state["EnteredTime"] = datetime.datetime.now().isoformat()
+        self.event_dispatcher.publish(event)
 
     def notify(self, event, id):
         """
@@ -167,9 +176,24 @@ class StateEngine(object):
         $$.StateMachine.Definition = (optional) contains the complete ASL state machine
         $$.StateMachine.Id = a unique reference to an ASL state machine
         """
-        context = event["context"]
-        state_machine = context["StateMachine"]
+        context = event.get("context")
+        if context == None:
+            self.logger.error("StateEngine: event {} has no $.context field, dropping the message!".format(event))
+            self.event_dispatcher.acknowledge(id)
+            return
+
+        state_machine = context.get("StateMachine")
+        if state_machine == None:
+            self.logger.error("StateEngine: event {} has no $.context.StateMachine field, dropping the message!".format(event))
+            self.event_dispatcher.acknowledge(id)
+            return
+
         state_machine_id = state_machine.get("Id")
+        if not state_machine_id:
+            self.logger.error("StateEngine: event {} has no $.context.StateMachine.Id field, dropping the message!".format(event))
+            self.event_dispatcher.acknowledge(id)
+            return
+
         print(state_machine_id)
 
         """
@@ -192,12 +216,31 @@ class StateEngine(object):
             }
             del state_machine["Definition"]
 
-        ASL = self.asl_cache.get(state_machine_id)["definition"]
+        ASL = self.asl_cache.get(state_machine_id, {}).get("definition")
+        if not ASL:
+            # TODO
+            # Dropping the message is probably not the right thing to do in this
+            # scenario as we could simply add the State Machine and retry.
+            self.logger.error("StateEngine: State Machine {} does not exist, dropping the message!".format(state_machine_id))
+            self.event_dispatcher.acknowledge(id)
+            return
 
         # Determine the current state from $$.State.Name.
-        # TODO also set to ASL["StartAt"] if $$.State.Name is None or unset.
-        current_state = context["State"]["Name"]
-        current_state = ASL["StartAt"] if current_state == "" else current_state
+        # Use get() defaults to cater for State or Name being initially unset.
+        if not context.get("State"): context["State"] = {"Name": None}
+        current_state = context["State"].get("Name")
+
+        if not current_state:
+            current_state = ASL["StartAt"]
+            """
+            For the start state set EnteredTime here, which will be reset if
+            the message gets redelivered, for other state transitions we will
+            set EnteredTime when the transition occurs so if redeliveries
+            occur the EnteredTime will reflect the time the state was entered
+            not the time the redelivery occurred.
+            """
+            context["State"]["EnteredTime"] = datetime.datetime.now().isoformat()
+
         state = ASL["States"][current_state]
 
         """
@@ -273,9 +316,7 @@ class StateEngine(object):
                 print("** END OF STATE MACHINE**")
                 # TODO output results
             else:
-                # Set event's new current state in $$.State.Name to Next state.
-                context["State"]["Name"] = state.get("Next")
-                self.event_dispatcher.publish(event)
+                self.change_state(state.get("Next"), event)
 
             self.event_dispatcher.acknowledge(id)
 
@@ -317,9 +358,7 @@ class StateEngine(object):
                     print("** END OF STATE MACHINE**")
                     # TODO output result
                 else:
-                    # Set event's new current state in $$.State.Name to Next state.
-                    context["State"]["Name"] = state.get("Next")
-                    self.event_dispatcher.publish(event)
+                    self.change_state(state.get("Next"), event)
 
                 self.event_dispatcher.acknowledge(id)
 
@@ -460,8 +499,7 @@ class StateEngine(object):
             transition was specified. 
             """
             if next_state:
-                context["State"]["Name"] = next_state
-                self.event_dispatcher.publish(event)
+                self.change_state(next_state, event)
             else:
                 self.logger.error("States.NoChoiceMatched: {}".format(json.dumps(context)))
                 # TODO actually emit/publish an error to the caller when the
@@ -492,9 +530,7 @@ class StateEngine(object):
                     print("** END OF STATE MACHINE**")
                     # TODO output results
                 else:
-                    # Set event's new current state in $$.State.Name to Next state.
-                    context["State"]["Name"] = state.get("Next")
-                    self.event_dispatcher.publish(event)
+                    self.change_state(state.get("Next"), event)
 
                 self.event_dispatcher.acknowledge(id)
 

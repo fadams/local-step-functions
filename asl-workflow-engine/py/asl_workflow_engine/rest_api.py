@@ -65,6 +65,19 @@ from flask import Flask, escape, request, jsonify, abort
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.arn import *
 
+def valid_name(name):
+    return isinstance(name, str) and len(name) > 0 and len(name) < 81 and \
+    not re.search(r"^.*[ <>{}[\]?*\"#%\\^|~`$&,;:/].*$", name)
+
+def valid_role_arn(arn):
+    return isinstance(role_arn, str) and len(arn) > 0 and len(arn) < 257 and \
+    re.search(r"^arn:aws:iam::[0-9]+:role\/.+$", arn)
+
+def valid_state_machine_arn(arn):
+    return isinstance(arn, str) and len(arn) > 0 and len(arn) < 257 and \
+    re.search(r"^arn:aws:states:.+:[0-9]+:stateMachine:.+$", arn)
+
+
 class RestAPI(object):
     def __init__(self, state_engine, event_dispatcher, config):
         """
@@ -131,16 +144,13 @@ class RestAPI(object):
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_CreateStateMachine.html
                 """
                 name = params.get("name")
-                if not isinstance(name, str) or \
-                       len(name) < 1 or len(name) > 80 or \
-                       re.search(r"^.*[ <>{}[\]?*\"#%\\^|~`$&,;:/].*$", name):
-                    self.logger.error("RestAPI CreateStateMachine: {} is an invalid name".format(name))
+                if not valid_name(name):
+                    self.logger.error("RestAPI CreateStateMachine: {} is an invalid name".
+                    format(name))
                     return "InvalidName", 400
 
                 role_arn = params.get("roleArn")
-                if not isinstance(role_arn, str) or \
-                       len(role_arn) < 1 or len(role_arn) > 256 or \
-                       not re.search(r"^arn:aws:iam::[0-9]+:role\/.+$", role_arn):
+                if not valid_role_arn(role_arn):
                     self.logger.error("RestAPI CreateStateMachine: {} is an invalid Role ARN".format(role_arn))
                     return "InvalidArn", 400
 
@@ -209,17 +219,13 @@ class RestAPI(object):
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeStateMachine.html
                 """
                 state_machine_arn = params.get("stateMachineArn")
-                if not isinstance(state_machine_arn, str) or \
-                       len(state_machine_arn) < 1 or \
-                       len(state_machine_arn) > 256 or \
-                       not re.search(r"^arn:aws:states:.+:[0-9]+:stateMachine:.+$",
-                                     state_machine_arn):
-                    self.logger.error("RestAPI DescribeStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
-                    return "InvalidArn", 400
-
                 if not state_machine_arn:
                     self.logger.error("RestAPI DescribeStateMachine: stateMachineArn must be specified")
                     return "MissingRequiredParameter", 400
+
+                if not valid_state_machine_arn(state_machine_arn):
+                    self.logger.error("RestAPI DescribeStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
+                    return "InvalidArn", 400
 
                 # Look up stateMachineArn
                 match = self.asl_cache.get(state_machine_arn)
@@ -259,11 +265,11 @@ class RestAPI(object):
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_UpdateStateMachine.html
                 """
                 state_machine_arn = params.get("stateMachineArn")
-                if not isinstance(state_machine_arn, str) or \
-                       len(state_machine_arn) < 1 or \
-                       len(state_machine_arn) > 256 or \
-                       not re.search(r"^arn:aws:states:.+:[0-9]+:stateMachine:.+$",
-                                     state_machine_arn):
+                if not state_machine_arn:
+                    self.logger.error("RestAPI UpdateStateMachine: stateMachineArn must be specified")
+                    return "MissingRequiredParameter", 400
+
+                if not valid_state_machine_arn(state_machine_arn):
                     self.logger.error("RestAPI UpdateStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
                     return "InvalidArn", 400
 
@@ -275,9 +281,7 @@ class RestAPI(object):
 
                 role_arn = params.get("roleArn")
                 if role_arn:
-                    if not isinstance(role_arn, str) or \
-                           len(role_arn) < 1 or len(role_arn) > 256 or \
-                           not re.search(r"^arn:aws:iam::[0-9]+:role\/.+$", role_arn):
+                    if not valid_role_arn(role_arn):
                         self.logger.error("RestAPI UpdateStateMachine: {} is an invalid Role ARN".format(role_arn))
                         return "InvalidArn", 400
                     match["roleArn"] = role_arn
@@ -320,23 +324,18 @@ class RestAPI(object):
                 print(params)
 
                 state_machine_arn = params.get("stateMachineArn")
-                if not isinstance(state_machine_arn, str) or \
-                       len(state_machine_arn) < 1 or \
-                       len(state_machine_arn) > 256 or \
-                       not re.search(r"^arn:aws:states:.+:[0-9]+:stateMachine:.+$",
-                                     state_machine_arn):
-                    self.logger.error("RestAPI DescribeStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
-                    return "InvalidArn", 400
-
                 if not state_machine_arn:
                     self.logger.error("RestAPI StartExecution: stateMachineArn must be specified")
                     return "MissingRequiredParameter", 400
 
+                if not valid_state_machine_arn(state_machine_arn):
+                    self.logger.error("RestAPI DescribeStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
+                    return "InvalidArn", 400
+
                 name = params.get("name", str(uuid.uuid4()))
-                if not isinstance(name, str) or \
-                       len(name) < 1 or len(name) > 80 or \
-                       re.search(r"^.*[ <>{}[\]?*\"#%\\^|~`$&,;:/].*$", name):
-                    self.logger.error("RestAPI StartExecution: {} is an invalid name".format(name))
+                if not valid_name(name):
+                    self.logger.error("RestAPI StartExecution: {} is an invalid name".
+                                      format(name))
                     return "InvalidName", 400
 
                 input = params.get("input", {})
@@ -352,15 +351,24 @@ class RestAPI(object):
                     self.logger.error("RestAPI StartExecution: State Machine {} does not exist".format(state_machine_arn))
                     return "StateMachineDoesNotExist", 400
 
+
+                # Form executionArn from stateMachineArn and name
+                arn = parse_arn(state_machine_arn)
+                execution_arn = create_arn(service="states",
+                                           region=arn.get("region", self.region),
+                                           account=arn["account"], 
+                                           resource_type="execution",
+                                           resource=arn["resource"] + ":" + name)
+
                 """
                 The application context is described in the AWS documentation:
                 https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
                 """
                 context = {
-                    "State": {
-                        "EnteredTime": datetime.datetime.now().isoformat(),
-                        "Name": ""
-                    },
+                    #"State": {
+                    #    "EnteredTime": datetime.datetime.now().isoformat(),
+                    #    "Name": ""
+                    #},
                     "StateMachine": {
                         "Id": state_machine_arn
                     }
@@ -378,7 +386,7 @@ class RestAPI(object):
                 self.event_dispatcher.publish(event, threadsafe=True)
 
                 resp = {
-                    "executionArn": "string",
+                    "executionArn": execution_arn,
                     "startDate": time.time()
                 }
 
