@@ -20,7 +20,7 @@
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import json, time, datetime
+import json, time, datetime, uuid
 
 from asl_workflow_engine.state_engine_paths import apply_jsonpath, \
                                                    apply_resultpath, \
@@ -216,7 +216,8 @@ class StateEngine(object):
             }
             del state_machine["Definition"]
 
-        ASL = self.asl_cache.get(state_machine_id, {}).get("definition")
+        asl_item = self.asl_cache.get(state_machine_id, {})
+        ASL = asl_item.get("definition")
         if not ASL:
             # TODO
             # Dropping the message is probably not the right thing to do in this
@@ -224,24 +225,6 @@ class StateEngine(object):
             self.logger.error("StateEngine: State Machine {} does not exist, dropping the message!".format(state_machine_id))
             self.event_dispatcher.acknowledge(id)
             return
-
-        # Determine the current state from $$.State.Name.
-        # Use get() defaults to cater for State or Name being initially unset.
-        if not context.get("State"): context["State"] = {"Name": None}
-        current_state = context["State"].get("Name")
-
-        if not current_state:
-            current_state = ASL["StartAt"]
-            """
-            For the start state set EnteredTime here, which will be reset if
-            the message gets redelivered, for other state transitions we will
-            set EnteredTime when the transition occurs so if redeliveries
-            occur the EnteredTime will reflect the time the state was entered
-            not the time the redelivery occurred.
-            """
-            context["State"]["EnteredTime"] = datetime.datetime.now().isoformat()
-
-        state = ASL["States"][current_state]
 
         """
         https://states-language.net/spec.html#data
@@ -261,6 +244,50 @@ class StateEngine(object):
         treated as its output. 
         """
         data = event.get("data", {}) # Note default to empty JSON object
+
+        # Determine the current state from $$.State.Name.
+        # Use get() defaults to cater for State or Name being initially unset.
+        if not context.get("State"): context["State"] = {"Name": None}
+        current_state = context["State"].get("Name")
+
+        if not current_state: # Start state. Initialise unset context fields.
+            current_state = ASL["StartAt"]
+            if context.get("Execution") == None: context["Execution"] = {}
+            execution = context["Execution"]
+            execution_name = str(uuid.uuid4())
+            if not execution.get("Id"):
+                # Create Id
+                # Form executionArn from stateMachineArn and uuid
+                arn = parse_arn(state_machine_id)
+                execution_arn = create_arn(service="states",
+                                           region=arn.get("region", "local"),
+                                           account=arn["account"], 
+                                           resource_type="execution",
+                                           resource=arn["resource"] + ":" + execution_name)
+                execution["Id"] = execution_arn
+            # execution["Input"] holds the initial Step Function input
+            if execution.get("Input") == None: execution["Input"] = data
+
+            if not execution.get("Name"): execution["Name"] = execution_name
+
+            if not execution.get("RoleArn"):
+                execution["RoleArn"] = asl_item["roleArn"]
+
+            start_time = datetime.datetime.now().isoformat()
+            if execution.get("StartTime") == None:
+                execution["StartTime"] = start_time
+
+            """
+            For the start state set EnteredTime here, which will be reset if
+            the message gets redelivered, for other state transitions we will
+            set EnteredTime when the transition occurs so if redeliveries
+            occur the EnteredTime will reflect the time the state was entered
+            not the time the redelivery occurred.
+            """
+            if context["State"].get("EnteredTime") == None:
+                context["State"]["EnteredTime"] = start_time
+
+        state = ASL["States"][current_state]
 
         print("current_state = " + current_state)
         print("state = " + str(state))

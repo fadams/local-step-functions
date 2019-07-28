@@ -364,13 +364,22 @@ class RestAPI(object):
                 The application context is described in the AWS documentation:
                 https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
                 """
+                start_time = datetime.datetime.now().isoformat()
                 context = {
-                    #"State": {
-                    #    "EnteredTime": datetime.datetime.now().isoformat(),
-                    #    "Name": ""
-                    #},
+                    "Execution": {
+                        "Id": execution_arn,
+                        "Input": input,
+                        "Name": name,
+                        "RoleArn": match.get("roleArn"),
+                        "StartTime": start_time
+                    },
+                    "State": {
+                        "EnteredTime": start_time,
+                        "Name": "" # Start state
+                    },
                     "StateMachine": {
-                        "Id": state_machine_arn
+                        "Id": state_machine_arn,
+                        "Name": match.get("name")
                     }
                 }
 
