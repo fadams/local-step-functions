@@ -73,8 +73,8 @@ class ReplicatedDict(collections.MutableMapping):
         except IOError as e:
             self.store = {}
         except ValueError as e:
-            self.logger.error("ReplicatedDict {} does not contain valid JSON".format(self.asl_cache_file))
-            raise
+            self.logger.warn("ReplicatedDict {} does not contain valid JSON".format(self.asl_cache_file))
+            self.store = {}
 
         #self.store = dict()
         #self.update(dict(*args, **kwargs))  # use the free update to set keys

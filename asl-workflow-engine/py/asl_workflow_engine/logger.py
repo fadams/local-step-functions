@@ -56,7 +56,7 @@ def init_logging(log_name, log_level=logging.INFO):
 
     # Select automation friendly structured logging or more "human readable"
     # logging based on the value of the USE_STRUCTURED_LOGGING environment var.
-    if os.environ.get("USE_STRUCTURED_LOGGING"):
+    if os.environ.get("USE_STRUCTURED_LOGGING", "false").lower() == "true":
         # Use these processors for structlog and stdlib loggers
         timestamper = structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S")
         shared_processors = [

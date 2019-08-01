@@ -5,12 +5,15 @@ COPY py/setup.py /usr/src/
 
 WORKDIR /usr/src
 
-# This generates a somewhat confusing/worrying warning:
+# update-ca-certificates generates a somewhat confusing/worrying warning:
 # WARNING: ca-certificates.crt does not contain exactly one certificate or CRL: skipping
-# This is however apparently "normal" (though other distros don't do this)
+# This is however apparently "normal" (though other Linux distros don't do this)
 # https://github.com/gliderlabs/docker-alpine/issues/30
-RUN apk update && apk add ca-certificates && update-ca-certificates && \
+RUN apk update && apk upgrade && \
+    apk add ca-certificates && update-ca-certificates && \
     mv asl_workflow_engine/config.json . && pip install -e . && \
+    # Remove packages only needed during installation from runtime container
+    pip uninstall -y setuptools wheel pip && \
     rm -rf /var/cache/apk/*
 
 CMD ["python", "asl_workflow_engine/workflow_engine.py"]
@@ -22,3 +25,4 @@ CMD ["python", "asl_workflow_engine/workflow_engine.py"]
 # docker run --rm asl-workflow-engine
 
 # docker run --rm -it asl-workflow-engine sh
+
