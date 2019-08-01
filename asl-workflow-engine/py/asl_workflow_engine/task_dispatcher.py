@@ -20,16 +20,14 @@
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import json
-import os
-import uuid
+import json, os, time, datetime, uuid
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.messaging_exceptions import *
 from asl_workflow_engine.arn import *
 
 class TaskDispatcher(object):
 
-    def __init__(self, config):
+    def __init__(self, state_engine, config):
         """
         :param logger: The Workflow Engine logger
         :type logger: logger
@@ -40,6 +38,7 @@ class TaskDispatcher(object):
         self.logger.info("Creating TaskDispatcher")
         #self.config = config["task_dispatcher"] # TODO Handle missing config
         # TODO validate that config contains the keys we need.
+        self.state_engine = state_engine
 
         """
         Some services that we integrate Task States with might be request/
@@ -62,14 +61,14 @@ class TaskDispatcher(object):
         """
         self.reply_to = session.consumer()
         self.reply_to.capacity = 100; # Enable consumer prefetch
-        self.reply_to.set_message_listener(self.handle_response)
+        self.reply_to.set_message_listener(self.handle_rpcmessage_response)
         self.producer = session.producer()
 
 
         #print(self.reply_to.name)
         #print(self.producer.name)
 
-    def handle_response(self, message):
+    def handle_rpcmessage_response(self, message):
         """
         This is a message listener receiving messages from the reply_to queue
         for this workflow engine instance.
@@ -164,11 +163,6 @@ class TaskDispatcher(object):
             self.logger.error("Specified Task Resource {} is not available on the environment".format(resource_arn))
             # TODO Handle error as per https://states-language.net/spec.html#errors
 
-
-        """
-        Given the required service from the resource_arn dynamically invoke the
-        appropriate service handler. The lambda provides a default handler. 
-        """
         arn = parse_arn(resource_arn)
         service = arn["service"] # e.g. rpcmessage, fn, openfaas, lambda
         resource_type = arn["resource_type"] # Should be function most times
@@ -213,7 +207,7 @@ class TaskDispatcher(object):
                               correlation_id=correlation_id)
             #print(message)
             self.producer.send(message)
-            # N.B. The service response message is handled by handle_response()
+            # N.B. The service response message is handled by handle_rpcmessage_response()
 
         #def asl_service_openfaas():
         #    print("asl_service_openfaas")
@@ -224,11 +218,127 @@ class TaskDispatcher(object):
         #def asl_service_lambda():
         #    print("asl_service_lambda")
 
+        def asl_service_states():
+            """
+            The service part of the Resource ARN might be "states" for a number
+            of Service Integrations, so we must further demultiplex based on
+            the resource_type. Initially just support execution to allow us
+            to invoke another state machine execution.
+            """
+            if resource_type == "execution": asl_service_states_execution()
+            else: asl_service_InvalidService()
 
+        def asl_service_states_execution():
+            """
+            Service Integration to stepfunctions. Initially this is limited to
+            integrating with stepfunctions running on this local ASL Workflow
+            Engine, however it should be possible to integrate with *real* AWS
+            stepfunctions too in due course. Note that real AWS stepfunctions
+            don't have a direct Service Integration to other stepfunctions and
+            require a lambda to do this, but there is no fundamental reason why
+            they couldn't (requiring an extra lambda of course generates more
+            revenue so that might be the reason, but it might just be that they
+            haven't got round to it.)
+
+            The resource ARN should be of the form:
+            arn:aws:states:region:account-id:execution:stateMachineName:executionName
+            though note that for stepfunctions each execution should have a
+            unique name, so if we name a resource like that in theory it could
+            only execute once. In practice we don't *yet* handle all of the
+            execution behaviour correctly, but we should eventually. The way to
+            specify specific execution names (if desired) for launching via Task
+            states is most likely via ASL Parameters. Using Parameters we could
+            pass in the execution name in the stepfunction input and extract it
+            in the Parameter's JSONPath processing.
+
+            if the executionName is not specified a UUID will be assigned, which
+            is more likely to be what is needed in practice.
+
+            # TODO handle additional Task state parameters for stepfunctions
+            integration. This will be needed to handle actual execution names
+            because, as mentioned above, they should be unique and so would
+            likely be passed as part of the calling stepfunction's input.
+
+            Some more thought is needed about exactly what form any parameters
+            should take, but something like the following is a starting point
+            that is we'd need a way to specify the execution name and the
+            stepfunction input data.
+
+            "Parameters": {
+                "ExecutionName.$": "$.name",
+                "Input.$": "$.input"
+            }
+            """
+            #print(parameters)
+
+            print(resource.split(":"))
+            split = resource.split(":")
+            state_machine_name = split[0]
+            execution_name = split[1] if len(split) == 2 else str(uuid.uuid4())
+
+            state_machine_arn = create_arn(service="states",
+                                           region=arn.get("region", "local"),
+                                           account=arn["account"], 
+                                           resource_type="stateMachine",
+                                           resource=state_machine_name)
+
+            execution_arn = create_arn(service="states",
+                                       region=arn.get("region", "local"),
+                                       account=arn["account"], 
+                                       resource_type="execution",
+                                       resource=state_machine_name + ":" +
+                                                execution_name)
+
+            # Look up stateMachineArn
+            match = self.state_engine.asl_cache.get(state_machine_arn)
+            if not match:
+                self.logger.error("TaskDispatcher asl_service_states: State Machine {} does not exist".format(state_machine_arn))
+                callback({"Error": "StateMachineDoesNotExist"})
+                return
+
+            # Create the execution context and the event to publish to launch
+            # the requested new state machine execution.
+            start_time = datetime.datetime.now().isoformat()
+            context = {
+                "Execution": {
+                    "Id": execution_arn,
+                    "Input": parameters,
+                    "Name": execution_name,
+                    "RoleArn": match.get("roleArn"),
+                    "StartTime": start_time
+                },
+                "State": {
+                    "EnteredTime": start_time,
+                    "Name": "" # Start state
+                },
+                "StateMachine": {
+                    "Id": state_machine_arn,
+                    "Name": state_machine_name
+                }
+            }
+
+            event = {
+                "data": parameters,
+                "context": context
+            }
+
+            self.state_engine.event_dispatcher.publish(event)
+
+            result = {
+                "executionArn": execution_arn,
+                "startDate": time.time()
+            }
+            callback(result)
+
+        def asl_service_InvalidService():
+            self.logger.error("TaskDispatcher ARN {} refers to unsupported service: {}".
+                              format(resource_arn, service))
+            callback({"Error": "InvalidService"})
+
+        """
+        Given the required service from the resource_arn dynamically invoke the
+        appropriate service handler. The lambda provides a default handler. 
+        """
         locals().get("asl_service_" + service,
-                     lambda:
-                        self.logger.error("TaskDispatcher ARN {} refers to unsupported service: {}".
-                            format(resource_arn, service)))()
-#result = {"error": "error"}
-#        callback(results)
+                     asl_service_InvalidService)()
 

@@ -33,7 +33,7 @@ machine instances based on Step Functions API.
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import json
+import json, os
 import threading # Run REST API in its own thread
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.state_engine import StateEngine
@@ -53,10 +53,7 @@ class WorkflowEngine(object):
         # Initialise logger
         logger = init_logging(log_name='asl_workflow_engine')
 
-        # Load the configuration file. TODO it probably makes sense to also add
-        # a mechanism to override config values with values obtained from the
-        # command line or environment variables, the latter being especially
-        # useful if we want to deploy this application to Kubernetes.
+        # Load the configuration file.
         try:
             with open(configuration_file, 'r') as fp:
                 config = json.load(fp)
@@ -67,6 +64,37 @@ class WorkflowEngine(object):
         except ValueError as e:
             logger.error("Configuration file does not contain valid JSON")
             raise
+
+        # Provide defaults for any unset config key
+        config["event_queue"] = config.get("event_queue", {})
+        config["state_engine"] = config.get("state_engine", {})
+        config["rest_api"] = config.get("rest_api", {})
+
+        """
+        Override config values if a field is set as an environment variable.
+        There is also a USE_STRUCTURED_LOGGING environment variable used by
+        the logger to select between automation friendly structured logging
+        or more human readable "traditional" logs.
+        """
+        eq = config["event_queue"]
+        eq["queue_name"] = os.environ.get("EVENT_QUEUE_QUEUE_NAME",
+                                          eq.get("queue_name"))
+        eq["queue_type"] = os.environ.get("EVENT_QUEUE_QUEUE_TYPE",
+                                          eq.get("queue_type"))
+        eq["connection_url"] = os.environ.get("EVENT_QUEUE_CONNECTION_URL",
+                                              eq.get("connection_url"))
+        eq["connection_options"] = os.environ.get("EVENT_QUEUE_CONNECTION_OPTIONS",
+                                                  eq.get("connection_options"))
+
+        se = config["state_engine"]
+        se["asl_cache"] = os.environ.get("STATE_ENGINE_ASL_CACHE",
+                                         se.get("asl_cache"))
+
+        ra = config["rest_api"]
+        ra["host"] = os.environ.get("REST_API_HOST", ra.get("host"))
+        ra["port"] = int(os.environ.get("REST_API_PORT", ra.get("port")))
+        ra["region"] = os.environ.get("REST_API_REGION", ra.get("region"))
+
 
         state_engine = StateEngine(config)
         self.event_dispatcher = EventDispatcher(state_engine, config)

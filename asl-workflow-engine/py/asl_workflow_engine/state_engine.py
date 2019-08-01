@@ -96,6 +96,12 @@ class ReplicatedDict(collections.MutableMapping):
 
     def __delitem__(self, key):
         del self.store[key]
+        try:
+            with open(self.asl_cache_file, 'w') as fp:
+                json.dump(self.store, fp)
+            self.logger.info("Updating ReplicatedDict: {}".format(self.asl_cache_file))
+        except IOError as e:
+            raise
 
     def __iter__(self):
         return iter(self.store)
@@ -122,7 +128,7 @@ class StateEngine(object):
         across all instances in the cluster so that we can horizontally scale.
         """
         self.asl_cache = ReplicatedDict(config["state_engine"])
-        self.task_dispatcher = TaskDispatcher(config)
+        self.task_dispatcher = TaskDispatcher(self, config)
         # self.event_dispatcher set by EventDispatcher
 
     def change_state(self, next_state, event):
@@ -219,9 +225,11 @@ class StateEngine(object):
         asl_item = self.asl_cache.get(state_machine_id, {})
         ASL = asl_item.get("definition")
         if not ASL:
-            # TODO
-            # Dropping the message is probably not the right thing to do in this
-            # scenario as we could simply add the State Machine and retry.
+            """
+            Dropping the message is possibly not the right thing to do in this
+            scenario as we could simply add the State Machine and retry. OTOH
+            if a State Machine is deleted executions should also be deleted.
+            """
             self.logger.error("StateEngine: State Machine {} does not exist, dropping the message!".format(state_machine_id))
             self.event_dispatcher.acknowledge(id)
             return
@@ -245,6 +253,7 @@ class StateEngine(object):
         """
         data = event.get("data", {}) # Note default to empty JSON object
 
+
         # Determine the current state from $$.State.Name.
         # Use get() defaults to cater for State or Name being initially unset.
         if not context.get("State"): context["State"] = {"Name": None}
@@ -254,7 +263,9 @@ class StateEngine(object):
             current_state = ASL["StartAt"]
             if context.get("Execution") == None: context["Execution"] = {}
             execution = context["Execution"]
-            execution_name = str(uuid.uuid4())
+
+            if not execution.get("Name"): execution["Name"] = str(uuid.uuid4())
+
             if not execution.get("Id"):
                 # Create Id
                 # Form executionArn from stateMachineArn and uuid
@@ -263,12 +274,11 @@ class StateEngine(object):
                                            region=arn.get("region", "local"),
                                            account=arn["account"], 
                                            resource_type="execution",
-                                           resource=arn["resource"] + ":" + execution_name)
+                                           resource=arn["resource"] + ":" +     
+                                                    execution["Name"])
                 execution["Id"] = execution_arn
             # execution["Input"] holds the initial Step Function input
             if execution.get("Input") == None: execution["Input"] = data
-
-            if not execution.get("Name"): execution["Name"] = execution_name
 
             if not execution.get("RoleArn"):
                 execution["RoleArn"] = asl_item["roleArn"]

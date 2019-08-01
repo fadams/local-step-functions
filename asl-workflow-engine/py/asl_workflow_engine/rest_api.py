@@ -34,11 +34,17 @@ aws stepfunctions --endpoint http://localhost:4584 list-state-machines --max-res
 # Create a new state machine
 aws stepfunctions --endpoint http://localhost:4584 create-state-machine --name my-state-machine --definition '{"Comment":"A Hello World example of the Amazon States Language using a Pass state","StartAt":"HelloWorld","States":{"HelloWorld":{"Type":"Pass","End":true}}}' --role-arn arn:aws:iam::0123456789:role/service-role/MyRole
 
+# Create a new state machine from a file
+aws stepfunctions --endpoint http://localhost:4584 create-state-machine --name simple_state_machine --definition file://<path-to-ASL-JSON> --role-arn arn:aws:iam::0123456789:role/service-role/MyRole
+
 # Update a state machine
 aws stepfunctions --endpoint http://localhost:4584 update-state-machine --definition '{"Comment":"A Hello World example of the Amazon States Language using a Pass state","StartAt":"HelloWorld","States":{"HelloWorld":{"Type":"Pass","End":true}}}' --role-arn arn:aws:iam::0123456789:role/service-role/MyRole --state-machine-arn arn:aws:states:local:0123456789:stateMachine:my-state-machine
 
 # Describe state machine
 aws stepfunctions --endpoint http://localhost:4584 describe-state-machine --state-machine-arn arn:aws:states:local:0123456789:stateMachine:my-state-machine
+
+# Delete state machine
+aws stepfunctions --endpoint http://localhost:4584 delete-state-machine --state-machine-arn arn:aws:states:local:0123456789:stateMachine:my-state-machine
 
 # Start state machine execution
 aws stepfunctions --endpoint http://localhost:4584 start-execution --state-machine-arn arn:aws:states:local:0123456789:stateMachine:my-state-machine --name my-execution --input '{"comment":"I am a great input !"}'
@@ -70,7 +76,7 @@ def valid_name(name):
     not re.search(r"^.*[ <>{}[\]?*\"#%\\^|~`$&,;:/].*$", name)
 
 def valid_role_arn(arn):
-    return isinstance(role_arn, str) and len(arn) > 0 and len(arn) < 257 and \
+    return isinstance(arn, str) and len(arn) > 0 and len(arn) < 257 and \
     re.search(r"^arn:aws:iam::[0-9]+:role\/.+$", arn)
 
 def valid_state_machine_arn(arn):
@@ -145,13 +151,13 @@ class RestAPI(object):
                 """
                 name = params.get("name")
                 if not valid_name(name):
-                    self.logger.error("RestAPI CreateStateMachine: {} is an invalid name".
+                    self.logger.warn("RestAPI CreateStateMachine: {} is an invalid name".
                     format(name))
                     return "InvalidName", 400
 
                 role_arn = params.get("roleArn")
                 if not valid_role_arn(role_arn):
-                    self.logger.error("RestAPI CreateStateMachine: {} is an invalid Role ARN".format(role_arn))
+                    self.logger.warn("RestAPI CreateStateMachine: {} is an invalid Role ARN".format(role_arn))
                     return "InvalidArn", 400
 
                 # Form stateMachineArn from roleArn and name
@@ -165,7 +171,9 @@ class RestAPI(object):
                 # Look up stateMachineArn
                 match = self.asl_cache.get(state_machine_arn)
                 if match:
-                    self.logger.error("RestAPI CreateStateMachine: State Machine {} already exists".format(state_machine_arn))
+                    # Info seems more appropriate than error here as creation is
+                    # an idempotent action.
+                    self.logger.info("RestAPI CreateStateMachine: State Machine {} already exists".format(state_machine_arn))
                     return "StateMachineAlreadyExists", 400
 
                 try:
@@ -174,7 +182,7 @@ class RestAPI(object):
                     self.logger.error("RestAPI CreateStateMachine: State Machine definition {} does not contain valid JSON".format(params.get("definition")))
 
                 if not (name and role_arn and definition):
-                    self.logger.error("RestAPI CreateStateMachine: name, roleArn and definition must be specified")
+                    self.logger.warn("RestAPI CreateStateMachine: name, roleArn and definition must be specified")
                     return "MissingRequiredParameter", 400
 
                 # TODO ASL Validator??
@@ -220,17 +228,17 @@ class RestAPI(object):
                 """
                 state_machine_arn = params.get("stateMachineArn")
                 if not state_machine_arn:
-                    self.logger.error("RestAPI DescribeStateMachine: stateMachineArn must be specified")
+                    self.logger.warn("RestAPI DescribeStateMachine: stateMachineArn must be specified")
                     return "MissingRequiredParameter", 400
 
                 if not valid_state_machine_arn(state_machine_arn):
-                    self.logger.error("RestAPI DescribeStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
+                    self.logger.warn("RestAPI DescribeStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
                     return "InvalidArn", 400
 
                 # Look up stateMachineArn
                 match = self.asl_cache.get(state_machine_arn)
                 if not match:
-                    self.logger.error("RestAPI DescribeStateMachine: State Machine {} does not exist".format(state_machine_arn))
+                    self.logger.info("RestAPI DescribeStateMachine: State Machine {} does not exist".format(state_machine_arn))
                     return "StateMachineDoesNotExist", 400
 
                 resp = {
@@ -248,6 +256,7 @@ class RestAPI(object):
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeStateMachineForExecution.html
                 """
+                # TODO
                 print(params)
 
                 resp = {
@@ -266,23 +275,23 @@ class RestAPI(object):
                 """
                 state_machine_arn = params.get("stateMachineArn")
                 if not state_machine_arn:
-                    self.logger.error("RestAPI UpdateStateMachine: stateMachineArn must be specified")
+                    self.logger.warn("RestAPI UpdateStateMachine: stateMachineArn must be specified")
                     return "MissingRequiredParameter", 400
 
                 if not valid_state_machine_arn(state_machine_arn):
-                    self.logger.error("RestAPI UpdateStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
+                    self.logger.warn("RestAPI UpdateStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
                     return "InvalidArn", 400
 
                 # Look up stateMachineArn
                 match = self.asl_cache.get(state_machine_arn)
                 if not match:
-                    self.logger.error("RestAPI UpdateStateMachine: State Machine {} does not exist".format(state_machine_arn))
+                    self.logger.info("RestAPI UpdateStateMachine: State Machine {} does not exist".format(state_machine_arn))
                     return "StateMachineDoesNotExist", 400
 
                 role_arn = params.get("roleArn")
                 if role_arn:
                     if not valid_role_arn(role_arn):
-                        self.logger.error("RestAPI UpdateStateMachine: {} is an invalid Role ARN".format(role_arn))
+                        self.logger.warn("RestAPI UpdateStateMachine: {} is an invalid Role ARN".format(role_arn))
                         return "InvalidArn", 400
                     match["roleArn"] = role_arn
 
@@ -295,7 +304,7 @@ class RestAPI(object):
                     match["definition"] = definition
 
                 if not role_arn and not definition:
-                    self.logger.error("RestAPI UpdateStateMachine: either roleArn or definition must be specified")
+                    self.logger.warn("RestAPI UpdateStateMachine: either roleArn or definition must be specified")
                     return "MissingRequiredParameter", 400
 
                 update_date = time.time()
@@ -312,8 +321,28 @@ class RestAPI(object):
             def aws_api_DeleteStateMachine():
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_DeleteStateMachine.html
+                TODO This should really mark the state machine for deletion and
+                "The state machine itself is deleted after all executions are 
+                completed or deleted.". Not sure how best to implement this in
+                a clustered environment without being over chatty, as the start
+                and end states could be run on different instances
                 """
-                print(params)
+                state_machine_arn = params.get("stateMachineArn")
+                if not state_machine_arn:
+                    self.logger.warn("RestAPI DeleteStateMachine: stateMachineArn must be specified")
+                    return "MissingRequiredParameter", 400
+
+                if not valid_state_machine_arn(state_machine_arn):
+                    self.logger.warn("RestAPI DeleteStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
+                    return "InvalidArn", 400
+
+                # Look up stateMachineArn
+                match = self.asl_cache.get(state_machine_arn)
+                if not match:
+                    self.logger.info("RestAPI DeleteStateMachine: State Machine {} does not exist".format(state_machine_arn))
+                    return "StateMachineDoesNotExist", 400
+
+                del self.asl_cache[state_machine_arn]
 
                 return "", 200
 
@@ -325,16 +354,16 @@ class RestAPI(object):
 
                 state_machine_arn = params.get("stateMachineArn")
                 if not state_machine_arn:
-                    self.logger.error("RestAPI StartExecution: stateMachineArn must be specified")
+                    self.logger.warn("RestAPI StartExecution: stateMachineArn must be specified")
                     return "MissingRequiredParameter", 400
 
                 if not valid_state_machine_arn(state_machine_arn):
-                    self.logger.error("RestAPI DescribeStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
+                    self.logger.warn("RestAPI DescribeStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
                     return "InvalidArn", 400
 
                 name = params.get("name", str(uuid.uuid4()))
                 if not valid_name(name):
-                    self.logger.error("RestAPI StartExecution: {} is an invalid name".
+                    self.logger.warn("RestAPI StartExecution: {} is an invalid name".
                                       format(name))
                     return "InvalidName", 400
 
@@ -348,7 +377,7 @@ class RestAPI(object):
                 # Look up stateMachineArn
                 match = self.asl_cache.get(state_machine_arn)
                 if not match:
-                    self.logger.error("RestAPI StartExecution: State Machine {} does not exist".format(state_machine_arn))
+                    self.logger.info("RestAPI StartExecution: State Machine {} does not exist".format(state_machine_arn))
                     return "StateMachineDoesNotExist", 400
 
 
@@ -410,7 +439,7 @@ class RestAPI(object):
             # Use the API action to dynamically invoke the appropriate handler.
             try:
                 value, code = locals().get("aws_api_" + action,
-                                       aws_api_InvalidAction)()
+                                           aws_api_InvalidAction)()
                 return value, code
             except Exception as e:
                 self.logger.error("RestAPI action {} failed unexpectedly with exception: {}".format(action, e))

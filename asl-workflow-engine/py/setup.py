@@ -25,5 +25,5 @@ setup(
     description="A workflow engine based on Amazon States Language",
     long_description="A workflow engine based on Amazon States Language intended to provide the features of AWS Step Functions in an engine that can be deployed to a range of different hosting environments",
     packages=find_packages(),
-    install_requires=["pika", "python-json-logger"]
+    install_requires=["pika", "structlog", "jsonpath", "flask"]
 )

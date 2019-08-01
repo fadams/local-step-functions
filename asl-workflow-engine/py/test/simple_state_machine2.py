@@ -17,17 +17,19 @@
 # under the License.
 #
 # Run with:
-# PYTHONPATH=.. python3 simple_state_machine1.py
+# PYTHONPATH=.. python3 simple_state_machine2.py
 #
 """
+This test uses the AWS python SDK boto3 to access our local ASL Workflow Engine
+https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/stepfunctions.html
+https://docs.aws.amazon.com/code-samples/latest/catalog/code-catalog-python-example_code-stepfunctions.html
+
+Its behaviour is essentially the same as simple_state_machine1.py though this
+test explicitly calls create_state_machine. The start_execution call will result
+in a message being sent to the asl_workflow_events queue "under the hood".
+
 This test is the rough equivalent of running the following on the AWS CLI
 with item 1 to 4 differing by the --input below.
-
-Note that this test makes use of an enhancement whereby the state machine
-Definition can be passed as well as its Id the context. This means that the
-create-state-machine API call does not need to be explicitly called prior to
-running this test as passing the Definition in the context implicitly performs
-the create-state-machine action.
 
 aws stepfunctions --endpoint http://localhost:4584 start-execution --state-machine-arn $STATE_MACHINE_ARN --input '{"lambda":"Success"}' --name success-execution
 
@@ -44,9 +46,10 @@ aws stepfunctions --endpoint http://localhost:4584 start-execution --state-machi
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
+import boto3
+from botocore.exceptions import ClientError
+
 from asl_workflow_engine.logger import init_logging
-from asl_workflow_engine.amqp_0_9_1_messaging import Connection, Message
-from asl_workflow_engine.messaging_exceptions import *
 
 ASL = """{
     "Comment": "Test Step Function",
@@ -119,73 +122,53 @@ ASL = """{
     }
 }"""
 
+items = ['{"lambda":"Success"}',
+         '{"lambda":"InternalErrorNotHandled"}',
+         '{"lambda":"InternalErrorHandled"}',
+         '{"lambda":"Timeout"}']
 
-"""
-The application context is described in the AWS documentation:
-https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html 
-
-{
-    "Execution": {
-        "Id": <String>,
-        "Input": <Object>,
-        "StartTime": <String Format: ISO 8601>
-    },
-    "State": {
-        "EnteredTime": <String Format: ISO 8601>,
-        "Name": <String>,
-        "RetryCount": <Number>
-    },
-    "StateMachine": {
-        "Id": <String>,
-        "Definition": <Object representing ASL state machine>
-    },
-    "Task": {
-        "Token": <String>
-    }
-}
-
-The most important paths for state traversal are:
-$$.State.Name = the current state
-$$.StateMachine.Definition = (optional) contains the complete ASL state machine
-$$.StateMachine.Id = a unique reference to an ASL state machine
-"""
-context = '{"StateMachine": {"Id": "arn:aws:states:local:0123456789:stateMachine:simple_state_machine", "Definition": ' + ASL + '}}'
-
-items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}',
-         '{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}',
-         '{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}',
-         '{"data": {"lambda":"Timeout"}, "context": ' + context + '}']
-
-items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}']
-#items = ['{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}']
-#items = ['{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}']
-#items = ['{"data": {"lambda":"Timeout"}, "context": ' + context + '}']
+#items = ['{"lambda":"Success"}']
+#items = ['{"lambda":"InternalErrorNotHandled"}']
+#items = ['{"lambda":"InternalErrorHandled"}']
+#items = ['{"lambda":"Timeout"}']
 
 if __name__ == '__main__':
     # Initialise logger
-    logger = init_logging(log_name='simple_state_machine1')
+    logger = init_logging(log_name='simple_state_machine2')
 
-    # Connect to event queue and send items.
-    connection = Connection("amqp://localhost:5672?connection_attempts=20&retry_delay=10&heartbeat=0")
+    # Initialise the boto3 client setting the endpoint_url to our local
+    # ASL Workflow Engine
+    # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html#boto3.session.Session.client
+    sfn = boto3.client("stepfunctions", endpoint_url="http://localhost:4584")
+    state_machine_arn = "arn:aws:states:local:0123456789:stateMachine:simple_state_machine"
+
+    # Create state machine using a dummy roleArn. If it already exists an
+    # exception will be thrown, we ignore that but raise other exceptions.
     try:
-        connection.open()
-        session = connection.session()
-        producer = session.producer("asl_workflow_events") # event queue
+        response = sfn.create_state_machine(
+            name="simple_state_machine", definition=ASL,
+            roleArn="arn:aws:iam::0123456789:role/service-role/MyRole"
+        )
+    except ClientError as e:
+        #print(e.response)
+        message = e.response["Error"]["Message"]
+        #code = e.response["Error"]["Code"]
+        if message == "StateMachineAlreadyExists": # Do update instead of create
+            response = sfn.update_state_machine(
+                stateMachineArn=state_machine_arn,
+                definition=callee_ASL
+            )
+        else: raise
+
+
+    # Loop through items invoking a new state machine execution for each item
+    try:
         for item in items:
-            """
-            Setting content_type isn't necessary for correct operation,
-            however it is the correct thing to do:
-            https://www.ietf.org/rfc/rfc4627.txt.
-            """
-            producer.send(Message(item, content_type="application/json"))
-        connection.close();
-    # Could catch MessagingError if we don't want to handle these separately
-    except ConnectionError as e:
-        self.logger.error(e)
-    except SessionError as e:
-        self.logger.error(e)
-    except ConsumerError as e:
-        self.logger.error(e)
-    except ProducerError as e:
-        self.logger.error(e)
+            response = sfn.start_execution(
+            stateMachineArn=state_machine_arn,
+            #name=EXECUTION_NAME, # If not specified a UUID is assigned
+            input=item
+        )
+    except ClientError as e:
+        self.logger.error(e.response)
 

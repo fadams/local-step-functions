@@ -21,9 +21,13 @@
 #
 """
 This test is the rough equivalent of running the following on the AWS CLI
-with item 1 to 4 differing by the --input below. Eventually the aim is to
-emulate the Step Function server but for now push all the required info to
-the state engine.
+with item 1 to 4 differing by the --input below.
+
+Note that this test makes use of an enhancement whereby the state machine
+Definition can be passed as well as its Id the context. This means that the
+create-state-machine API call does not need to be explicitly called prior to
+running this test as passing the Definition in the context implicitly performs
+the create-state-machine action.
 
 aws stepfunctions --endpoint http://localhost:4584 start-execution --state-machine-arn $STATE_MACHINE_ARN --input '{"lambda":"Success"}' --name success-execution
 
@@ -40,8 +44,8 @@ aws stepfunctions --endpoint http://localhost:4584 start-execution --state-machi
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-from threading import Timer
 import json
+from threading import Timer
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.state_engine import StateEngine
 
@@ -146,7 +150,7 @@ $$.State.Name = the current state
 $$.StateMachine.Definition = (optional) contains the complete ASL state machine
 $$.StateMachine.Id = a unique reference to an ASL state machine
 """
-context = '{"StateMachine": {"Id": "arn:aws:states:local:1234:stateMachine:simple_state_machine1", "Definition": ' + ASL + '}}'
+context = '{"StateMachine": {"Id": "arn:aws:states:local:0123456789:stateMachine:simple_state_machine", "Definition": ' + ASL + '}}'
 
 items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}',
          '{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}',

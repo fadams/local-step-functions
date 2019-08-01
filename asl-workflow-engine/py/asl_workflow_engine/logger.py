@@ -27,9 +27,21 @@ running process writes its event stream, unbuffered, to stdout (or stderr).
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import logging
+import os, logging
+import structlog
 
-def init_logging(log_name):
+
+def inject_context(logger, method_name, event_dict):
+    # inject current structlog context to stdlib logger calls from dependencies
+    context_class = structlog.get_config().get('context_class')
+    if context_class:
+        context = context_class()
+        # context object is not always subscriptable, so create list of kv pairs instead
+        kv_pairs = [(k, context.get(k)) for k in context.keys()]
+        event_dict.update(kv_pairs)
+    return event_dict
+
+def init_logging(log_name, log_level=logging.INFO):
     """
     Create a logger to use
 
@@ -42,13 +54,45 @@ def init_logging(log_name):
     # If logger already has handlers just return it as it is already initialised
     if logger.hasHandlers(): return logger
 
-    logger.setLevel(logging.DEBUG)
+    # Select automation friendly structured logging or more "human readable"
+    # logging based on the value of the USE_STRUCTURED_LOGGING environment var.
+    if os.environ.get("USE_STRUCTURED_LOGGING"):
+        # Use these processors for structlog and stdlib loggers
+        timestamper = structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S")
+        shared_processors = [
+            inject_context,
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            timestamper,
+            structlog.stdlib.PositionalArgumentsFormatter(),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.UnicodeDecoder(),
+        ]
 
-    formatter = logging.Formatter('[%(asctime)s] %(levelname)-8s - %(name)-15s : %(message)s')
-    stderr_handler = logging.StreamHandler()
-    stderr_handler.setLevel(logging.DEBUG)
-    stderr_handler.setFormatter(formatter)
+        structlog.configure(
+            processors=[structlog.stdlib.filter_by_level] +
+                       shared_processors + [
+                           structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+                       ],
+            context_class=structlog.threadlocal.wrap_dict(dict),
+            logger_factory=structlog.stdlib.LoggerFactory(),
+            wrapper_class=structlog.stdlib.BoundLogger,
+            cache_logger_on_first_use=True,
+        )
 
-    logger.addHandler(stderr_handler)
+        formatter = structlog.stdlib.ProcessorFormatter(
+            processor=structlog.processors.JSONRenderer(),
+            foreign_pre_chain=shared_processors,
+        )
+    else:
+        formatter = logging.Formatter('[%(asctime)s] %(levelname)-8s - %(name)-15s : %(message)s')
+
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+
+    logger.addHandler(handler)
+    logger.setLevel(log_level)
 
     return logger

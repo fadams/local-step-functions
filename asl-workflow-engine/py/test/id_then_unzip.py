@@ -20,6 +20,11 @@
 # PYTHONPATH=.. python3 id_then_unzip.py
 #
 """
+Note that this test makes use of an enhancement whereby the state machine
+Definition can be passed as well as its Id the context. This means that the
+create-state-machine API call does not need to be explicitly called prior to
+running this test as passing the Definition in the context implicitly performs
+the create-state-machine action.
 """
 
 import sys
@@ -80,13 +85,13 @@ $$.State.Name = the current state
 $$.StateMachine.Definition = (optional) contains the complete ASL state machine
 $$.StateMachine.Id = a unique reference to an ASL state machine
 """
-context = '{"StateMachine": {"Id": "arn:aws:states:local:1234:stateMachine:id_then_unzip", "Definition": ' + ASL + '}}'
+context = '{"StateMachine": {"Id": "arn:aws:states:local:0123456789:stateMachine:id_then_unzip", "Definition": ' + ASL + '}}'
 
 items = ['{"data": {"zipfile": "s3://37199-dev/CFX/input-data/akismet.2.5.3.zip", "destination": "s3://37199-dev/CFX/processed-data"}, "context": ' + context + '}']
 
 if __name__ == '__main__':
     # Initialise logger
-    logger = init_logging(log_name='simple_state_machine1')
+    logger = init_logging(log_name='id_then_unzip')
 
     # Connect to event queue and send items.
     connection = Connection("amqp://localhost:5672?connection_attempts=20&retry_delay=10&heartbeat=0")
