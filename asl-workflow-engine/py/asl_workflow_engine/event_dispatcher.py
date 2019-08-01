@@ -20,7 +20,7 @@
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import json
+import json, importlib
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.messaging_exceptions import *
 
@@ -57,27 +57,28 @@ class EventDispatcher(object):
         self.unacknowledged_messages = {}
         self.message_count = 0
 
-#        print(self.config["queue_name"])
-#        print(self.config["queue_type"])
-#        print(self.config["connection_url"])
-#        print(self.config["connection_options"])
+        """
+        Connection Factory for the event queue. The idea is to eventually
+        allow the ASL workflow engine to connect to alternative event queue
+        implementations in order to allow maximum flexibility.
+        """
+        name = self.config.get("queue_type", "AMQP-0.9.1").lower(). \
+                                                           replace("-", "_"). \
+                                                           replace(".", "_")
+        name = "asl_workflow_engine." + name + "_messaging"
+
+        self.logger.info("Loading messaging module {}".format(name))
+
+        # Load the module whose name is derived from the specified queue_type.
+        try:
+            messaging = importlib.import_module(name)
+            globals()["Connection"] = messaging.Connection
+            globals()["Message"] = messaging.Message
+        except ImportError as e:
+            self.logger.error(e)
+            exit()
 
     def start(self):
-        # Connection Factory for the event queue. The idea is to eventually
-        # allow the ASL workflow engine to connect to alternative event queue
-        # implementations in order to allow maximum flexibility.
-        # TODO better error handling and logging.
-        if self.config["queue_type"] == "AMQP-0.9.1":
-            from asl_workflow_engine.amqp_0_9_1_messaging import Connection, Message
-        elif self.config["queue_type"] == "AMQP-0.10": # TODO
-            from asl_workflow_engine.amqp_0_10_messaging import Connection, Message
-        elif self.config["queue_type"] == "AMQP-1": # TODO
-            from asl_workflow_engine.amqp_1_messaging import Connection, Message
-        elif self.config["queue_type"] == "NATS": # TODO
-            from asl_workflow_engine.nats_messaging import Connection, Message
-        elif self.config["queue_type"] == "SQS": # TODO AWS SQS
-            from asl_workflow_engine.sqs_messaging import Connection, Message
-
         # Connect to event queue and start the main event loop.
         # TODO This code will connect on broker startup, but need to add code to
         # reconnect for cases where the broker fails and then restarts.
@@ -162,9 +163,6 @@ class EventDispatcher(object):
         del self.unacknowledged_messages[id]
 
     def publish(self, item, threadsafe=False):
-        # TODO this import should be handled by the "Connection Factory for the
-        # event queue" code in the constructor.
-        from asl_workflow_engine.amqp_0_9_1_messaging import Message
         """
         Publish supplied item to the event queue hosted on the underlying
         messaging fabric. This method is mainly here to abstract some of the
