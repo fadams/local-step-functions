@@ -140,6 +140,10 @@ class StateEngine(object):
         state["EnteredTime"] = datetime.datetime.now().isoformat()
         self.event_dispatcher.publish(event)
 
+    def heartbeat(self):
+        print("StateEngine heartbeat")
+        self.task_dispatcher.heartbeat()
+
     def notify(self, event, id):
         """
         :item event: Describes the data, current state and the ASL State Machine

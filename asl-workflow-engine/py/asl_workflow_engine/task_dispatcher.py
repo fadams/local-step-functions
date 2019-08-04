@@ -54,6 +54,9 @@ class TaskDispatcher(object):
         """
         self.unmatched_requests = {}
 
+    def heartbeat(self):
+        print("TaskDispatcher heartbeat")
+
     def start(self, session):
         """
         Connect to the messaging fabric to enable Task States to integrate with
