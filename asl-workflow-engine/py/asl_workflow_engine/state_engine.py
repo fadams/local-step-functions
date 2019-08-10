@@ -20,8 +20,9 @@
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import json, time, datetime, uuid
+import json, time, uuid
 
+from datetime import datetime, timezone, timedelta
 from asl_workflow_engine.state_engine_paths import apply_jsonpath, \
                                                    apply_resultpath, \
                                                    evaluate_parameters
@@ -32,6 +33,26 @@ from asl_workflow_engine.task_dispatcher import TaskDispatcher
 from asl_workflow_engine.asl_exceptions import *
 from asl_workflow_engine.arn import *
 
+
+def parse_rfc3339_datetime(rfc3339):
+    """
+    Parse an RFC3339 (https://www.ietf.org/rfc/rfc3339.txt) format string into
+    a datetime object which is essentially the inverse operation to
+    datetime.now(timezone.utc).astimezone().isoformat()
+    We primarily need this in the Wait state so we can compute timeouts etc.
+    """
+    if rfc3339[-1] == "Z":
+        date = rfc3339[:-1]
+        offset = "+00:00"
+    else:
+        date = rfc3339[:-6]
+        offset = rfc3339[-6:]
+
+    if "." not in date: date = date + ".0"
+    raw_datetime = datetime.strptime(date, '%Y-%m-%dT%H:%M:%S.%f')
+    delta = timedelta(hours=int(offset[-5:-3]), minutes=int(offset[-2]))
+    if offset[0] == "-": delta = -delta
+    return raw_datetime.replace(tzinfo=timezone(delta))
 
 
 """
@@ -131,14 +152,48 @@ class StateEngine(object):
         self.task_dispatcher = TaskDispatcher(self, config)
         # self.event_dispatcher set by EventDispatcher
 
-    def change_state(self, next_state, event):
+    def change_state(self, state_type, next_state, event):
         """
         Set event's new current state in $$.State.Name to Next state.
         """
-        state = event["context"]["State"]
+        data = event["data"]
+        context = event["context"]
+        state = context["State"]
+        self.update_execution_history(context["Execution"]["Id"],
+                                      state_type + "StateExited",
+                                      {"output": data, "name": state["Name"]})
+        # Update the state
         state["Name"] = next_state
-        state["EnteredTime"] = datetime.datetime.now().isoformat()
+        # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
+        state["EnteredTime"] = datetime.now(timezone.utc).astimezone().isoformat()
         self.event_dispatcher.publish(event)
+
+    def end_state_machine(self, state_type, event):
+        """
+        End the state machine execution and update execution metadata.
+        """
+        data = event["data"]
+        context = event["context"]
+        state = context["State"]
+        self.update_execution_history(context["Execution"]["Id"],
+                                      state_type + "StateExited",
+                                      {"output": data, "name": state["Name"]})
+        update_type = "ExecutionSucceeded"
+        if data.get("Error"): update_type = "ExecutionFailed"
+        self.update_execution_history(context["Execution"]["Id"],
+                                      update_type,
+                                      {"output": data})
+
+    def update_execution_history(self, execution_id, update_type, details):
+        """
+        This will be eventually used to store the execution information in a
+        way that will be accessible to the REST API, but initially just log it.
+        """
+        # TODO logging the details object is likely to be expensive and in any
+        # case the idea is to get execution history via the REST API
+        # https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html
+        # Probably need to be more selective about what is logged here.
+        self.logger.info("{} {} {}".format(execution_id, update_type, details))
 
     def heartbeat(self):
         print("StateEngine heartbeat")
@@ -203,8 +258,6 @@ class StateEngine(object):
             self.logger.error("StateEngine: event {} has no $.context.StateMachine.Id field, dropping the message!".format(event))
             self.event_dispatcher.acknowledge(id)
             return
-
-        print(state_machine_id)
 
         """
         If ASL is present in optional state_machine["Definition"] store that as
@@ -287,7 +340,8 @@ class StateEngine(object):
             if not execution.get("RoleArn"):
                 execution["RoleArn"] = asl_item["roleArn"]
 
-            start_time = datetime.datetime.now().isoformat()
+            # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
+            start_time = datetime.now(timezone.utc).astimezone().isoformat()
             if execution.get("StartTime") == None:
                 execution["StartTime"] = start_time
 
@@ -301,12 +355,23 @@ class StateEngine(object):
             if context["State"].get("EnteredTime") == None:
                 context["State"]["EnteredTime"] = start_time
 
+            self.update_execution_history(execution["Id"],
+                                          "ExecutionStarted",
+                                          {"input": data, "roleArn": execution["RoleArn"]})
+
+
         state = ASL["States"][current_state]
 
+        # Determine the ASL state type of the current state.
+        state_type = state["Type"]
+    
+        """
+        print("state_machine_id = " + state_machine_id)
         print("current_state = " + current_state)
         print("state = " + str(state))
         print("data = " + str(data))
-        print(id)
+        print("event id = " + str(id))
+        """
 
         #-----------------------------------------------------------------------
         """
@@ -325,8 +390,6 @@ class StateEngine(object):
             to its output, performing no work. Pass States are useful when
             constructing and debugging state machines.
             """
-            #print(event)
-
             input = apply_jsonpath(data, state.get("InputPath", "$"))
 
             """
@@ -336,7 +399,7 @@ class StateEngine(object):
             extraction and embedding, becomes the effective input.
             """
             parameters = evaluate_parameters(input, context, state.get("Parameters"))
-            print(parameters)
+            #print(parameters)
 
             """
             A Pass State MAY have a field named “Result”. If present, its value
@@ -354,10 +417,9 @@ class StateEngine(object):
             event["data"] = apply_jsonpath(output, state.get("OutputPath", "$"))
 
             if (state.get("End")):
-                print("** END OF STATE MACHINE**")
-                # TODO output results
+                self.end_state_machine(state_type, event)
             else:
-                self.change_state(state.get("Next"), event)
+                self.change_state(state_type, state.get("Next"), event)
 
             self.event_dispatcher.acknowledge(id)
 
@@ -378,9 +440,9 @@ class StateEngine(object):
             than the specified heartbeat elapses between heartbeats from the task,
             then the interpreter fails the state with a States.Timeout Error Name.
             """
-            print("TASK")
-            print(state)
-            print(event)
+            #print("TASK")
+            #print(state)
+            #print(event)
 
             """
             It's important for this function to be nested as we want the event,
@@ -388,18 +450,14 @@ class StateEngine(object):
             service integrated to the Task *actually* returns its result.
             """
             def on_response(result):
-                print("----- TASK RESPONSE ----- id = " + str(id))
-                print(result)
-
                 # Task state applies ResultPath to "raw input"
                 output = apply_resultpath(data, result, state.get("ResultPath", "$"))
                 event["data"] = apply_jsonpath(output, state.get("OutputPath", "$"))
 
                 if (state.get("End")):
-                    print("** END OF STATE MACHINE**")
-                    # TODO output result
+                    self.end_state_machine(state_type, event)
                 else:
-                    self.change_state(state.get("Next"), event)
+                    self.change_state(state_type, state.get("Next"), event)
 
                 self.event_dispatcher.acknowledge(id)
 
@@ -424,8 +482,8 @@ class StateEngine(object):
             extraction and embedding, becomes the effective input.
             """
             parameters = evaluate_parameters(input, context, state.get("Parameters"))
+            #print(parameters)
 
-            print(parameters)
             self.task_dispatcher.execute_task(resource, parameters, on_response)
 
         def asl_state_Choice():
@@ -435,76 +493,133 @@ class StateEngine(object):
 
             A Choice state (identified by "Type":"Choice") adds branching logic
             to a state machine.
+
+            TODO - Question, adding the option to perform a regex test would
+            seem to be a useful thing to be able to do. This is not defined in
+            the ASL specification but is useful so what should we do?
+            
+
+            InputPath & OutputPath are allowed (but unusual) in Choice states.
+            https://states-language.net/spec.html#statetypes
             """
+            input = apply_jsonpath(data, state.get("InputPath", "$"))
 
             """
             The choose function implements the actual choice logic. We must
             first extract the Variable field and use its value as JSONPath to
-            scan the input data for the actual value the we wish to match.
+            scan the effective input for the actual value the we wish to match.
             """
             def choose(choice):
+                # variable_field may be None for And, Or, Not choice rules
                 variable_field = choice.get("Variable")
-                print("Variable field = " + str(variable_field))
-
-                variable = apply_jsonpath(data, variable_field)
-                print("Variable value = " + str(variable))
-
+                variable = apply_jsonpath(input, variable_field)
                 next = choice.get("Next", True)
 
-
+                def isnumber(x):
+                    # General test for numeric - any number x zero is zero
+                    try:
+                        return not isinstance(x, bool) and 0 == x*0
+                    except:
+                        return False
+                    
                 def asl_choice_And():
-                    # TODO Test me
-                    # Javascript if (choice.And.every(ch => this.process(ch)))
-                    if all(choose(ch) for ch in choice): return next
+                    if all(choose(ch) for ch in choice["And"]): return next
                 def asl_choice_Or():
-                    # TODO Test me
-                    # Javascript if (choice.Or.some(ch => this.process(ch)))
-                    if any(choose(ch) for ch in choice): return next
+                    if any(choose(ch) for ch in choice["Or"]): return next
                 def asl_choice_Not():
-                    # TODO Test me
-                    # if (!this.process(choice.Not))
-                    if (not this.choose(choice["Not"])): return next
+                    if (not choose(choice["Not"])): return next
 
                 def asl_choice_BooleanEquals():
-                    if (variable == choice["BooleanEquals"]): return next
+                    value = choice["BooleanEquals"]
+                    if isinstance(variable, bool) and isinstance(value, bool) and \
+                    variable == value: return next
+
                 def asl_choice_NumericEquals():
-                    if (variable == choice["NumericEquals"]): return next
+                    value = choice["NumericEquals"]
+                    if isnumber(variable) and isnumber(value) and \
+                    variable == value: return next
                 def asl_choice_NumericGreaterThan():
-                    if (variable > choice["NumericGreaterThan"]): return next
+                    value = choice["NumericGreaterThan"]
+                    if isnumber(variable) and isnumber(value) and \
+                    variable > value: return next
                 def asl_choice_NumericGreaterThanEquals():
-                    if (variable >= choice["NumericGreaterThanEquals"]): return next
+                    value = choice["NumericGreaterThanEquals"]
+                    if isnumber(variable) and isnumber(value) and \
+                    variable >= value: return next
                 def asl_choice_NumericLessThan():
-                    if (variable < choice["NumericLessThan"]): return next
+                    value = choice["NumericLessThan"]
+                    if isnumber(variable) and isnumber(value) and \
+                    variable < value: return next
                 def asl_choice_NumericLessThanEquals():
-                    if (variable <= choice["NumericLessThanEquals"]): return next
+                    value = choice["NumericLessThanEquals"]
+                    if isnumber(variable) and isnumber(value) and \
+                    variable <= value: return next
+
                 def asl_choice_StringEquals():
-                    if (variable == choice["StringEquals"]): return next
+                    value = choice["StringEquals"]
+                    if isinstance(variable, str) and isinstance(value, str) and \
+                    variable == value: return next
+                def asl_choice_CaseInsensitiveStringEquals():
+                    # Not covered in ASL spec. but useful and trivial to handle.
+                    value = choice["CaseInsensitiveStringEquals"]
+                    if isinstance(variable, str) and isinstance(value, str) and \
+                    variable.lower() == value.lower(): return next
                 def asl_choice_StringGreaterThan():
-                    if (variable > choice["StringGreaterThan"]): return next
+                    value = choice["StringGreaterThan"]
+                    if isinstance(variable, str) and isinstance(value, str) and \
+                    variable > value: return next
                 def asl_choice_StringGreaterThanEquals():
-                    if (variable >= choice["StringGreaterThanEquals"]): return next
+                    value = choice["StringGreaterThanEquals"]
+                    if isinstance(variable, str) and isinstance(value, str) and \
+                    variable >= value: return next
                 def asl_choice_StringLessThan():
-                    if (variable < choice["StringLessThan"]): return next
+                    value = choice["StringLessThan"]
+                    if isinstance(variable, str) and isinstance(value, str) and \
+                    variable < value: return next
                 def asl_choice_StringLessThanEquals():
-                    if (variable <= choice["StringLessThanEquals"]): return next
+                    value = choice["StringLessThanEquals"]
+                    if isinstance(variable, str) and isinstance(value, str) and \
+                    variable <= value: return next
+
+                """
+                The ASL spec. is a little vague on timestamps. The approach we
+                take here is to parse the rfc3339 string into an epoch timestamp
+                and perform the comparisons on those. The thinking with that
+                is because different rfc3339 representations can resolve to the
+                same actual time e.g. a representation in Zulu or local time
+                plus offset can both refer to the same time.
+                """
                 def asl_choice_TimestampEquals():
-                    if (variable == choice["TimestampEquals"]): return next
+                    timestamp = parse_rfc3339_datetime(variable).timestamp()
+                    value = parse_rfc3339_datetime(choice["TimestampEquals"]).timestamp()
+                    if timestamp == value: return next
                 def asl_choice_TimestampGreaterThan():
-                    if (variable > choice["TimestampGreaterThan"]): return next
+                    timestamp = parse_rfc3339_datetime(variable).timestamp()
+                    value = parse_rfc3339_datetime(choice["TimestampGreaterThan"]).timestamp()
+                    if timestamp > value: return next
                 def asl_choice_TimestampGreaterThanEquals():
-                    if (variable >= choice["TimestampGreaterThanEquals"]): return next
+                    timestamp = parse_rfc3339_datetime(variable).timestamp()
+                    value = parse_rfc3339_datetime(choice["TimestampGreaterThanEquals"]).timestamp()
+                    if timestamp >= value: return next
                 def asl_choice_TimestampLessThan():
-                    if (variable < choice["TimestampLessThan"]): return next
+                    timestamp = parse_rfc3339_datetime(variable).timestamp()
+                    value = parse_rfc3339_datetime(choice["TimestampLessThan"]).timestamp()
+                    if timestamp < value: return next
                 def asl_choice_TimestampLessThanEquals():
-                    if (variable <= choice["TimestampLessThanEquals"]): return next
+                    timestamp = parse_rfc3339_datetime(variable).timestamp()
+                    value = parse_rfc3339_datetime(choice["TimestampLessThanEquals"]).timestamp()
+                    if timestamp <= value: return next
 
                 for key in choice:
                     """
                     Determine the ASL choice operator of the current choice and
                     use that to dynamically invoke the appropriate choice handler.
                     """
-                    next_state = locals().get("asl_choice_" + key, lambda: None)()
-                    print("Key: " + key + " ------------------------- next_state = " + str(next_state))
+                    try:
+                        next_state = locals().get("asl_choice_" + key, lambda: None)()
+                    except Exception:
+                        next_state = None
+                    
                     if next_state: return next_state
 
             """
@@ -532,15 +647,14 @@ class StateEngine(object):
             """
             next_state = next_state if next_state else state.get("Default") 
 
-            print("-------- next_state = " + str(next_state))
-
+            event["data"] = apply_jsonpath(input, state.get("OutputPath", "$"))
             """
             The interpreter will raise a run-time States.NoChoiceMatched error
             if a “Choice” state fails to match a Choice Rule and no “Default”
             transition was specified. 
             """
             if next_state:
-                self.change_state(next_state, event)
+                self.change_state(state_type, next_state, event)
             else:
                 self.logger.error("States.NoChoiceMatched: {}".format(json.dumps(context)))
                 # TODO actually emit/publish an error to the caller when the
@@ -555,9 +669,12 @@ class StateEngine(object):
 
             A Wait state (identified by "Type":"Wait") causes the interpreter
             to delay the machine from continuing for a specified time.
+
+            InputPath & OutputPath are allowed (but unusual) in Wait states.
+            https://states-language.net/spec.html#statetypes. This is defined
+            before on_timeout() so that input is captured in its closure.
             """
-            print("WAIT")
-            print(event)
+            input = apply_jsonpath(data, state.get("InputPath", "$"))
 
             """
             It's important for this function to be nested as we want the event,
@@ -565,13 +682,12 @@ class StateEngine(object):
             timeout actually fires.
             """
             def on_timeout():
-                print("----- TIMEOUT ----- id = " + str(id))
+                event["data"] = apply_jsonpath(input, state.get("OutputPath", "$"))
 
                 if (state.get("End")):
-                    print("** END OF STATE MACHINE**")
-                    # TODO output results
+                    self.end_state_machine(state_type, event)
                 else:
-                    self.change_state(state.get("Next"), event)
+                    self.change_state(state_type, state.get("Next"), event)
 
                 self.event_dispatcher.acknowledge(id)
 
@@ -581,7 +697,8 @@ class StateEngine(object):
             date-time format string.
 
             The wait duration does not need to be hardcoded and may also be a
-            Reference Path to the data such as "TimestampPath": "$.expirydate"
+            Reference Path to the effective input such as
+            "TimestampPath": "$.expirydate"
     
             A Wait state MUST contain exactly one of ”Seconds”, “SecondsPath”,
             “Timestamp”, or “TimestampPath”.
@@ -590,20 +707,42 @@ class StateEngine(object):
             seconds_path = state.get("SecondsPath")
             timestamp = state.get("Timestamp")
             timestamp_path = state.get("TimestampPath")
+
+            """
+            For relative timeouts (seconds and seconds_path) we assume that the
+            required delay is relative to the time the state was entered, so we
+            add to the entry timestamp converted to epoch time and subtract
+            current epoch time. For normal operation this should be extremely
+            close to just using the seconds value, but for case where there is
+            a backlog on the event queue or the state engine has died and the
+            event has been redelivered to another instance then the actual delay
+            could be somewhat less. The ASL specification says nothing about
+            such a scenario, but it kind of seems logical for the wait time of
+            a Wait state to be relative to when the state was actually entered.
+            """
+            entry_time = context["State"].get("EnteredTime")
+            entry_timestamp = parse_rfc3339_datetime(entry_time).timestamp()
             if seconds:
-                timeout = seconds * 1000
+                current_timestamp = time.time()
+                timeout = (entry_timestamp + seconds - current_timestamp) * 1000
             elif seconds_path:
-                # TODO - should just be a JSONPath parse
-                timeout = 1 # seconds_path * 1000
+                seconds = apply_jsonpath(input, seconds_path)
+                print("seconds = " + str(seconds))
+                current_timestamp = time.time()
+                timeout = (entry_timestamp + seconds - current_timestamp) * 1000
+                print(timeout)
             elif timestamp:
-                # TODO - Need to subtract current time from timestamp to
-                # find timeout duration
-                timeout = 1 # timestamp * 1000
+                target_timestamp = parse_rfc3339_datetime(timestamp).timestamp()
+                current_timestamp = time.time()
+                timeout = (target_timestamp - current_timestamp) * 1000
+                print(timeout)
             elif timestamp_path:
-                # TODO - should just be a JSONPath parse to get Timestamp
-                # TODO - Need to subtract current time from timestamp to
-                # find timeout duration
-                timeout = 1 # timestamp_path * 1000
+                timestamp = apply_jsonpath(input, timestamp_path)
+                print("timestamp = " + str(timestamp))
+                target_timestamp = parse_rfc3339_datetime(timestamp).timestamp()
+                current_timestamp = time.time()
+                timeout = (target_timestamp - current_timestamp) * 1000
+                print(timeout)
 
             """
             Schedule the timeout. This is slightly subtle, the idea is that
@@ -623,11 +762,14 @@ class StateEngine(object):
             state branches that don't do anything but terminate the machine.
     
             Because Succeed States are terminal states, they have no “Next” field.
+            
+            InputPath & OutputPath are allowed (but unusual) in Succeed states.
+            https://states-language.net/spec.html#statetypes
             """
-            print("SUCCEED")
-            print(event)
+            input = apply_jsonpath(data, state.get("InputPath", "$"))
+            event["data"] = apply_jsonpath(input, state.get("OutputPath", "$"))
 
-
+            self.end_state_machine(state_type, event)
             self.event_dispatcher.acknowledge(id)
 
         def asl_state_Fail():
@@ -637,18 +779,24 @@ class StateEngine(object):
 
             The Fail State (identified by "Type":"Fail") terminates the machine
             and marks it as a failure.
-    
+        
+            Because Fail States are terminal states, they have no “Next” field.
+
             A Fail State MUST have a string field named “Error”, used to provide
             an error name that can be used for error handling (Retry/Catch),
             operational, or diagnostic purposes. A Fail State MUST have a string
             field named “Cause”, used to provide a human-readable message.
-    
-            Because Fail States are terminal states, they have no “Next” field.
+
+            The spec. doesn't specify what happens if those fields are not set.
             """
-            print("FAIL")
-            print(event)
+            error = {
+                "Error": state.get("Error", "Unspecified"),
+                "Cause": state.get("Cause", "Unspecified")
+            }
 
-
+            # Fail states don't allow InputPath, OutputPath or ResultPath
+            event["data"] = error
+            self.end_state_machine(state_type, event)
             self.event_dispatcher.acknowledge(id)
 
         def asl_state_Parallel():
@@ -659,9 +807,8 @@ class StateEngine(object):
             """
             # TODO
 
-            print("PARALLEL")
+            print("PARALLEL - Not Yet Implemented")
             print(event)
-
 
             self.event_dispatcher.acknowledge(id)
 
@@ -671,11 +818,13 @@ class StateEngine(object):
         #-----------------------------------------------------------------------
 
         """
-        Determine the ASL state type of the current state and use that to
-        dynamically invoke the appropriate ASL state handler given state type.
-        The lambda provides a default handler in case of malformed ASL. 
+        Use the ASL state type of the current state to dynamically invoke the
+        appropriate ASL state handler given state type. The (Python) lambda
+        provides a default handler in case of malformed ASL. 
         """
-        state_type = state["Type"]
+        self.update_execution_history(context["Execution"]["Id"],
+                                      state_type + "StateEntered",
+                                      {"input": data, "name": current_state})
         locals().get("asl_state_" + state_type,
                      lambda:
                         self.logger.error("StateEngine illegal state transition: {}".

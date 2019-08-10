@@ -20,7 +20,8 @@
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import json, os, time, datetime, uuid
+import json, os, time, uuid
+from datetime import datetime, timezone
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.messaging_exceptions import *
 from asl_workflow_engine.arn import *
@@ -301,7 +302,8 @@ class TaskDispatcher(object):
 
             # Create the execution context and the event to publish to launch
             # the requested new state machine execution.
-            start_time = datetime.datetime.now().isoformat()
+            # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
+            start_time = datetime.now(timezone.utc).astimezone().isoformat()
             context = {
                 "Execution": {
                     "Id": execution_arn,

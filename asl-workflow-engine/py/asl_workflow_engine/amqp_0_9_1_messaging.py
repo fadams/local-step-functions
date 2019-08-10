@@ -39,7 +39,6 @@ from asl_workflow_engine.messaging_exceptions import *
 class Connection(object):
 
     def __init__(self, url="amqp://localhost:5672"):
-    #def __init__(self, url="amqp://localhost:5672", **options): # may be useful
         """
         Creates a connection. A newly created connection must be opened with the
         Connection.open() method before it can be used.
@@ -263,7 +262,6 @@ class Destination(object):
                              "durable": False, "exclusive": True,
                              "auto-delete": True, "arguments": None}
 
-        # [{"queue": "", "exchange": "", "key": None, "arguments": None}]
         self.bindings = []
 
     def parse_address(self, address):

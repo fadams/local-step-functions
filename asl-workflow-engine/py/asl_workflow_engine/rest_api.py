@@ -65,7 +65,8 @@ aws stepfunctions --endpoint http://localhost:4584 get-execution-history --execu
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import re, json, time, datetime, uuid, logging
+import re, json, time, uuid, logging
+from datetime import datetime, timezone
 from flask import Flask, escape, request, jsonify, abort
 
 from asl_workflow_engine.logger import init_logging
@@ -393,7 +394,8 @@ class RestAPI(object):
                 The application context is described in the AWS documentation:
                 https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
                 """
-                start_time = datetime.datetime.now().isoformat()
+                # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
+                start_time = datetime.now(timezone.utc).astimezone().isoformat()
                 context = {
                     "Execution": {
                         "Id": execution_arn,

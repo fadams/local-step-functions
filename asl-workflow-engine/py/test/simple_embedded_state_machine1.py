@@ -20,6 +20,10 @@
 # PYTHONPATH=.. python3 simple_embedded_state_machine1.py
 #
 """
+This test stubs out much of the EventDispatcher and TaskDispatcher so that
+the messaging infrastructure isn't required and is in-effect just testing the
+operation of the state machine state transitions.
+
 This test is the rough equivalent of running the following on the AWS CLI
 with item 1 to 4 differing by the --input below.
 
@@ -157,7 +161,7 @@ items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}',
          '{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}',
          '{"data": {"lambda":"Timeout"}, "context": ' + context + '}']
 
-#items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}']
+items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"Timeout"}, "context": ' + context + '}']
@@ -172,7 +176,7 @@ be careful of issues due to recursion so we may need to revisit this IDC.
 """
 class EventDispatcherStub(object):
 
-    def __init__(self, logger, state_engine, config):
+    def __init__(self, state_engine, config):
 
         """
         Create an association with the state engine and give that a reference
@@ -203,7 +207,7 @@ class EventDispatcherStub(object):
         """
         self.message_count += 1
         # The notify method expects a JSON object not a string.
-        state_engine.notify(json.loads(message), self.message_count)
+        self.state_engine.notify(json.loads(message), self.message_count)
 
     def acknowledge(self, id):
         pass
@@ -212,13 +216,24 @@ class EventDispatcherStub(object):
         # Convert event back to JSON string for dispatching.
         self.dispatch(json.dumps(item))
 
+"""
+This stubs out the real TaskDispatcher execute_task method which requires
+messaging infrastructure to run whereas this test is just a state machine test.
+"""
+def execute_task_stub(resource_arn, parameters, callback):
+    name = resource_arn.split(":")[-1]
+    result = {"reply": name + " reply"}
+    callback(result)
+
 if __name__ == '__main__':
     # Initialise logger
     logger = init_logging(log_name='simple_embedded_state_machine1')
     config = {"state_engine": {"asl_cache": "ASL.json"}}
 
-    state_engine = StateEngine(logger, config)
-    event_dispatcher = EventDispatcherStub(logger, state_engine, config)
+    state_engine = StateEngine(config)
+    # Stub out the real TaskDispatcher execute_task
+    state_engine.task_dispatcher.execute_task = execute_task_stub
+    event_dispatcher = EventDispatcherStub(state_engine, config)
     for item in items:
         event_dispatcher.dispatch(item)
 
