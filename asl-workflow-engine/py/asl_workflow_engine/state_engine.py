@@ -41,6 +41,7 @@ def parse_rfc3339_datetime(rfc3339):
     datetime.now(timezone.utc).astimezone().isoformat()
     We primarily need this in the Wait state so we can compute timeouts etc.
     """
+    #rfc3339 = rfc3339.strip() # Remove any leading/trailing whitespace
     if rfc3339[-1] == "Z":
         date = rfc3339[:-1]
         offset = "+00:00"
@@ -85,7 +86,7 @@ class ReplicatedDict(collections.MutableMapping):
         self.logger.info("Creating ReplicatedDict")
 
         self.asl_cache_file = config["asl_cache"]
-        print("self.asl_cache_file = " + self.asl_cache_file)
+        #print("self.asl_cache_file = " + self.asl_cache_file)
 
         try:
             with open(self.asl_cache_file, 'r') as fp:
@@ -94,7 +95,7 @@ class ReplicatedDict(collections.MutableMapping):
         except IOError as e:
             self.store = {}
         except ValueError as e:
-            self.logger.warn("ReplicatedDict {} does not contain valid JSON".format(self.asl_cache_file))
+            self.logger.warning("ReplicatedDict {} does not contain valid JSON".format(self.asl_cache_file))
             self.store = {}
 
         #self.store = dict()
@@ -360,7 +361,11 @@ class StateEngine(object):
                                           {"input": data, "roleArn": execution["RoleArn"]})
 
 
-        state = ASL["States"][current_state]
+        state = ASL["States"].get(current_state)
+        if state == None:
+            self.logger.error("StateEngine: State {} does not exist, dropping the message!".format(current_state))
+            self.event_dispatcher.acknowledge(id)
+            return
 
         # Determine the ASL state type of the current state.
         state_type = state["Type"]
@@ -727,22 +732,25 @@ class StateEngine(object):
                 timeout = (entry_timestamp + seconds - current_timestamp) * 1000
             elif seconds_path:
                 seconds = apply_jsonpath(input, seconds_path)
-                print("seconds = " + str(seconds))
                 current_timestamp = time.time()
                 timeout = (entry_timestamp + seconds - current_timestamp) * 1000
-                print(timeout)
             elif timestamp:
-                target_timestamp = parse_rfc3339_datetime(timestamp).timestamp()
-                current_timestamp = time.time()
-                timeout = (target_timestamp - current_timestamp) * 1000
-                print(timeout)
+                try:
+                    target_timestamp = parse_rfc3339_datetime(timestamp).timestamp()
+                    current_timestamp = time.time()
+                    timeout = (target_timestamp - current_timestamp) * 1000
+                except ValueError as e:
+                    self.logger.warning("timestamp {} failed to parse correctly, defaulting to zero delay".format(timestamp))
+                    timeout = 0
             elif timestamp_path:
                 timestamp = apply_jsonpath(input, timestamp_path)
-                print("timestamp = " + str(timestamp))
-                target_timestamp = parse_rfc3339_datetime(timestamp).timestamp()
-                current_timestamp = time.time()
-                timeout = (target_timestamp - current_timestamp) * 1000
-                print(timeout)
+                try:
+                    target_timestamp = parse_rfc3339_datetime(timestamp).timestamp()
+                    current_timestamp = time.time()
+                    timeout = (target_timestamp - current_timestamp) * 1000
+                except ValueError as e:
+                    self.logger.warning("timestamp {} failed to parse correctly, defaulting to zero delay".format(timestamp))
+                    timeout = 0
 
             """
             Schedule the timeout. This is slightly subtle, the idea is that

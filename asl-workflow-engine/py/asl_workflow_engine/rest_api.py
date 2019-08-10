@@ -152,13 +152,13 @@ class RestAPI(object):
                 """
                 name = params.get("name")
                 if not valid_name(name):
-                    self.logger.warn("RestAPI CreateStateMachine: {} is an invalid name".
+                    self.logger.warning("RestAPI CreateStateMachine: {} is an invalid name".
                     format(name))
                     return "InvalidName", 400
 
                 role_arn = params.get("roleArn")
                 if not valid_role_arn(role_arn):
-                    self.logger.warn("RestAPI CreateStateMachine: {} is an invalid Role ARN".format(role_arn))
+                    self.logger.warning("RestAPI CreateStateMachine: {} is an invalid Role ARN".format(role_arn))
                     return "InvalidArn", 400
 
                 # Form stateMachineArn from roleArn and name
@@ -183,7 +183,7 @@ class RestAPI(object):
                     self.logger.error("RestAPI CreateStateMachine: State Machine definition {} does not contain valid JSON".format(params.get("definition")))
 
                 if not (name and role_arn and definition):
-                    self.logger.warn("RestAPI CreateStateMachine: name, roleArn and definition must be specified")
+                    self.logger.warning("RestAPI CreateStateMachine: name, roleArn and definition must be specified")
                     return "MissingRequiredParameter", 400
 
                 # TODO ASL Validator??
@@ -229,11 +229,11 @@ class RestAPI(object):
                 """
                 state_machine_arn = params.get("stateMachineArn")
                 if not state_machine_arn:
-                    self.logger.warn("RestAPI DescribeStateMachine: stateMachineArn must be specified")
+                    self.logger.warning("RestAPI DescribeStateMachine: stateMachineArn must be specified")
                     return "MissingRequiredParameter", 400
 
                 if not valid_state_machine_arn(state_machine_arn):
-                    self.logger.warn("RestAPI DescribeStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
+                    self.logger.warning("RestAPI DescribeStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
                     return "InvalidArn", 400
 
                 # Look up stateMachineArn
@@ -276,11 +276,11 @@ class RestAPI(object):
                 """
                 state_machine_arn = params.get("stateMachineArn")
                 if not state_machine_arn:
-                    self.logger.warn("RestAPI UpdateStateMachine: stateMachineArn must be specified")
+                    self.logger.warning("RestAPI UpdateStateMachine: stateMachineArn must be specified")
                     return "MissingRequiredParameter", 400
 
                 if not valid_state_machine_arn(state_machine_arn):
-                    self.logger.warn("RestAPI UpdateStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
+                    self.logger.warning("RestAPI UpdateStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
                     return "InvalidArn", 400
 
                 # Look up stateMachineArn
@@ -292,7 +292,7 @@ class RestAPI(object):
                 role_arn = params.get("roleArn")
                 if role_arn:
                     if not valid_role_arn(role_arn):
-                        self.logger.warn("RestAPI UpdateStateMachine: {} is an invalid Role ARN".format(role_arn))
+                        self.logger.warning("RestAPI UpdateStateMachine: {} is an invalid Role ARN".format(role_arn))
                         return "InvalidArn", 400
                     match["roleArn"] = role_arn
 
@@ -305,7 +305,7 @@ class RestAPI(object):
                     match["definition"] = definition
 
                 if not role_arn and not definition:
-                    self.logger.warn("RestAPI UpdateStateMachine: either roleArn or definition must be specified")
+                    self.logger.warning("RestAPI UpdateStateMachine: either roleArn or definition must be specified")
                     return "MissingRequiredParameter", 400
 
                 update_date = time.time()
@@ -330,11 +330,11 @@ class RestAPI(object):
                 """
                 state_machine_arn = params.get("stateMachineArn")
                 if not state_machine_arn:
-                    self.logger.warn("RestAPI DeleteStateMachine: stateMachineArn must be specified")
+                    self.logger.warning("RestAPI DeleteStateMachine: stateMachineArn must be specified")
                     return "MissingRequiredParameter", 400
 
                 if not valid_state_machine_arn(state_machine_arn):
-                    self.logger.warn("RestAPI DeleteStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
+                    self.logger.warning("RestAPI DeleteStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
                     return "InvalidArn", 400
 
                 # Look up stateMachineArn
@@ -355,16 +355,16 @@ class RestAPI(object):
 
                 state_machine_arn = params.get("stateMachineArn")
                 if not state_machine_arn:
-                    self.logger.warn("RestAPI StartExecution: stateMachineArn must be specified")
+                    self.logger.warning("RestAPI StartExecution: stateMachineArn must be specified")
                     return "MissingRequiredParameter", 400
 
                 if not valid_state_machine_arn(state_machine_arn):
-                    self.logger.warn("RestAPI DescribeStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
+                    self.logger.warning("RestAPI DescribeStateMachine: {} is an invalid State Machine ARN".format(state_machine_arn))
                     return "InvalidArn", 400
 
                 name = params.get("name", str(uuid.uuid4()))
                 if not valid_name(name):
-                    self.logger.warn("RestAPI StartExecution: {} is an invalid name".
+                    self.logger.warning("RestAPI StartExecution: {} is an invalid name".
                                       format(name))
                     return "InvalidName", 400
 
