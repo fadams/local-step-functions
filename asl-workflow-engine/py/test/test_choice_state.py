@@ -356,7 +356,7 @@ class TestChoiceState(unittest.TestCase):
 
     def setUp(self):
         # Initialise logger
-        logger = init_logging(log_name='simple_embedded_state_machine1')
+        logger = init_logging(log_name="test_choice_state")
         config = {"state_engine": {"asl_cache": "ASL.json"}}
 
         state_engine = StateEngine(config)

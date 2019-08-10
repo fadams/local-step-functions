@@ -17,7 +17,7 @@
 # under the License.
 #
 # Run with:
-# PYTHONPATH=.. python3 simple_embedded_state_machine1.py
+# PYTHONPATH=.. python3 test_simple_state_machine.py
 #
 """
 This test stubs out much of the EventDispatcher and TaskDispatcher so that
@@ -48,6 +48,7 @@ aws stepfunctions --endpoint http://localhost:4584 start-execution --state-machi
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
+import unittest
 import json
 from threading import Timer
 from asl_workflow_engine.logger import init_logging
@@ -161,7 +162,7 @@ items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}',
          '{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}',
          '{"data": {"lambda":"Timeout"}, "context": ' + context + '}']
 
-items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}']
+#items = ['{"data": {"lambda":"Success"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"InternalErrorNotHandled"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"InternalErrorHandled"}, "context": ' + context + '}']
 #items = ['{"data": {"lambda":"Timeout"}, "context": ' + context + '}']
@@ -225,15 +226,23 @@ def execute_task_stub(resource_arn, parameters, callback):
     result = {"reply": name + " reply"}
     callback(result)
 
-if __name__ == '__main__':
-    # Initialise logger
-    logger = init_logging(log_name='simple_embedded_state_machine1')
-    config = {"state_engine": {"asl_cache": "ASL.json"}}
 
-    state_engine = StateEngine(config)
-    # Stub out the real TaskDispatcher execute_task
-    state_engine.task_dispatcher.execute_task = execute_task_stub
-    event_dispatcher = EventDispatcherStub(state_engine, config)
-    for item in items:
-        event_dispatcher.dispatch(item)
+class TestSimpleStateMachine(unittest.TestCase):
+
+    def setUp(self):
+        # Initialise logger
+        logger = init_logging(log_name="test_simple_state_machine")
+        config = {"state_engine": {"asl_cache": "ASL.json"}}
+
+        state_engine = StateEngine(config)
+        # Stub out the real TaskDispatcher execute_task
+        state_engine.task_dispatcher.execute_task = execute_task_stub
+        self.event_dispatcher = EventDispatcherStub(state_engine, config)
+
+    def test_state_machine(self):
+        for item in items:
+            self.event_dispatcher.dispatch(item)
+
+if __name__ == '__main__':
+    unittest.main()
 
