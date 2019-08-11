@@ -1,13 +1,19 @@
 # Local Step Functions
-This repository is about art of the possible in terms of running AWS Step Functions/Amazon States Language locally.
+This repository is about art of the possible in terms of running AWS Step Functions/Amazon States Language locally. The repository contains a range of links to resources about ASL including GUIs and possibilities for calling out to alternate serveless frameworks such as Fn or OpenFaaS or whatever.
 
-The repository contains a range of resources and experiments such as alternative ASL execution environments, GUIs and possibilities for calling out to alternate serveless frameworks such as Fn or OpenFaaS or whatever.
+For a (work in progress) implementation of ASL see the [ASL Workflow Engine](asl-workflow-engine/README.md) in this repository.
 
 ### AWS Step Function Links
 * https://states-language.net/spec.html
 * https://docs.aws.amazon.com/step-functions/index.html
 * https://docs.aws.amazon.com/step-functions/latest/dg/welcome.html
 * https://docs.aws.amazon.com/step-functions/latest/apireference/Welcome.html
+
+### Graphical Tools
+* https://github.com/sakazuki/step-functions-draw.io
+* https://github.com/jgraph/drawio
+
+See also the [draw.io](drawio/README.md) resources in this repository which include a Dockerfile and Docker launch script for draw.io.
 
 ### Other Resources
 
@@ -20,10 +26,6 @@ The repository contains a range of resources and experiments such as alternative
 * https://serverless.zone/faas-is-stateless-and-aws-step-functions-provides-state-as-a-service-2499d4a6e412
 * https://tech.trivago.com/2019/04/09/circuit-breaker-with-aws-step-functions/
 * https://www.stackery.io/blog/serverless-state-machines/
-
-### Graphical Tools
-* https://github.com/sakazuki/step-functions-draw.io
-* https://github.com/jgraph/drawio
 
 ### Potentially Interesting Projects
 * https://docs.aws.amazon.com/step-functions/latest/dg/sfn-local.html
