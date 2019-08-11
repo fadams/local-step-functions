@@ -1,6 +1,6 @@
 # Docker
 
-An Alpine based [Dockerfile](Dockerfile) for the [asl-workflow-engine](../asl-workflow-engine) is as follows:
+An Alpine based [Dockerfile](Dockerfile) for the [asl-workflow-engine](..) is as follows:
 ```
 FROM python:3.6-alpine
 
