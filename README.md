@@ -1,7 +1,7 @@
 # Local Step Functions
 This repository is about art of the possible in terms of running AWS Step Functions/Amazon States Language locally. The repository contains a range of links to resources about ASL including GUIs and possibilities for calling out to alternate serveless frameworks such as Fn or OpenFaaS or whatever.
 
-For a (work in progress) implementation of ASL see the [ASL Workflow Engine](asl-workflow-engine/README.md) in this repository.
+For a (work in progress) implementation of ASL see the [ASL Workflow Engine](asl-workflow-engine) in this repository.
 
 ### AWS Step Function Links
 * https://states-language.net/spec.html
@@ -13,7 +13,7 @@ For a (work in progress) implementation of ASL see the [ASL Workflow Engine](asl
 * https://github.com/sakazuki/step-functions-draw.io
 * https://github.com/jgraph/drawio
 
-See also the [draw.io](drawio/README.md) resources in this repository which include a Dockerfile and Docker launch script for draw.io.
+See also the [draw.io](drawio) resources in this repository which include a Dockerfile and Docker launch script for draw.io.
 
 ### Other Resources
 
