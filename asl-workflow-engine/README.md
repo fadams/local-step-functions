@@ -192,21 +192,21 @@ The Actions from the official AWS API currently implemented by the ASL Workflow 
 * [CreateStateMachine](https://docs.aws.amazon.com/step-functions/latest/apireference/API_CreateStateMachine.html)
 * [DeleteStateMachine](https://docs.aws.amazon.com/step-functions/latest/apireference/API_DeleteStateMachine.html)
 * [DescribeStateMachine](https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeStateMachine.html)
+* [DescribeStateMachineForExecution](https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeStateMachineForExecution.html)
 * [ListStateMachines](https://docs.aws.amazon.com/step-functions/latest/apireference/API_ListStateMachines.html)
 * [StartExecution](https://docs.aws.amazon.com/step-functions/latest/apireference/API_StartExecution.html)
 * [UpdateStateMachine](https://docs.aws.amazon.com/step-functions/latest/apireference/API_UpdateStateMachine.html)
+* [ListExecutions](https://docs.aws.amazon.com/step-functions/latest/apireference/API_ListExecutions.html)
+* [DescribeExecution](https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html)
+* [GetExecutionHistory](https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html)
 
 The official API Actions not currently implemented are:
 
 * [CreateActivity](https://docs.aws.amazon.com/step-functions/latest/apireference/API_CreateActivity.html)
 * [DeleteActivity](https://docs.aws.amazon.com/step-functions/latest/apireference/API_DeleteActivity.html)
 * [DescribeActivity](https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeActivity.html)
-* [DescribeExecution](https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html)
-* [DescribeStateMachineForExecution](https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeStateMachineForExecution.html)
 * [GetActivityTask](https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetActivityTask.html)
-* [GetExecutionHistory](https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html)
 * [ListActivities](https://docs.aws.amazon.com/step-functions/latest/apireference/API_ListActivities.html)
-* [ListExecutions](https://docs.aws.amazon.com/step-functions/latest/apireference/API_ListExecutions.html)
 * [ListTagsForResource](https://docs.aws.amazon.com/step-functions/latest/apireference/API_ListTagsForResource.html)
 * [SendTaskFailure](https://docs.aws.amazon.com/step-functions/latest/apireference/API_SendTaskFailure.html)
 * [SendTaskHeartbeat](https://docs.aws.amazon.com/step-functions/latest/apireference/API_SendTaskHeartbeat.html)
@@ -215,7 +215,7 @@ The official API Actions not currently implemented are:
 * [TagResource](https://docs.aws.amazon.com/step-functions/latest/apireference/API_TagResource.html)
 * [UntagResource](https://docs.aws.amazon.com/step-functions/latest/apireference/API_UntagResource.html)
 
-The main priority is to implement the Actions used to retrieve the Execution metadata as this is important for diagnosing problems. The Activity API will be implemented in due course, though in an Open Source ASL implementation such as this implementing additional Service Integrations might be more elegant, though Step Function Activities do provide as fairly general integration approach.
+The Activity API will be implemented in due course, though in an Open Source ASL implementation such as this implementing additional Service Integrations might be more elegant, though Step Function Activities do provide as fairly general integration approach.
 
 Some examples of using the AWS CLI follow, note the use of the `--endpoint` (or `--endpoint-url`) flag to tell the CLI to use a different (non-default) REST endpoint.
 ```

@@ -84,6 +84,10 @@ def valid_state_machine_arn(arn):
     return isinstance(arn, str) and len(arn) > 0 and len(arn) < 257 and \
     re.search(r"^arn:aws:states:.+:[0-9]+:stateMachine:.+$", arn)
 
+def valid_execution_arn(arn):
+    return isinstance(arn, str) and len(arn) > 0 and len(arn) < 257 and \
+    re.search(r"^arn:aws:states:.+:[0-9]+:execution:.+$", arn)
+
 
 class RestAPI(object):
     def __init__(self, state_engine, event_dispatcher, config):
@@ -98,6 +102,7 @@ class RestAPI(object):
             self.region = config.get("region", "local")
 
         self.asl_cache = state_engine.asl_cache
+        self.executions = state_engine.executions
         self.event_dispatcher = event_dispatcher
 
     def create_app(self):
@@ -211,6 +216,8 @@ class RestAPI(object):
                 next_token = ""
 
                 resp = {
+                    # Populate using list comprehensions
+                    # https://www.pythonforbeginners.com/basics/list-comprehensions-in-python
                     "stateMachines": [
                         {
                             "creationDate": v["creationDate"],
@@ -257,15 +264,39 @@ class RestAPI(object):
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeStateMachineForExecution.html
                 """
-                # TODO
-                print(params)
+                execution_arn = params.get("executionArn")
+                if not execution_arn:
+                    self.logger.warning("RestAPI DescribeStateMachineForExecution: executionArn must be specified")
+                    return "MissingRequiredParameter", 400
+
+                if not valid_execution_arn(execution_arn):
+                    self.logger.warning("RestAPI DescribeStateMachineForExecution: {} is an invalid Execution ARN".format(execution_arn))
+                    return "InvalidArn", 400
+
+                # Look up executionArn
+                match = self.executions.get(execution_arn)
+                if not match:
+                    self.logger.info("RestAPI DescribeStateMachineForExecution: Execution {} does not exist".format(execution_arn))
+                    return "ExecutionDoesNotExist", 400
+
+                state_machine_arn = match.get("stateMachineArn")
+
+                if not valid_state_machine_arn(state_machine_arn):
+                    self.logger.warning("RestAPI DescribeStateMachineForExecution: {} is an invalid State Machine ARN".format(state_machine_arn))
+                    return "InvalidArn", 400
+
+                # Look up stateMachineArn
+                match = self.asl_cache.get(state_machine_arn)
+                if not match:
+                    self.logger.info("RestAPI DescribeStateMachineForExecution: State Machine {} does not exist".format(state_machine_arn))
+                    return "StateMachineDoesNotExist", 400
 
                 resp = {
-                    "definition": "string",
-                    "name": "string",
-                    "roleArn": "string",
-                    "stateMachineArn": "string",
-                    "updateDate": 10
+                    "definition": match["definition"],
+                    "name": match["name"],
+                    "roleArn": match["roleArn"],
+                    "stateMachineArn": state_machine_arn,
+                    "updateDate": match["creationDate"]
                 }
 
                 return jsonify(resp), 200
@@ -351,7 +382,7 @@ class RestAPI(object):
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_StartExecution.html
                 """
-                print(params)
+                #print(params)
 
                 state_machine_arn = params.get("stateMachineArn")
                 if not state_machine_arn:
@@ -431,6 +462,116 @@ class RestAPI(object):
                 }
 
                 return jsonify(resp), 200
+
+            def aws_api_ListExecutions():
+                """
+                https://docs.aws.amazon.com/step-functions/latest/apireference/API_ListExecutions.html
+                """
+                state_machine_arn = params.get("stateMachineArn")
+                if not state_machine_arn:
+                    self.logger.warning("RestAPI ListExecutions: stateMachineArn must be specified")
+                    return "MissingRequiredParameter", 400
+
+                if not valid_state_machine_arn(state_machine_arn):
+                    self.logger.warning("RestAPI ListExecutions: {} is an invalid State Machine ARN".format(state_machine_arn))
+                    return "InvalidArn", 400
+
+                # Look up stateMachineArn
+                match = self.asl_cache.get(state_machine_arn)
+                if not match:
+                    self.logger.info("RestAPI ListExecutions: State Machine {} does not exist".format(state_machine_arn))
+                    return "StateMachineDoesNotExist", 400
+
+                status_filter = params.get("statusFilter")
+                if status_filter and status_filter not in {"RUNNING", "SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED"}:
+                    self.logger.warning("RestAPI ListExecutions: {} is an invalid Status Filter Value".format(status_filter))
+                    return "InvalidstatusFilterValue", 400
+
+                # TODO handle nextToken stuff
+                next_token = ""
+
+                resp = {
+                    # Populate using list comprehensions
+                    # https://www.pythonforbeginners.com/basics/list-comprehensions-in-python
+                    "executions": [
+                        {
+                            "executionArn": k,
+                            "name": v["name"],
+                            "startDate": v.get("startDate"),
+                            "stateMachineArn": v["stateMachineArn"],
+                            "status": v["status"],
+                            "stopDate": v.get("stopDate")
+                        } for k, v in self.executions.items() if v["stateMachineArn"] == state_machine_arn and (status_filter == None or v["status"] == status_filter)
+                    ]
+                }
+                if next_token: resp["nextToken"] = next_token
+
+                return jsonify(resp), 200
+
+            def aws_api_DescribeExecution():
+                """
+                https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html
+                """
+                execution_arn = params.get("executionArn")
+                if not execution_arn:
+                    self.logger.warning("RestAPI DescribeExecution: executionArn must be specified")
+                    return "MissingRequiredParameter", 400
+
+                if not valid_execution_arn(execution_arn):
+                    self.logger.warning("RestAPI DescribeExecution: {} is an invalid Execution ARN".format(execution_arn))
+                    return "InvalidArn", 400
+                
+                # Look up executionArn
+                match = self.executions.get(execution_arn)
+                if not match:
+                    self.logger.info("RestAPI DescribeExecution: Execution {} does not exist".format(execution_arn))
+                    return "ExecutionDoesNotExist", 400
+
+                resp = {
+                    "executionArn": execution_arn,
+                    "input": match["input"],
+                    "name": match["name"],
+                    "output": match["output"],
+                    "startDate": match["startDate"],
+                    "stateMachineArn": match["stateMachineArn"],
+                    "status": match["status"],
+                    "stopDate": match["stopDate"]
+                }
+
+                return jsonify(resp), 200
+
+
+            def aws_api_GetExecutionHistory():
+                """
+                https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html
+                """
+                print(params)
+
+                execution_arn = params.get("executionArn")
+                if not execution_arn:
+                    self.logger.warning("RestAPI GetExecutionHistory: executionArn must be specified")
+                    return "MissingRequiredParameter", 400
+
+                if not valid_execution_arn(execution_arn):
+                    self.logger.warning("RestAPI GetExecutionHistory: {} is an invalid Execution ARN".format(execution_arn))
+                    return "InvalidArn", 400
+
+                # Look up executionArn
+                match = self.executions.get(execution_arn)
+                if not match:
+                    self.logger.info("RestAPI GetExecutionHistory: Execution {} does not exist".format(execution_arn))
+                    return "ExecutionDoesNotExist", 400
+
+                # TODO handle nextToken stuff
+                next_token = ""
+
+                resp = {
+                    "events": match["history"]
+                }
+                if next_token: resp["nextToken"] = next_token
+
+                return jsonify(resp), 200
+
 
             def aws_api_InvalidAction():
                 self.logger.error("RestAPI invalid action: {}".format(action))

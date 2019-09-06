@@ -41,7 +41,7 @@ def parse_rfc3339_datetime(rfc3339):
     datetime.now(timezone.utc).astimezone().isoformat()
     We primarily need this in the Wait state so we can compute timeouts etc.
     """
-    #rfc3339 = rfc3339.strip() # Remove any leading/trailing whitespace
+    rfc3339 = rfc3339.strip() # Remove any leading/trailing whitespace
     if rfc3339[-1] == "Z":
         date = rfc3339[:-1]
         offset = "+00:00"
@@ -81,21 +81,21 @@ https://stackoverflow.com/questions/3387691/how-to-perfectly-override-a-dict
 TODO focussing on storage ATM need to look at replication stuff soon.
 """
 class ReplicatedDict(collections.MutableMapping):
-    def __init__(self, config, *args, **kwargs):
+    def __init__(self, transaction_log_name, *args, **kwargs):
         self.logger = init_logging(log_name='asl_workflow_engine')
         self.logger.info("Creating ReplicatedDict")
 
-        self.asl_cache_file = config["asl_cache"]
-        #print("self.asl_cache_file = " + self.asl_cache_file)
+        self.transaction_log = transaction_log_name
+        #print("self.transaction_log = " + self.transaction_log)
 
         try:
-            with open(self.asl_cache_file, 'r') as fp:
+            with open(self.transaction_log, 'r') as fp:
                 self.store = json.load(fp)
-            self.logger.info("ReplicatedDict loading: {}".format(self.asl_cache_file))
+            self.logger.info("ReplicatedDict loading: {}".format(self.transaction_log))
         except IOError as e:
             self.store = {}
         except ValueError as e:
-            self.logger.warning("ReplicatedDict {} does not contain valid JSON".format(self.asl_cache_file))
+            self.logger.warning("ReplicatedDict {} does not contain valid JSON".format(self.transaction_log))
             self.store = {}
 
         #self.store = dict()
@@ -110,18 +110,18 @@ class ReplicatedDict(collections.MutableMapping):
     def __setitem__(self, key, value):
         self.store[key] = value
         try:
-            with open(self.asl_cache_file, 'w') as fp:
+            with open(self.transaction_log, 'w') as fp:
                 json.dump(self.store, fp)
-            self.logger.info("Updating ReplicatedDict: {}".format(self.asl_cache_file))
+            self.logger.info("Updating ReplicatedDict: {}".format(self.transaction_log))
         except IOError as e:
             raise
 
     def __delitem__(self, key):
         del self.store[key]
         try:
-            with open(self.asl_cache_file, 'w') as fp:
+            with open(self.transaction_log, 'w') as fp:
                 json.dump(self.store, fp)
-            self.logger.info("Updating ReplicatedDict: {}".format(self.asl_cache_file))
+            self.logger.info("Updating ReplicatedDict: {}".format(self.transaction_log))
         except IOError as e:
             raise
 
@@ -149,7 +149,13 @@ class StateEngine(object):
         This behaves like a dict semantically, but replicates the contents
         across all instances in the cluster so that we can horizontally scale.
         """
-        self.asl_cache = ReplicatedDict(config["state_engine"])
+        self.asl_cache = ReplicatedDict(config["state_engine"]["asl_cache"])
+
+        """
+        Holds information about the State Machine executions, that is to say
+        each Step Function, so that we can do things like get execution history.
+        """
+        self.executions = {}
         self.task_dispatcher = TaskDispatcher(self, config)
         # self.event_dispatcher set by EventDispatcher
 
@@ -176,12 +182,21 @@ class StateEngine(object):
         data = event["data"]
         context = event["context"]
         state = context["State"]
-        self.update_execution_history(context["Execution"]["Id"],
+        execution_arn = context["Execution"]["Id"]
+        self.update_execution_history(execution_arn,
                                       state_type + "StateExited",
                                       {"output": data, "name": state["Name"]})
         update_type = "ExecutionSucceeded"
-        if data.get("Error"): update_type = "ExecutionFailed"
-        self.update_execution_history(context["Execution"]["Id"],
+        self.executions[execution_arn]["stopDate"] = time.time()
+        if data.get("Error"):
+            update_type = "ExecutionFailed"
+            self.executions[execution_arn]["status"] = "FAILED"
+            self.executions[execution_arn]["output"] = None
+        else:
+            self.executions[execution_arn]["status"] = "SUCCEEDED"
+            self.executions[execution_arn]["output"] = data
+        
+        self.update_execution_history(execution_arn,
                                       update_type,
                                       {"output": data})
 
@@ -195,6 +210,19 @@ class StateEngine(object):
         # https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html
         # Probably need to be more selective about what is logged here.
         self.logger.info("{} {} {}".format(execution_id, update_type, details))
+
+        history = self.executions[execution_id]["history"]
+        id = len(history) + 1
+        if "StateEntered" in update_type: details_type = "stateEnteredEventDetails"
+        elif "StateExited" in update_type: details_type = "stateExitedEventDetails"
+        else: details_type = update_type[0].lower() + update_type[1:] + "EventDetails"
+        history.append({
+            "timestamp": time.time(), 
+            details_type: details, 
+            "type": update_type, 
+            "id": id, 
+            "previousEventId": id - 1
+        })
 
     def heartbeat(self):
         print("StateEngine heartbeat")
@@ -285,7 +313,7 @@ class StateEngine(object):
         if not ASL:
             """
             Dropping the message is possibly not the right thing to do in this
-            scenario as we could simply add the State Machine and retry. OTOH
+            scenario as we *could* simply add the State Machine and retry. OTOH
             if a State Machine is deleted executions should also be deleted.
             """
             self.logger.error("StateEngine: State Machine {} does not exist, dropping the message!".format(state_machine_id))
@@ -319,6 +347,7 @@ class StateEngine(object):
 
         if not current_state: # Start state. Initialise unset context fields.
             current_state = ASL["StartAt"]
+            context["State"]["Name"] = current_state
             if context.get("Execution") == None: context["Execution"] = {}
             execution = context["Execution"]
 
@@ -356,6 +385,14 @@ class StateEngine(object):
             if context["State"].get("EnteredTime") == None:
                 context["State"]["EnteredTime"] = start_time
 
+            self.executions[execution["Id"]] = {
+                "input": data,
+                "name": execution["Name"],
+                "startDate": time.time(),
+                "stateMachineArn": state_machine_id,
+                "status": "RUNNING",
+                "history": []
+            }
             self.update_execution_history(execution["Id"],
                                           "ExecutionStarted",
                                           {"input": data, "roleArn": execution["RoleArn"]})
