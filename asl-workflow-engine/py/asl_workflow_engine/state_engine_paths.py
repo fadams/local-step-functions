@@ -6,9 +6,9 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License.  You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -31,7 +31,8 @@ and “Parameters”: Pass State, Task State, and Parallel State.
 """
 
 import sys
-assert sys.version_info >= (3, 0) # Bomb out if not running Python3
+assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
+
 
 import re
 import json
@@ -43,9 +44,10 @@ http://www.ultimate.com/phil/python/#jsonpath
 Tested using jsonpath 0.82. Note jsponpath_rw was tried but doesn't seem to
 correctly support many of the test cases from the goessner link above
 """
-from jsonpath import jsonpath # sudo pip3 install jsonpath
+from jsonpath import jsonpath  # sudo pip3 install jsonpath
 
 from asl_workflow_engine.asl_exceptions import *
+
 
 def apply_jsonpath(input, path="$"):
     """
@@ -53,11 +55,15 @@ def apply_jsonpath(input, path="$"):
     https://states-language.net/spec.html#filters
     This is mostly just calling jsonpath() and applying the specified defaults.
     """
-    if input == None or path == None: return {}
-    if path == "$": return input
+    if input == None or path == None:
+        return {}
+    if path == "$":
+        return input
     result = jsonpath(input, path)
-    if result == False: return {}
-    if len(result) == 1: return result[0]
+    if result == False:
+        return {}
+    if len(result) == 1:
+        return result[0]
     return result
 
 def apply_resultpath(input, result, path="$"):
@@ -78,29 +84,37 @@ def apply_resultpath(input, result, path="$"):
     output is discarded and its raw input becomes its result.
     """
     def update_path(target, keys, default):
-        if len(keys) == 0: return default
+        if len(keys) == 0:
+            return default
         key = keys.pop(0)
-        if (isinstance(target, list)):
+        if isinstance(target, list):
             try:
                 i = int(key)
                 target[i] = update_path(target[i], keys, default)
             except (ValueError, IndexError) as e:
                 raise ResultPathMatchFailure(e)
-        elif (isinstance(target, dict)):
+        elif isinstance(target, dict):
             try:
                 int(key)
-                raise ResultPathMatchFailure("object index {} is not a valid key string".format(key))
+                raise ResultPathMatchFailure(
+                    "object index {} is not a valid key string".format(key)
+                )
             except ValueError:
                 target[key] = update_path(target.get(key, {}), keys, default)
         else:
-            raise ResultPathMatchFailure("cannot use key {} to index a primitive type".format(key))
+            raise ResultPathMatchFailure(
+                "cannot use key {} to index a primitive type".format(key)
+            )
         return target
 
-    if input == None: input = {}
-    if path == None: return input
-    if path == "$": return result
+    if input == None:
+        input = {}
+    if path == None:
+        return input
+    if path == "$":
+        return result
 
-    matches = re.findall(r"[^$.[\]]+", path) # Regex to split the reference paths
+    matches = re.findall(r"[^$.[\]]+", path)  # Regex to split the reference paths
     return update_path(input, matches, result)
 
 def evaluate_parameters(input, context, parameters):
@@ -139,11 +153,13 @@ def evaluate_parameters(input, context, parameters):
         Evaluate and expand fields whose name ends with “.$” as described above
         """
         if isinstance(k, str) and k.endswith(".$"):
-            k = k[:-2] # strip ".$" from end
+            k = k[:-2]  # strip ".$" from end
             v_is_path = True
-        else: v_is_path = False
+        else:
+            v_is_path = False
 
-        if v: is_tuple = True
+        if v:
+            is_tuple = True
         else:
             v = k
             is_tuple = False
@@ -151,13 +167,16 @@ def evaluate_parameters(input, context, parameters):
         if v_is_path:
             if not v.startswith("$"):
                 raise ParameterPathFailure("{} must be a JSONPath".format(v))
-            if v.startswith("$$"): # Use Context object, not input
-                v = v[1:] # Strip leading "$" from context path
+            if v.startswith("$$"):  # Use Context object, not input
+                v = v[1:]  # Strip leading "$" from context path
                 v = apply_jsonpath(context, v)
-            else: v = apply_jsonpath(input, v)
+            else:
+                v = apply_jsonpath(input, v)
 
-        if is_tuple: return k, v
-        else: return v
+        if is_tuple:
+            return k, v
+        else:
+            return v
 
     def clone(parameters):
         """
@@ -181,6 +200,7 @@ def evaluate_parameters(input, context, parameters):
                     target[k] = v
         return target
 
-    if not parameters: return input
+    if not parameters:
+        return input
     return clone(parameters)
 

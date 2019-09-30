@@ -6,9 +6,9 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License.  You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -18,7 +18,8 @@
 #
 
 import sys
-assert sys.version_info >= (3, 0) # Bomb out if not running Python3
+assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
+
 
 import json, os, time, uuid
 from datetime import datetime, timezone
@@ -27,7 +28,6 @@ from asl_workflow_engine.messaging_exceptions import *
 from asl_workflow_engine.arn import *
 
 class TaskDispatcher(object):
-
     def __init__(self, state_engine, config):
         """
         :param logger: The Workflow Engine logger
@@ -35,9 +35,9 @@ class TaskDispatcher(object):
         :param config: Configuration dictionary
         :type config: dict
         """
-        self.logger = init_logging(log_name='asl_workflow_engine')
+        self.logger = init_logging(log_name="asl_workflow_engine")
         self.logger.info("Creating TaskDispatcher")
-        #self.config = config["task_dispatcher"] # TODO Handle missing config
+        # self.config = config["task_dispatcher"]  # TODO Handle missing config
         # TODO validate that config contains the keys we need.
         self.state_engine = state_engine
 
@@ -64,13 +64,13 @@ class TaskDispatcher(object):
         "rpcmessage" based services as described in execute_task.
         """
         self.reply_to = session.consumer()
-        self.reply_to.capacity = 100; # Enable consumer prefetch
+        self.reply_to.capacity = 100  # Enable consumer prefetch
         self.reply_to.set_message_listener(self.handle_rpcmessage_response)
         self.producer = session.producer()
 
 
-        #print(self.reply_to.name)
-        #print(self.producer.name)
+        # print(self.reply_to.name)
+        # print(self.producer.name)
 
     def handle_rpcmessage_response(self, message):
         """
@@ -87,9 +87,12 @@ class TaskDispatcher(object):
         if requestor:
             try:
                 del self.unmatched_requests[correlation_id]
-                if callable(requestor): requestor(json.loads(message.body.decode("utf8")))
+                if callable(requestor):
+                    requestor(json.loads(message.body.decode("utf8")))
             except ValueError as e:
-                self.logger.error("Response {} does not contain valid JSON".format(message.body))
+                self.logger.error(
+                    "Response {} does not contain valid JSON".format(message.body)
+                )
         else:
             self.logger.info("Response {} has no matching requestor".format(message))
 
@@ -164,13 +167,17 @@ class TaskDispatcher(object):
             resource_arn = os.environ.get(resource_arn[1:], resource_arn)
         # If resource_arn still starts with $ its value isn't in the environment
         if resource_arn.startswith("$"):
-            self.logger.error("Specified Task Resource {} is not available on the environment".format(resource_arn))
+            self.logger.error(
+                "Specified Task Resource {} is not available on the environment".format(
+                    resource_arn
+                )
+            )
             # TODO Handle error as per https://states-language.net/spec.html#errors
 
         arn = parse_arn(resource_arn)
-        service = arn["service"] # e.g. rpcmessage, fn, openfaas, lambda
-        resource_type = arn["resource_type"] # Should be function most times
-        resource = arn["resource"] # function-name
+        service = arn["service"]  # e.g. rpcmessage, fn, openfaas, lambda
+        resource_type = arn["resource_type"]  # Should be function most times
+        resource = arn["resource"]  # function-name
 
         """
         Define nested functions as handlers for each supported service type.
@@ -196,30 +203,34 @@ class TaskDispatcher(object):
             operation, however it is the correct thing to do:
             https://www.ietf.org/rfc/rfc4627.txt.
             """
-            #print("asl_service_rpcmessage")
-            #print(service)
-            #print(resource_type)
-            #print(resource)
-            #print(parameters)
+            # print("asl_service_rpcmessage")
+            # print(service)
+            # print(resource_type)
+            # print(resource)
+            # print(parameters)
             # TODO deal with the case of delivering to a different broker.
 
             # Associate response callback with this request via correlation ID
             correlation_id = str(uuid.uuid4())
             self.unmatched_requests[correlation_id] = callback
-            message = Message(json.dumps(parameters), content_type="application/json",
-                              subject=resource, reply_to=self.reply_to.name,
-                              correlation_id=correlation_id)
-            #print(message)
+            message = Message(
+                json.dumps(parameters),
+                content_type="application/json",
+                subject=resource,
+                reply_to=self.reply_to.name,
+                correlation_id=correlation_id,
+            )
+            # print(message)
             self.producer.send(message)
             # N.B. The service response message is handled by handle_rpcmessage_response()
 
-        #def asl_service_openfaas():
+        # def asl_service_openfaas():
         #    print("asl_service_openfaas")
 
-        #def asl_service_fn():
+        # def asl_service_fn():
         #    print("asl_service_fn")
 
-        #def asl_service_lambda():
+        # def asl_service_lambda():
         #    print("asl_service_lambda")
 
         def asl_service_states():
@@ -229,8 +240,10 @@ class TaskDispatcher(object):
             the resource_type. Initially just support execution to allow us
             to invoke another state machine execution.
             """
-            if resource_type == "execution": asl_service_states_execution()
-            else: asl_service_InvalidService()
+            if resource_type == "execution":
+                asl_service_states_execution()
+            else:
+                asl_service_InvalidService()
 
         def asl_service_states_execution():
             """
@@ -273,30 +286,37 @@ class TaskDispatcher(object):
                 "Input.$": "$.input"
             }
             """
-            #print(parameters)
+            # print(parameters)
 
             print(resource.split(":"))
             split = resource.split(":")
             state_machine_name = split[0]
             execution_name = split[1] if len(split) == 2 else str(uuid.uuid4())
 
-            state_machine_arn = create_arn(service="states",
-                                           region=arn.get("region", "local"),
-                                           account=arn["account"], 
-                                           resource_type="stateMachine",
-                                           resource=state_machine_name)
+            state_machine_arn = create_arn(
+                service="states",
+                region=arn.get("region", "local"),
+                account=arn["account"],
+                resource_type="stateMachine",
+                resource=state_machine_name,
+            )
 
-            execution_arn = create_arn(service="states",
-                                       region=arn.get("region", "local"),
-                                       account=arn["account"], 
-                                       resource_type="execution",
-                                       resource=state_machine_name + ":" +
-                                                execution_name)
+            execution_arn = create_arn(
+                service="states",
+                region=arn.get("region", "local"),
+                account=arn["account"],
+                resource_type="execution",
+                resource=state_machine_name + ":" + execution_name,
+            )
 
             # Look up stateMachineArn
             match = self.state_engine.asl_cache.get(state_machine_arn)
             if not match:
-                self.logger.error("TaskDispatcher asl_service_states: State Machine {} does not exist".format(state_machine_arn))
+                self.logger.error(
+                    "TaskDispatcher asl_service_states: State Machine {} does not exist".format(
+                        state_machine_arn
+                    )
+                )
                 callback({"Error": "StateMachineDoesNotExist"})
                 return
 
@@ -310,40 +330,30 @@ class TaskDispatcher(object):
                     "Input": parameters,
                     "Name": execution_name,
                     "RoleArn": match.get("roleArn"),
-                    "StartTime": start_time
+                    "StartTime": start_time,
                 },
-                "State": {
-                    "EnteredTime": start_time,
-                    "Name": "" # Start state
-                },
-                "StateMachine": {
-                    "Id": state_machine_arn,
-                    "Name": state_machine_name
-                }
+                "State": {"EnteredTime": start_time, "Name": ""},  # Start state
+                "StateMachine": {"Id": state_machine_arn, "Name": state_machine_name},
             }
 
-            event = {
-                "data": parameters,
-                "context": context
-            }
+            event = {"data": parameters,"context": context}
 
             self.state_engine.event_dispatcher.publish(event)
 
-            result = {
-                "executionArn": execution_arn,
-                "startDate": time.time()
-            }
+            result = {"executionArn": execution_arn,"startDate": time.time()}
             callback(result)
 
         def asl_service_InvalidService():
-            self.logger.error("TaskDispatcher ARN {} refers to unsupported service: {}".
-                              format(resource_arn, service))
+            self.logger.error(
+                "TaskDispatcher ARN {} refers to unsupported service: {}".format(
+                    resource_arn, service
+                )
+            )
             callback({"Error": "InvalidService"})
 
         """
         Given the required service from the resource_arn dynamically invoke the
         appropriate service handler. The lambda provides a default handler. 
         """
-        locals().get("asl_service_" + service,
-                     asl_service_InvalidService)()
+        locals().get("asl_service_" + service, asl_service_InvalidService)()
 

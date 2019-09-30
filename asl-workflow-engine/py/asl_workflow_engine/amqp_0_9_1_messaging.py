@@ -6,9 +6,9 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License.  You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -26,18 +26,17 @@ reasonably abstracted from the underlying messaging fabric, so that it should
 """
 
 import sys
-assert sys.version_info >= (3, 0) # Bomb out if not running Python3
+assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 import json
 
 # Tested using Pika 1.0.1, may not work correctly with earlier versions.
-import pika # sudo pip3 install pika
+import pika  # sudo pip3 install pika
 
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.messaging_exceptions import *
 
 class Connection(object):
-
     def __init__(self, url="amqp://localhost:5672"):
         """
         Creates a connection. A newly created connection must be opened with the
@@ -55,22 +54,26 @@ class Connection(object):
         """
         Opens the connection.
         """
-        if hasattr(self, "connection") and self.connection.is_open: 
-            raise ConnectionError("Connection to {host}:{port} is already open".
-                format(host=self.parameters.host,
-                       port=self.parameters.port))
+        if hasattr(self, "connection") and self.connection.is_open:
+            raise ConnectionError(
+                "Connection to {host}:{port} is already open".format(
+                    host=self.parameters.host, port=self.parameters.port
+                )
+            )
 
-        self.logger.info("Opening Connection to {host}:{port}".
-            format(host=self.parameters.host,
-                   port=self.parameters.port))
+        self.logger.info(
+            "Opening Connection to {host}:{port}".format(
+                host=self.parameters.host, port=self.parameters.port
+            )
+        )
 
         try:
             self.connection = pika.BlockingConnection(self.parameters)
         except pika.exceptions.AMQPConnectionError as e:
             raise ConnectionError(e)
 
-    def is_open(self): 
-        """ 
+    def is_open(self):
+        """
         Return True if the connection is open, False otherwise. 
         """ 
         return hasattr(self, "connection") and self.connection.is_open
@@ -80,9 +83,11 @@ class Connection(object):
         Closes the connection.
         """
         if self.is_open():
-            self.logger.info("Closing Connection to {host}:{port}".
-                format(host=self.parameters.host,
-                       port=self.parameters.port))
+            self.logger.info(
+                "Closing Connection to {host}:{port}".format(
+                    host=self.parameters.host, port=self.parameters.port
+                )
+            )
             self.connection.close()
 
     def session(self, name=None, transactional=False):
@@ -112,7 +117,7 @@ class Connection(object):
         BlockingChannel.start_consuming() e.g. after the start() method below
         has been called.
         """
-        return self.connection.call_later(delay/1000, callback)
+        return self.connection.call_later(delay / 1000, callback)
 
     def clear_timeout(self, timeout_id):
         """
@@ -147,10 +152,9 @@ class Connection(object):
             except pika.exceptions.ConnectionClosedByBroker as e:
                 raise ConnectionError(e)
 
-#-------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 
 class Session(object):
-
     def __init__(self, connection, name, transactional):
         """
         Sessions provide a context for sending and receiving Messages. Messages
@@ -164,9 +168,9 @@ class Session(object):
         if not connection.is_open():
             raise SessionError("Unable to create Session as Connection is not open")
 
-        connection.logger.info("Creating Session") # TODO log name
+        connection.logger.info("Creating Session")  # TODO log name
         self.connection = connection
-        self.name = name # TODO do something useful with name
+        self.name = name  # TODO do something useful with name
         # TODO maybe do something with transactional?
 
         """
@@ -179,9 +183,9 @@ class Session(object):
         # I don't think we need/want this to be set, this is about passing a
         # callback to be notified by the Broker when a message has been
         # confirmed as received or rejected.
-        #self.channel.confirm_delivery()
+        # self.channel.confirm_delivery()
 
-    def acknowledge(self, message=None): 
+    def acknowledge(self, message=None):
         """
         Acknowledge the given Message. If message is None, then all 
         unacknowledged messages on the session are acknowledged.
@@ -212,8 +216,8 @@ class Session(object):
         """
         self.channel.basic_recover(requeue)
 
-    def is_open(self): 
-        """ 
+    def is_open(self):
+        """
         Return True if the session is open, False otherwise. 
         """ 
         return self.channel.is_open
@@ -223,7 +227,7 @@ class Session(object):
         Closes the session.
         """
         if self.is_open():
-            self.logger.info("Closing Session") # TODO log session name
+            self.logger.info("Closing Session")  # TODO log session name
             self.channel.close()
 
     def producer(self, target=""):
@@ -242,25 +246,37 @@ class Session(object):
         """
         return Consumer(self, source)
 
-#-------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 
 class Destination(object):
-
     def __init__(self):
         """
         For RabbitMQ AMQP Channel documentation see:
         https://pika.readthedocs.io/en/stable/modules/channel.html
         Default values taken from exchange_declare, queue_declare, queue_bind
         """
-        self.declare = {"queue": "", "exchange": "", "exchange-type": "direct",
-                        "passive": False, "internal": False, "durable": False,
-                        "exclusive": False, "auto-delete": False,
-                        "arguments": None}
+        self.declare = {
+            "queue": "",
+            "exchange": "",
+            "exchange-type": "direct",
+            "passive": False,
+            "internal": False,
+            "durable": False,
+            "exclusive": False,
+            "auto-delete": False,
+            "arguments": None
+        }
 
         # Defaults for subscription queues (exclusive and autodelete True)
-        self.link_declare = {"queue": "", "passive": False, "internal": False,
-                             "durable": False, "exclusive": True,
-                             "auto-delete": True, "arguments": None}
+        self.link_declare = {
+            "queue": "",
+            "passive": False,
+            "internal": False,
+            "durable": False,
+            "exclusive": True,
+            "auto-delete": True,
+            "arguments": None
+        }
 
         self.bindings = []
 
@@ -340,10 +356,10 @@ class Destination(object):
 
         options = json.loads(options_string)
 
-        #print(options_string)
-        #print(options)
-        #print(self.subject)
-        #print(self.name)
+        # print(options_string)
+        # print(options)
+        # print(self.subject)
+        # print(self.name)
 
         node = options.get("node")
         if node:
@@ -357,7 +373,7 @@ class Destination(object):
                 if node.get("type") == "topic" and not self.declare.get("exchange"):
                     self.declare["exchange"] = self.name
             # Can set durable and auto-delete on node as a shortcut if we don't
-            # need any other declare overrides. 
+            # need any other declare overrides.
             if node.get("durable"):
                 self.declare["durable"] = True
             if node.get("auto-delete"):
@@ -373,17 +389,18 @@ class Destination(object):
             if x_declare and type(x_declare) == type(self.link_declare):
                 self.link_declare.update(x_declare)
 
-#-------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 
 class Producer(Destination):
-
     def __init__(self, session, target):
         """
         A client uses a Producer object to send messages to a destination.
         """
-        super().__init__() # Call Destination constructor
+        super().__init__()  # Call Destination constructor
 
-        session.connection.logger.info("Creating Producer with address: {}".format(target))
+        session.connection.logger.info(
+            "Creating Producer with address: {}".format(target)
+        )
         self.session = session
 
         try:
@@ -404,18 +421,20 @@ class Producer(Destination):
                     # If no exchange declared assume default direct exchange.
                     if self.name != self.declare.get("exchange"):
                         self.subject = self.name
-                        self.name = "" # Set exchange to default direct.
+                        self.name = ""  # Set exchange to default direct.
 
         if self.declare.get("exchange"):
             # Exchange declare.
-            self.session.channel.exchange_declare(exchange=self.declare["exchange"],
-                                                  exchange_type=self.declare["exchange-type"],
-                                                  passive=self.declare["passive"],
-                                                  durable=self.declare["durable"],
-                                                  auto_delete=self.declare["auto-delete"],
-                                                  arguments=self.declare["arguments"])
-        #print("name = " + self.name)
-        #print("subject = " + self.subject)
+            self.session.channel.exchange_declare(
+                exchange=self.declare["exchange"],
+                exchange_type=self.declare["exchange-type"],
+                passive=self.declare["passive"],
+                durable=self.declare["durable"],
+                auto_delete=self.declare["auto-delete"],
+                arguments=self.declare["arguments"],
+            )
+        # print("name = " + self.name)
+        # print("subject = " + self.subject)
 
     def send(self, message, threadsafe=False):
         """
@@ -427,53 +446,59 @@ class Producer(Destination):
                       mandatory=False)
         Delivery mode 2 makes the broker save the message to disk.
         """
+
         def publish():
             """
             The main purpose of this nested function is to make it fairly easy
             to either directly call the underlying pika basic_publish or defer
             to connection.add_callback_threadsafe as a callback.
             """
-        
+
             # If message.subject is set use that as the routing_key, otherwise use
             # the Producer target default subject parsed from address string.
             routing_key = message.subject if message.subject else self.subject
 
-            properties=pika.BasicProperties(headers=message.properties,
-                                            content_type=message.content_type,
-                                            content_encoding=message.content_encoding,
-                                            delivery_mode=2 if message.durable else 1,
-                                            priority=message.priority,
-                                            correlation_id=message.correlation_id,
-                                            reply_to=message.reply_to,
-                                            expiration=message.expiration,
-                                            message_id=message.message_id,
-                                            timestamp=message.timestamp,
-                                            type=message.type,
-                                            user_id=message.user_id,
-                                            app_id=message.app_id,
-                                            cluster_id=message.cluster_id)
+            properties = pika.BasicProperties(
+                headers=message.properties,
+                content_type=message.content_type,
+                content_encoding=message.content_encoding,
+                delivery_mode=2 if message.durable else 1,
+                priority=message.priority,
+                correlation_id=message.correlation_id,
+                reply_to=message.reply_to,
+                expiration=message.expiration,
+                message_id=message.message_id,
+                timestamp=message.timestamp,
+                type=message.type,
+                user_id=message.user_id,
+                app_id=message.app_id,
+                cluster_id=message.cluster_id,
+            )
 
-            self.session.channel.basic_publish(exchange=self.name,
-                                               routing_key=routing_key,
-                                               body=message.body,
-                                               properties=properties)
+            self.session.channel.basic_publish(
+                exchange=self.name,
+                routing_key=routing_key,
+                body=message.body,
+                properties=properties,
+            )
 
         if threadsafe:
             self.session.connection.connection.add_callback_threadsafe(publish)
         else:
             publish()
 
-#-------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 
 class Consumer(Destination):
-
     def __init__(self, session, source):
         """
         A client uses a Consumer object to receive messages from a destination.
         """
-        super().__init__() # Call Destination constructor
+        super().__init__()  # Call Destination constructor
 
-        session.connection.logger.info("Creating Consumer with address: {}".format(source))
+        session.connection.logger.info(
+            "Creating Consumer with address: {}".format(source)
+        )
         self.session = session
 
         # Set default capacity/message prefetch to 500
@@ -502,37 +527,47 @@ class Consumer(Destination):
                         raise ConsumerError(e.reply_text)
                 # Otherwise we assume default direct exchange
 
-        if exchange: # Is this address an exchange?
+        if exchange:  # Is this address an exchange?
             # Destination is an exchange, create subscription queue and
             # add binding between exchange and queue with subject as key.
-            if self.declare.get("queue"): self.name = self.declare.get("queue")
-            elif self.link_declare.get("queue"): self.name = self.link_declare.get("queue")
-            else: self.name = ""
+            if self.declare.get("queue"):
+                self.name = self.declare.get("queue")
+            elif self.link_declare.get("queue"):
+                self.name = self.link_declare.get("queue")
+            else:
+                self.name = ""
 
             if len(self.bindings) == 0:
-                self.bindings.append({"queue": self.name, "exchange": exchange,
-                                      "key": self.subject})
+                self.bindings.append(
+                    {"queue": self.name, "exchange": exchange, "key": self.subject}
+                )
 
         # Declare queue, exchange and bindings as necessary
         if self.declare.get("exchange"):
             # Exchange declare - unusual scenario for Consumer, but handle it.
-            self.session.channel.exchange_declare(exchange=self.declare["exchange"],
-                                                  exchange_type=self.declare["exchange-type"],
-                                                  passive=self.declare["passive"],
-                                                  durable=self.declare["durable"],
-                                                  auto_delete=self.declare["auto-delete"],
-                                                  arguments=self.declare["arguments"])
+            self.session.channel.exchange_declare(
+                exchange=self.declare["exchange"],
+                exchange_type=self.declare["exchange-type"],
+                passive=self.declare["passive"],
+                durable=self.declare["durable"],
+                auto_delete=self.declare["auto-delete"],
+                arguments=self.declare["arguments"],
+            )
         # Queue declare
         declare = self.declare
-        if exchange and not self.declare.get("queue"): declare = self.link_declare
-        if self.name == "": declare["auto-delete"] = True
+        if exchange and not self.declare.get("queue"):
+            declare = self.link_declare
+        if self.name == "":
+            declare["auto-delete"] = True
 
-        result = self.session.channel.queue_declare(queue=self.name,
-                                                    passive=declare["passive"],
-                                                    durable=declare["durable"],
-                                                    exclusive=declare["exclusive"],
-                                                    auto_delete=declare["auto-delete"],
-                                                    arguments=declare["arguments"])
+        result = self.session.channel.queue_declare(
+            queue=self.name,
+            passive=declare["passive"],
+            durable=declare["durable"],
+            exclusive=declare["exclusive"],
+            auto_delete=declare["auto-delete"],
+            arguments=declare["arguments"],
+        )
         """
         Get the queue name from the result of the queue_declare to deal with
         the case of server created names when we pass queue="" to queue_declare
@@ -541,11 +576,14 @@ class Consumer(Destination):
         self.name = result.method.queue
 
         for binding in self.bindings:
-            if binding["exchange"] == "" : continue # Can't bind to default
-            self.session.channel.queue_bind(queue=binding["queue"],
-                                            exchange=binding["exchange"], 
-                                            routing_key=binding.get("key"),
-                                            arguments=binding.get("arguments"))
+            if binding["exchange"] == "" :
+                continue  # Can't bind to default
+            self.session.channel.queue_bind(
+                queue=binding["queue"],
+                exchange=binding["exchange"], 
+                routing_key=binding.get("key"),
+                arguments=binding.get("arguments"),
+            )
 
     def set_message_listener(self, message_listener):
         """
@@ -557,8 +595,9 @@ class Consumer(Destination):
                       callback=None)
         """
         self._message_listener = message_listener
-        self.session.channel.basic_consume(on_message_callback=self.message_listener,   
-                                           queue=self.name)
+        self.session.channel.basic_consume(
+            on_message_callback=self.message_listener, queue=self.name
+        )
 
     def message_listener(self, channel, method, properties, body):
         """
@@ -577,21 +616,24 @@ class Consumer(Destination):
         """
         if hasattr(self, "_message_listener"):
             # Now call the registered message listener
-            message = Message(body, properties=properties.headers,
-                              content_type = properties.content_type,
-                              content_encoding = properties.content_encoding,
-                              redelivered = method.redelivered,
-                              durable = (properties.delivery_mode == 2),
-                              priority = properties.priority,
-                              correlation_id = properties.correlation_id,
-                              reply_to = properties.reply_to,
-                              expiration = properties.expiration,
-                              message_id = properties.message_id,
-                              timestamp = properties.timestamp,
-                              type = properties.type,
-                              user_id = properties.user_id,
-                              app_id = properties.app_id,
-                              cluster_id = properties.cluster_id)
+            message = Message(
+                body,
+                properties=properties.headers,
+                content_type=properties.content_type,
+                content_encoding=properties.content_encoding,
+                redelivered=method.redelivered,
+                durable=(properties.delivery_mode == 2),
+                priority=properties.priority,
+                correlation_id=properties.correlation_id,
+                reply_to=properties.reply_to,
+                expiration=properties.expiration,
+                message_id=properties.message_id,
+                timestamp=properties.timestamp,
+                type=properties.type,
+                user_id=properties.user_id,
+                app_id=properties.app_id,
+                cluster_id=properties.cluster_id,
+            )
             # These two private attributes are added to Message to enable
             # Message's acknowledge() methods
             message._channel = channel
@@ -607,22 +649,36 @@ class Consumer(Destination):
         self._capacity = capacity
         self.session.channel.basic_qos(prefetch_count=capacity)
 
-#-------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 
 class Message(object):
-
-    def __init__(self, body=None, properties=None, content_type=None,
-                 content_encoding=None, redelivered=False, durable=True,
-                 priority=None, correlation_id=None, reply_to=None,
-                 expiration=None, message_id=None, timestamp=None, type=None,
-                 user_id=None, app_id=None, cluster_id=None, subject=None):
+    def __init__(
+        self,
+        body=None,
+        properties=None,
+        content_type=None,
+        content_encoding=None,
+        redelivered=False,
+        durable=True,
+        priority=None,
+        correlation_id=None,
+        reply_to=None,
+        expiration=None,
+        message_id=None,
+        timestamp=None,
+        type=None,
+        user_id=None,
+        app_id=None,
+        cluster_id=None,
+        subject=None,
+    ):
         """
         Provides an abstraction for messages comprising a body, application
         properties and a set of headers used by the messaging fabric to identify
         and route messages and provide additional metadata.
         """
         self.body = body
-        self.properties = properties # Holds application property key/value pairs
+        self.properties = properties  # Holds application property key/value pairs
 
         # Values below from:
         # pika.BasicProperties(delivery_mode=2)
@@ -643,18 +699,34 @@ class Message(object):
         self.app_id = app_id
         self.cluster_id = cluster_id
 
-        if self.properties == None: self.properties = {}
-        self.subject = subject # Set subject *after* self.properties initialised.
+        if self.properties == None:
+            self.properties = {}
+        self.subject = subject  # Set subject *after* self.properties initialised.
 
     def __repr__(self):
         args = []
-        for name in ["content_type", "content_encoding", "priority",
-                     "message_id", "type", "user_id", "app_id", "cluster_id",
-                     "reply_to", "correlation_id", "expiration", "timestamp",
-                     "redelivered", "durable", "properties"]:
+        for name in [
+            "content_type",
+            "content_encoding",
+            "priority",
+            "message_id",
+            "type",
+            "user_id",
+            "app_id",
+            "cluster_id",
+            "reply_to",
+            "correlation_id",
+            "expiration",
+            "timestamp",
+            "redelivered",
+            "durable",
+            "properties",
+        ]:
             value = self.__dict__[name]
-            if value is not None: args.append("%s=%r" % (name, value))
-        if self.subject: args.append("subject=%r" % self.subject)
+            if value is not None:
+                args.append("%s=%r" % (name, value))
+        if self.subject:
+            args.append("subject=%r" % self.subject)
         if self.body is not None:
             if args:
                 args.append("body=%r" % self.body)
@@ -673,6 +745,7 @@ class Message(object):
     application set message properties, this will be used by the Producer.send()
     but will also be available to consumers as a Message property.
     """
+
     @property
     def subject(self):
         return self.properties.get("x-amqp-0-9-1.subject")
@@ -681,7 +754,7 @@ class Message(object):
     def subject(self, subject):
         if subject:
             self.properties["x-amqp-0-9-1.subject"] = subject
-            #print(self.properties)
+            # print(self.properties)
 
     def acknowledge(self):
         """

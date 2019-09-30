@@ -6,9 +6,9 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License.  You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -25,7 +25,8 @@ running process writes its event stream, unbuffered, to stdout (or stderr).
 """
 
 import sys
-assert sys.version_info >= (3, 0) # Bomb out if not running Python3
+assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
+
 
 import os, logging
 import structlog
@@ -33,7 +34,7 @@ import structlog
 
 def inject_context(logger, method_name, event_dict):
     # inject current structlog context to stdlib logger calls from dependencies
-    context_class = structlog.get_config().get('context_class')
+    context_class = structlog.get_config().get("context_class")
     if context_class:
         context = context_class()
         # context object is not always subscriptable, so create list of kv pairs instead
@@ -52,7 +53,8 @@ def init_logging(log_name, log_level=logging.INFO):
     logger = logging.getLogger(log_name)
 
     # If logger already has handlers just return it as it is already initialised
-    if logger.hasHandlers(): return logger
+    if logger.hasHandlers():
+        return logger
 
     # Select automation friendly structured logging or more "human readable"
     # logging based on the value of the USE_STRUCTURED_LOGGING environment var.
@@ -71,10 +73,9 @@ def init_logging(log_name, log_level=logging.INFO):
         ]
 
         structlog.configure(
-            processors=[structlog.stdlib.filter_by_level] +
-                       shared_processors + [
-                           structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
-                       ],
+            processors=[structlog.stdlib.filter_by_level]
+            + shared_processors
+            + [structlog.stdlib.ProcessorFormatter.wrap_for_formatter],
             context_class=structlog.threadlocal.wrap_dict(dict),
             logger_factory=structlog.stdlib.LoggerFactory(),
             wrapper_class=structlog.stdlib.BoundLogger,
@@ -86,7 +87,9 @@ def init_logging(log_name, log_level=logging.INFO):
             foreign_pre_chain=shared_processors,
         )
     else:
-        formatter = logging.Formatter('[%(asctime)s] %(levelname)-8s - %(name)-15s : %(message)s')
+        formatter = logging.Formatter(
+            "[%(asctime)s] %(levelname)-8s - %(name)-15s : %(message)s"
+        )
 
 
     handler = logging.StreamHandler()

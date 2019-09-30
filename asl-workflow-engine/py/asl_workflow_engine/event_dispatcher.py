@@ -6,9 +6,9 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License.  You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -18,14 +18,14 @@
 #
 
 import sys
-assert sys.version_info >= (3, 0) # Bomb out if not running Python3
+assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
+
 
 import json, importlib
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.messaging_exceptions import *
 
 class EventDispatcher(object):
-
     def __init__(self, state_engine, config):
         """
         :param logger: The Workflow Engine logger
@@ -33,9 +33,9 @@ class EventDispatcher(object):
         :param config: Configuration dictionary
         :type config: dict
         """
-        self.logger = init_logging(log_name='asl_workflow_engine')
+        self.logger = init_logging(log_name="asl_workflow_engine")
         self.logger.info("Creating EventDispatcher")
-        self.config = config["event_queue"] # TODO Handle missing config
+        self.config = config["event_queue"]  # TODO Handle missing config
         # TODO validate that config contains the keys we need.
 
         """
@@ -62,9 +62,12 @@ class EventDispatcher(object):
         allow the ASL workflow engine to connect to alternative event queue
         implementations in order to allow maximum flexibility.
         """
-        name = self.config.get("queue_type", "AMQP-0.9.1").lower(). \
-                                                           replace("-", "_"). \
-                                                           replace(".", "_")
+        name = (
+            self.config.get("queue_type", "AMQP-0.9.1")
+            .lower()
+            .replace("-", "_")
+            .replace(".", "_")
+        )
         name = "asl_workflow_engine." + name + "_messaging"
 
         self.logger.info("Loading messaging module {}".format(name))
@@ -92,7 +95,7 @@ class EventDispatcher(object):
             connection.open()
             session = connection.session()
             event_consumer = session.consumer(self.config["queue_name"])
-            event_consumer.capacity = 100; # Enable consumer prefetch
+            event_consumer.capacity = 100  # Enable consumer prefetch
             event_consumer.set_message_listener(self.dispatch)
             self.event_producer = session.producer(self.config["queue_name"])
 
@@ -107,7 +110,7 @@ class EventDispatcher(object):
             """
             self.set_timeout = connection.set_timeout
 
-            #self.set_timeout(self.heartbeat, 1000)
+            # self.set_timeout(self.heartbeat, 1000)
 
             """
             Share messaging session with state_engine.task_dispatcher. This
@@ -116,13 +119,13 @@ class EventDispatcher(object):
             """
             self.state_engine.task_dispatcher.start(session)
 
-            connection.start(); # Blocks until event loop exits.
+            connection.start()  # Blocks until event loop exits.
         except ConnectionError as e:
             self.logger.error(e)
         except SessionError as e:
             self.logger.error(e)
 
-        connection.close();
+        connection.close()
 
     def dispatch(self, message):
         """
@@ -146,7 +149,9 @@ class EventDispatcher(object):
             self.state_engine.notify(item, self.message_count)
             self.message_count += 1
         except ValueError as e:
-            self.logger.error("Message {} does not contain valid JSON".format(message.body))
+            self.logger.error(
+                "Message {} does not contain valid JSON".format(message.body)
+            )
             message.acknowledge()
         except Exception as e:
             """
@@ -156,7 +161,11 @@ class EventDispatcher(object):
             Exception, log error then acknowledge the "poison" message to
             prevent it from being endlessly redelivered.
             """
-            self.logger.error("Message {} caused the exception: {}:{} - dropping the message!".format(message.body, type(e).__name__, str(e)))
+            self.logger.error(
+                "Message {} caused the exception: {}:{} - dropping the message!".format(
+                    message.body, type(e).__name__, str(e)
+                )
+            )
             message.acknowledge()
 
     def acknowledge(self, id):

@@ -6,9 +6,9 @@
 # to you under the Apache License, Version 2.0 (the
 # "License"); you may not use this file except in compliance
 # with the License.  You may obtain a copy of the License at
-# 
+#
 #   http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -18,14 +18,17 @@
 #
 
 import sys
-assert sys.version_info >= (3, 0) # Bomb out if not running Python3
+assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
+
 
 import json, time, uuid
 
 from datetime import datetime, timezone, timedelta
-from asl_workflow_engine.state_engine_paths import apply_jsonpath, \
-                                                   apply_resultpath, \
-                                                   evaluate_parameters
+from asl_workflow_engine.state_engine_paths import (
+    apply_jsonpath,
+    apply_resultpath,
+    evaluate_parameters,
+)
 
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.task_dispatcher import TaskDispatcher
@@ -41,7 +44,7 @@ def parse_rfc3339_datetime(rfc3339):
     datetime.now(timezone.utc).astimezone().isoformat()
     We primarily need this in the Wait state so we can compute timeouts etc.
     """
-    rfc3339 = rfc3339.strip() # Remove any leading/trailing whitespace
+    rfc3339 = rfc3339.strip()  # Remove any leading/trailing whitespace
     if rfc3339[-1] == "Z":
         date = rfc3339[:-1]
         offset = "+00:00"
@@ -49,10 +52,12 @@ def parse_rfc3339_datetime(rfc3339):
         date = rfc3339[:-6]
         offset = rfc3339[-6:]
 
-    if "." not in date: date = date + ".0"
-    raw_datetime = datetime.strptime(date, '%Y-%m-%dT%H:%M:%S.%f')
+    if "." not in date:
+        date = date + ".0"
+    raw_datetime = datetime.strptime(date, "%Y-%m-%dT%H:%M:%S.%f")
     delta = timedelta(hours=int(offset[-5:-3]), minutes=int(offset[-2]))
-    if offset[0] == "-": delta = -delta
+    if offset[0] == "-":
+        delta = -delta
     return raw_datetime.replace(tzinfo=timezone(delta))
 
 
@@ -86,20 +91,26 @@ class ReplicatedDict(collections.MutableMapping):
         self.logger.info("Creating ReplicatedDict")
 
         self.transaction_log = transaction_log_name
-        #print("self.transaction_log = " + self.transaction_log)
+        # print("self.transaction_log = " + self.transaction_log)
 
         try:
             with open(self.transaction_log, 'r') as fp:
                 self.store = json.load(fp)
-            self.logger.info("ReplicatedDict loading: {}".format(self.transaction_log))
+            self.logger.info(
+                "ReplicatedDict loading: {}".format(self.transaction_log)
+            )
         except IOError as e:
             self.store = {}
         except ValueError as e:
-            self.logger.warning("ReplicatedDict {} does not contain valid JSON".format(self.transaction_log))
+            self.logger.warning(
+                "ReplicatedDict {} does not contain valid JSON".format(
+                    self.transaction_log
+                )
+            )
             self.store = {}
 
-        #self.store = dict()
-        #self.update(dict(*args, **kwargs))  # use the free update to set keys
+        # self.store = dict()
+        # self.update(dict(*args, **kwargs))  # use the free update to set keys
 
     def __str__(self):
         return str(self.store)
@@ -110,7 +121,7 @@ class ReplicatedDict(collections.MutableMapping):
     def __setitem__(self, key, value):
         self.store[key] = value
         try:
-            with open(self.transaction_log, 'w') as fp:
+            with open(self.transaction_log, "w") as fp:
                 json.dump(self.store, fp)
             self.logger.info("Updating ReplicatedDict: {}".format(self.transaction_log))
         except IOError as e:
@@ -119,7 +130,7 @@ class ReplicatedDict(collections.MutableMapping):
     def __delitem__(self, key):
         del self.store[key]
         try:
-            with open(self.transaction_log, 'w') as fp:
+            with open(self.transaction_log, "w") as fp:
                 json.dump(self.store, fp)
             self.logger.info("Updating ReplicatedDict: {}".format(self.transaction_log))
         except IOError as e:
@@ -137,11 +148,10 @@ class ReplicatedDict(collections.MutableMapping):
 
 
 class StateEngine(object):
-
     def __init__(self, config):
         """
         """
-        self.logger = init_logging(log_name='asl_workflow_engine')
+        self.logger = init_logging(log_name="asl_workflow_engine")
         self.logger.info("Creating StateEngine")
 
         """
@@ -166,9 +176,11 @@ class StateEngine(object):
         data = event["data"]
         context = event["context"]
         state = context["State"]
-        self.update_execution_history(context["Execution"]["Id"],
-                                      state_type + "StateExited",
-                                      {"output": data, "name": state["Name"]})
+        self.update_execution_history(
+            context["Execution"]["Id"],
+            state_type + "StateExited",
+            {"output": data, "name": state["Name"]},
+        )
         # Update the state
         state["Name"] = next_state
         # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
@@ -183,9 +195,11 @@ class StateEngine(object):
         context = event["context"]
         state = context["State"]
         execution_arn = context["Execution"]["Id"]
-        self.update_execution_history(execution_arn,
-                                      state_type + "StateExited",
-                                      {"output": data, "name": state["Name"]})
+        self.update_execution_history(
+            execution_arn,
+            state_type + "StateExited",
+            {"output": data, "name": state["Name"]},
+        )
         update_type = "ExecutionSucceeded"
         self.executions[execution_arn]["stopDate"] = time.time()
         if data.get("Error"):
@@ -196,9 +210,11 @@ class StateEngine(object):
             self.executions[execution_arn]["status"] = "SUCCEEDED"
             self.executions[execution_arn]["output"] = data
         
-        self.update_execution_history(execution_arn,
-                                      update_type,
-                                      {"output": data})
+        self.update_execution_history(
+            execution_arn,
+            update_type,
+            {"output": data},
+        )
 
     def update_execution_history(self, execution_id, update_type, details):
         """
@@ -213,16 +229,21 @@ class StateEngine(object):
 
         history = self.executions[execution_id]["history"]
         id = len(history) + 1
-        if "StateEntered" in update_type: details_type = "stateEnteredEventDetails"
-        elif "StateExited" in update_type: details_type = "stateExitedEventDetails"
-        else: details_type = update_type[0].lower() + update_type[1:] + "EventDetails"
-        history.append({
-            "timestamp": time.time(), 
-            details_type: details, 
-            "type": update_type, 
-            "id": id, 
-            "previousEventId": id - 1
-        })
+        if "StateEntered" in update_type:
+            details_type = "stateEnteredEventDetails"
+        elif "StateExited" in update_type:
+            details_type = "stateExitedEventDetails"
+        else:
+            details_type = update_type[0].lower() + update_type[1:] + "EventDetails"
+        history.append(
+            {
+                "timestamp": time.time(), 
+                details_type: details, 
+                "type": update_type, 
+                "id": id, 
+                "previousEventId": id - 1,
+            }
+        )
 
     def heartbeat(self):
         print("StateEngine heartbeat")
@@ -272,19 +293,31 @@ class StateEngine(object):
         """
         context = event.get("context")
         if context == None:
-            self.logger.error("StateEngine: event {} has no $.context field, dropping the message!".format(event))
+            self.logger.error(
+                "StateEngine: event {} has no $.context field, dropping the message!".format(
+                    event
+                )
+            )
             self.event_dispatcher.acknowledge(id)
             return
 
         state_machine = context.get("StateMachine")
         if state_machine == None:
-            self.logger.error("StateEngine: event {} has no $.context.StateMachine field, dropping the message!".format(event))
+            self.logger.error(
+                "StateEngine: event {} has no $.context.StateMachine field, dropping the message!".format(
+                    event
+                )
+            )
             self.event_dispatcher.acknowledge(id)
             return
 
         state_machine_id = state_machine.get("Id")
         if not state_machine_id:
-            self.logger.error("StateEngine: event {} has no $.context.StateMachine.Id field, dropping the message!".format(event))
+            self.logger.error(
+                "StateEngine: event {} has no $.context.StateMachine.Id field, dropping the message!".format(
+                    event
+                )
+            )
             self.event_dispatcher.acknowledge(id)
             return
 
@@ -304,7 +337,7 @@ class StateEngine(object):
                 "name": arn["resource"],
                 "definition": state_machine["Definition"],
                 "creationDate": time.time(),
-                "roleArn": "arn:aws:iam:::role/dummy-role/dummy"
+                "roleArn": "arn:aws:iam:::role/dummy-role/dummy",
             }
             del state_machine["Definition"]
 
@@ -316,7 +349,11 @@ class StateEngine(object):
             scenario as we *could* simply add the State Machine and retry. OTOH
             if a State Machine is deleted executions should also be deleted.
             """
-            self.logger.error("StateEngine: State Machine {} does not exist, dropping the message!".format(state_machine_id))
+            self.logger.error(
+                "StateEngine: State Machine {} does not exist, dropping the message!".format(
+                    state_machine_id
+                )
+            )
             self.event_dispatcher.acknowledge(id)
             return
 
@@ -337,35 +374,40 @@ class StateEngine(object):
         the second state. The output from the machine's terminal state is
         treated as its output. 
         """
-        data = event.get("data", {}) # Note default to empty JSON object
+        data = event.get("data", {})  # Note default to empty JSON object
 
 
         # Determine the current state from $$.State.Name.
         # Use get() defaults to cater for State or Name being initially unset.
-        if not context.get("State"): context["State"] = {"Name": None}
+        if not context.get("State"):
+            context["State"] = {"Name": None}
         current_state = context["State"].get("Name")
 
-        if not current_state: # Start state. Initialise unset context fields.
+        if not current_state:  # Start state. Initialise unset context fields.
             current_state = ASL["StartAt"]
             context["State"]["Name"] = current_state
-            if context.get("Execution") == None: context["Execution"] = {}
+            if context.get("Execution") == None:
+                context["Execution"] = {}
             execution = context["Execution"]
 
-            if not execution.get("Name"): execution["Name"] = str(uuid.uuid4())
+            if not execution.get("Name"):
+                execution["Name"] = str(uuid.uuid4())
 
             if not execution.get("Id"):
                 # Create Id
                 # Form executionArn from stateMachineArn and uuid
                 arn = parse_arn(state_machine_id)
-                execution_arn = create_arn(service="states",
-                                           region=arn.get("region", "local"),
-                                           account=arn["account"], 
-                                           resource_type="execution",
-                                           resource=arn["resource"] + ":" +     
-                                                    execution["Name"])
+                execution_arn = create_arn(
+                    service="states",
+                    region=arn.get("region", "local"),
+                    account=arn["account"],
+                    resource_type="execution",
+                    resource=arn["resource"] + ":" + execution["Name"],
+                )
                 execution["Id"] = execution_arn
             # execution["Input"] holds the initial Step Function input
-            if execution.get("Input") == None: execution["Input"] = data
+            if execution.get("Input") == None:
+                execution["Input"] = data
 
             if not execution.get("RoleArn"):
                 execution["RoleArn"] = asl_item["roleArn"]
@@ -391,22 +433,28 @@ class StateEngine(object):
                 "startDate": time.time(),
                 "stateMachineArn": state_machine_id,
                 "status": "RUNNING",
-                "history": []
+                "history": [],
             }
-            self.update_execution_history(execution["Id"],
-                                          "ExecutionStarted",
-                                          {"input": data, "roleArn": execution["RoleArn"]})
+            self.update_execution_history(
+                execution["Id"],
+                "ExecutionStarted",
+                {"input": data, "roleArn": execution["RoleArn"]},
+            )
 
 
         state = ASL["States"].get(current_state)
         if state == None:
-            self.logger.error("StateEngine: State {} does not exist, dropping the message!".format(current_state))
+            self.logger.error(
+                "StateEngine: State {} does not exist, dropping the message!".format(
+                    current_state
+                )
+            )
             self.event_dispatcher.acknowledge(id)
             return
 
         # Determine the ASL state type of the current state.
         state_type = state["Type"]
-    
+
         """
         print("state_machine_id = " + state_machine_id)
         print("current_state = " + current_state)
@@ -415,7 +463,7 @@ class StateEngine(object):
         print("event id = " + str(id))
         """
 
-        #-----------------------------------------------------------------------
+        # ----------------------------------------------------------------------
         """
         Define nested functions as handlers for each supported ASL state type.
         Using nested functions so we can use the context extracted in notify.
@@ -441,7 +489,7 @@ class StateEngine(object):
             extraction and embedding, becomes the effective input.
             """
             parameters = evaluate_parameters(input, context, state.get("Parameters"))
-            #print(parameters)
+            # print(parameters)
 
             """
             A Pass State MAY have a field named “Result”. If present, its value
@@ -458,7 +506,7 @@ class StateEngine(object):
             output = apply_resultpath(data, result, state.get("ResultPath", "$"))
             event["data"] = apply_jsonpath(output, state.get("OutputPath", "$"))
 
-            if (state.get("End")):
+            if state.get("End"):
                 self.end_state_machine(state_type, event)
             else:
                 self.change_state(state_type, state.get("Next"), event)
@@ -482,9 +530,9 @@ class StateEngine(object):
             than the specified heartbeat elapses between heartbeats from the task,
             then the interpreter fails the state with a States.Timeout Error Name.
             """
-            #print("TASK")
-            #print(state)
-            #print(event)
+            # print("TASK")
+            # print(state)
+            # print(event)
 
             """
             It's important for this function to be nested as we want the event,
@@ -496,13 +544,12 @@ class StateEngine(object):
                 output = apply_resultpath(data, result, state.get("ResultPath", "$"))
                 event["data"] = apply_jsonpath(output, state.get("OutputPath", "$"))
 
-                if (state.get("End")):
+                if state.get("End"):
                     self.end_state_machine(state_type, event)
                 else:
                     self.change_state(state_type, state.get("Next"), event)
 
                 self.event_dispatcher.acknowledge(id)
-
 
             input = apply_jsonpath(data, state.get("InputPath", "$"))
 
@@ -524,7 +571,7 @@ class StateEngine(object):
             extraction and embedding, becomes the effective input.
             """
             parameters = evaluate_parameters(input, context, state.get("Parameters"))
-            #print(parameters)
+            # print(parameters)
 
             self.task_dispatcher.execute_task(resource, parameters, on_response)
 
@@ -560,68 +607,99 @@ class StateEngine(object):
                 def isnumber(x):
                     # General test for numeric - any number x zero is zero
                     try:
-                        return not isinstance(x, bool) and 0 == x*0
+                        return not isinstance(x, bool) and 0 == x * 0
                     except:
                         return False
-                    
+    
                 def asl_choice_And():
-                    if all(choose(ch) for ch in choice["And"]): return next
+                    if all(choose(ch) for ch in choice["And"]):
+                        return next
                 def asl_choice_Or():
-                    if any(choose(ch) for ch in choice["Or"]): return next
+                    if any(choose(ch) for ch in choice["Or"]):
+                        return next
                 def asl_choice_Not():
-                    if (not choose(choice["Not"])): return next
+                    if (not choose(choice["Not"])):
+                        return next
 
                 def asl_choice_BooleanEquals():
                     value = choice["BooleanEquals"]
-                    if isinstance(variable, bool) and isinstance(value, bool) and \
-                    variable == value: return next
+                    if (
+                        isinstance(variable, bool)
+                        and isinstance(value, bool)
+                        and variable == value
+                    ):
+                        return next
 
                 def asl_choice_NumericEquals():
                     value = choice["NumericEquals"]
-                    if isnumber(variable) and isnumber(value) and \
-                    variable == value: return next
+                    if isnumber(variable) and isnumber(value) and variable == value:
+                        return next
                 def asl_choice_NumericGreaterThan():
                     value = choice["NumericGreaterThan"]
-                    if isnumber(variable) and isnumber(value) and \
-                    variable > value: return next
+                    if isnumber(variable) and isnumber(value) and variable > value:
+                        return next
                 def asl_choice_NumericGreaterThanEquals():
                     value = choice["NumericGreaterThanEquals"]
-                    if isnumber(variable) and isnumber(value) and \
-                    variable >= value: return next
+                    if isnumber(variable) and isnumber(value) and variable >= value:
+                        return next
                 def asl_choice_NumericLessThan():
                     value = choice["NumericLessThan"]
-                    if isnumber(variable) and isnumber(value) and \
-                    variable < value: return next
+                    if isnumber(variable) and isnumber(value) and variable < value:
+                        return next
                 def asl_choice_NumericLessThanEquals():
                     value = choice["NumericLessThanEquals"]
-                    if isnumber(variable) and isnumber(value) and \
-                    variable <= value: return next
+                    if isnumber(variable) and isnumber(value) and variable <= value:
+                        return next
 
                 def asl_choice_StringEquals():
                     value = choice["StringEquals"]
-                    if isinstance(variable, str) and isinstance(value, str) and \
-                    variable == value: return next
+                    if (
+                        isinstance(variable, str)
+                        and isinstance(value, str)
+                        and variable == value
+                    ):
+                        return next
                 def asl_choice_CaseInsensitiveStringEquals():
                     # Not covered in ASL spec. but useful and trivial to handle.
                     value = choice["CaseInsensitiveStringEquals"]
-                    if isinstance(variable, str) and isinstance(value, str) and \
-                    variable.lower() == value.lower(): return next
+                    if (
+                        isinstance(variable, str)
+                        and isinstance(value, str)
+                        and variable.lower() == value.lower()
+                    ):
+                        return next
                 def asl_choice_StringGreaterThan():
                     value = choice["StringGreaterThan"]
-                    if isinstance(variable, str) and isinstance(value, str) and \
-                    variable > value: return next
+                    if (
+                        isinstance(variable, str)
+                        and isinstance(value, str)
+                        and variable > value
+                    ):
+                        return next
                 def asl_choice_StringGreaterThanEquals():
                     value = choice["StringGreaterThanEquals"]
-                    if isinstance(variable, str) and isinstance(value, str) and \
-                    variable >= value: return next
+                    if (
+                        isinstance(variable, str)
+                        and isinstance(value, str)
+                        and variable >= value
+                    ):
+                        return next
                 def asl_choice_StringLessThan():
                     value = choice["StringLessThan"]
-                    if isinstance(variable, str) and isinstance(value, str) and \
-                    variable < value: return next
+                    if (
+                        isinstance(variable, str)
+                        and isinstance(value, str)
+                        and variable < value
+                    ):
+                        return next
                 def asl_choice_StringLessThanEquals():
                     value = choice["StringLessThanEquals"]
-                    if isinstance(variable, str) and isinstance(value, str) and \
-                    variable <= value: return next
+                    if (
+                        isinstance(variable, str)
+                        and isinstance(value, str)
+                        and variable <= value
+                    ):
+                        return next
 
                 """
                 The ASL spec. is a little vague on timestamps. The approach we
@@ -633,24 +711,39 @@ class StateEngine(object):
                 """
                 def asl_choice_TimestampEquals():
                     timestamp = parse_rfc3339_datetime(variable).timestamp()
-                    value = parse_rfc3339_datetime(choice["TimestampEquals"]).timestamp()
-                    if timestamp == value: return next
+                    value = parse_rfc3339_datetime(
+                        choice["TimestampEquals"]
+                    ).timestamp()
+                    if timestamp == value:
+                        return next
                 def asl_choice_TimestampGreaterThan():
                     timestamp = parse_rfc3339_datetime(variable).timestamp()
-                    value = parse_rfc3339_datetime(choice["TimestampGreaterThan"]).timestamp()
-                    if timestamp > value: return next
+                    value = parse_rfc3339_datetime(
+                        choice["TimestampGreaterThan"]
+                    ).timestamp()
+                    if timestamp > value:
+                        return next
                 def asl_choice_TimestampGreaterThanEquals():
                     timestamp = parse_rfc3339_datetime(variable).timestamp()
-                    value = parse_rfc3339_datetime(choice["TimestampGreaterThanEquals"]).timestamp()
-                    if timestamp >= value: return next
+                    value = parse_rfc3339_datetime(
+                        choice["TimestampGreaterThanEquals"]
+                    ).timestamp()
+                    if timestamp >= value:
+                        return next
                 def asl_choice_TimestampLessThan():
                     timestamp = parse_rfc3339_datetime(variable).timestamp()
-                    value = parse_rfc3339_datetime(choice["TimestampLessThan"]).timestamp()
-                    if timestamp < value: return next
+                    value = parse_rfc3339_datetime(
+                        choice["TimestampLessThan"]
+                    ).timestamp()
+                    if timestamp < value:
+                        return next
                 def asl_choice_TimestampLessThanEquals():
                     timestamp = parse_rfc3339_datetime(variable).timestamp()
-                    value = parse_rfc3339_datetime(choice["TimestampLessThanEquals"]).timestamp()
-                    if timestamp <= value: return next
+                    value = parse_rfc3339_datetime(
+                        choice["TimestampLessThanEquals"]
+                    ).timestamp()
+                    if timestamp <= value:
+                        return next
 
                 for key in choice:
                     """
@@ -662,7 +755,8 @@ class StateEngine(object):
                     except Exception:
                         next_state = None
                     
-                    if next_state: return next_state
+                    if next_state:
+                        return next_state
 
             """
             A Choice state state MUST have a “Choices” field whose value is a
@@ -670,7 +764,7 @@ class StateEngine(object):
             an object containing a comparison operation and a “Next” field,
             whose value MUST match a state name.
             """
-            choices = state.get("Choices", []) # Sets to [] if key not present
+            choices = state.get("Choices", [])  # Sets to [] if key not present
             
             """
             The interpreter attempts pattern-matches against the Choice Rules in
@@ -680,14 +774,15 @@ class StateEngine(object):
             """
             for choice in choices:
                 next_state = choose(choice)
-                if next_state: break
+                if next_state:
+                    break
 
             """
             Choice states MAY have a “Default” field, which will execute if none
             of the Choice Rules match. Using state.get("Default") will set the
             value to None if the "Default" field is not present.
             """
-            next_state = next_state if next_state else state.get("Default") 
+            next_state = next_state if next_state else state.get("Default")
 
             event["data"] = apply_jsonpath(input, state.get("OutputPath", "$"))
             """
@@ -698,7 +793,9 @@ class StateEngine(object):
             if next_state:
                 self.change_state(state_type, next_state, event)
             else:
-                self.logger.error("States.NoChoiceMatched: {}".format(json.dumps(context)))
+                self.logger.error(
+                    "States.NoChoiceMatched: {}".format(json.dumps(context))
+                )
                 # TODO actually emit/publish an error to the caller when the
                 # mechanism for returning data/errors has been determined.
 
@@ -726,7 +823,7 @@ class StateEngine(object):
             def on_timeout():
                 event["data"] = apply_jsonpath(input, state.get("OutputPath", "$"))
 
-                if (state.get("End")):
+                if state.get("End"):
                     self.end_state_machine(state_type, event)
                 else:
                     self.change_state(state_type, state.get("Next"), event)
@@ -777,7 +874,11 @@ class StateEngine(object):
                     current_timestamp = time.time()
                     timeout = (target_timestamp - current_timestamp) * 1000
                 except ValueError as e:
-                    self.logger.warning("timestamp {} failed to parse correctly, defaulting to zero delay".format(timestamp))
+                    self.logger.warning(
+                        "timestamp {} failed to parse correctly, defaulting to zero delay".format(
+                            timestamp
+                        )
+                    )
                     timeout = 0
             elif timestamp_path:
                 timestamp = apply_jsonpath(input, timestamp_path)
@@ -786,7 +887,11 @@ class StateEngine(object):
                     current_timestamp = time.time()
                     timeout = (target_timestamp - current_timestamp) * 1000
                 except ValueError as e:
-                    self.logger.warning("timestamp {} failed to parse correctly, defaulting to zero delay".format(timestamp))
+                    self.logger.warning(
+                        "timestamp {} failed to parse correctly, defaulting to zero delay".format(
+                            timestamp
+                        )
+                    )
                     timeout = 0
 
             """
@@ -796,7 +901,7 @@ class StateEngine(object):
             event should be published and the correct id acknowledged.
             """
             self.event_dispatcher.set_timeout(on_timeout, timeout)
-     
+
         def asl_state_Succeed():
             """
             https://states-language.net/spec.html#succeed-state
@@ -836,7 +941,7 @@ class StateEngine(object):
             """
             error = {
                 "Error": state.get("Error", "Unspecified"),
-                "Cause": state.get("Cause", "Unspecified")
+                "Cause": state.get("Cause", "Unspecified"),
             }
 
             # Fail states don't allow InputPath, OutputPath or ResultPath
@@ -860,18 +965,22 @@ class StateEngine(object):
         """
         End of nested state handler functions.
         """
-        #-----------------------------------------------------------------------
+        # ----------------------------------------------------------------------
 
         """
         Use the ASL state type of the current state to dynamically invoke the
         appropriate ASL state handler given state type. The (Python) lambda
         provides a default handler in case of malformed ASL. 
         """
-        self.update_execution_history(context["Execution"]["Id"],
-                                      state_type + "StateEntered",
-                                      {"input": data, "name": current_state})
-        locals().get("asl_state_" + state_type,
-                     lambda:
-                        self.logger.error("StateEngine illegal state transition: {}".
-                        format(state_type)))()
+        self.update_execution_history(
+            context["Execution"]["Id"],
+            state_type + "StateEntered",
+            {"input": data, "name": current_state},
+        )
+        locals().get(
+            "asl_state_" + state_type,
+            lambda: self.logger.error(
+                "StateEngine illegal state transition: {}".format(state_type)
+            ),
+        )()
 
