@@ -22,17 +22,16 @@
 """
 This test illustrates one step function invoking another.
 
-Note that in real AWS Step Functions the pattern would be "to create a state
-machine with a Lambda function that can start a new execution, continuing your
-ongoing work in that new execution." - for an example see this AWS tutorial:
+This is a relatively recent AWS addition (September 2019) described here:
+https://docs.aws.amazon.com/step-functions/latest/dg/connect-stepfunctions.html
+https://docs.aws.amazon.com/step-functions/latest/dg/concepts-nested-workflows.html
+
+Because it's relatively new be aware that a lot of the information online
+relating to nesting stepfunctions illustrates the use of a lambda as a proxy
+for example this AWS tutorial:
 https://docs.aws.amazon.com/step-functions/latest/dg/tutorial-continue-new.html
-
-It is not clear why AWS has not implemented a direct service integration for this
-https://docs.aws.amazon.com/step-functions/latest/dg/concepts-service-integrations.html
-
-For convenience local ASL Workflow Engine *has* implemented a service integration
-using a resource ARN of the form:
-arn:aws:states:region:account-id:execution:stateMachineName:executionName
+Using a lambda to proxy child stepfunctions still works and is still a
+legitimate approach, but it is no longer neccesary and adds an additional cost.
 
 
 This test uses the AWS python SDK boto3 to access our local ASL Workflow Engine
@@ -49,23 +48,22 @@ from botocore.exceptions import ClientError
 from asl_workflow_engine.logger import init_logging
 
 """
-In the Resource ARN below the executionName is not specified, so a UUID will
-be automatically assigned. We could alternatively have used an ARN such as:
-arn:aws:states:local:0123456789:execution:simple_state_machine:executionName
-however for stepfunctions each execution should have a unique name, so if we
-name a resource like that in theory it could only execute once. In practice
-we don't *yet* handle all of the execution behaviour correctly, but we should
-eventually. The way to specify specific execution names (if so desired) for
-launching via Task states is most likely via ASL Parameters. Using Parameters
-we could pass in the execution name in the stepfunction input and extract it
-in the Parameter's JSONPath processing. 
+In the Resource ARN below the execution Name is not specified, so a UUID will
+be automatically assigned. The way to specify specific execution names (if so
+desired) is to pass the execution name in the stepfunction input and extract it
+in the Parameter's JSONPath processing e.g. something like:
+"Name.$": "$.executionName"
 """
 caller_ASL = """{
     "StartAt": "StepFunctionLauncher",
     "States": {
         "StepFunctionLauncher": {
             "Type": "Task",
-            "Resource": "arn:aws:states:local:0123456789:execution:simple_state_machine",
+            "Resource": "arn:aws:states:local:0123456789:states:startExecution",
+            "Parameters": {  
+                "Input.$": "$",
+                "StateMachineArn": "arn:aws:states:local:0123456789:stateMachine:simple_state_machine"
+            },
             "End": true
         }
     }
@@ -196,10 +194,39 @@ if __name__ == '__main__':
     try:
         for item in items:
             response = sfn.start_execution(
-            stateMachineArn=caller_state_machine_arn,
-            #name=EXECUTION_NAME, # If not specified a UUID is assigned
-            input=item
-        )
+                stateMachineArn=caller_state_machine_arn,
+                #name=EXECUTION_NAME, # If not specified a UUID is assigned
+                input=item
+            )
+
+            """
+            Get ARN of the execution just invoked on the caller_state_machine.
+            Note that it's more awkward trying to get the execution ARN of
+            the execution that this invokes on the callee because we let it use
+            a system assigned ARN, but hey illustrating this stuff is kind of
+            the point of this example.
+            """
+            execution_arn = response["executionArn"]
+            history = sfn.get_execution_history(
+                executionArn=execution_arn
+            )
+            #print("Execution history for Launcher state machine execution:")
+            #print(execution_arn)
+            #print()
+            #print(history)
+            #print()
+
+            """
+            List all executions for the callee state machine. Do NOT
+            use the "SUCCEEDED" statusFilter, because this example includes a
+            Wait state which waits for around 10s, so the child execution will
+            still only be in the RUNNING state by this point.
+            """
+            executions = sfn.list_executions(
+                stateMachineArn=state_machine_arn
+            )
+            #print(executions)
+
     except ClientError as e:
         self.logger.error(e.response)
 

@@ -124,6 +124,7 @@ class TaskDispatcher(object):
         For async messaging based (e.g. AMQP) RPC invoked functions/services:
         arn:aws:rpcmessage:local::function:function-name
 
+        TODO
         In addition, this resource supports the following Parameters in the
         Task state in order to control the configuration of the messaging
         system used to transport the RPC.
@@ -225,82 +226,79 @@ class TaskDispatcher(object):
             self.producer.send(message)
             # N.B. The service response message is handled by handle_rpcmessage_response()
 
-        # def asl_service_openfaas():
+        # def asl_service_openfaas():  # TODO
         #    print("asl_service_openfaas")
 
-        # def asl_service_fn():
+        # def asl_service_fn():  # TODO
         #    print("asl_service_fn")
 
-        # def asl_service_lambda():
+        # def asl_service_lambda():  # TODO
         #    print("asl_service_lambda")
 
         def asl_service_states():
             """
             The service part of the Resource ARN might be "states" for a number
             of Service Integrations, so we must further demultiplex based on
-            the resource_type. Initially just support execution to allow us
-            to invoke another state machine execution.
+            the resource_type. Initially just support states startExecution to
+            allow us to invoke another state machine execution.
             """
-            if resource_type == "execution":
-                asl_service_states_execution()
+            if resource_type == "states" and resource == "startExecution":
+                asl_service_states_startExecution()
             else:
                 asl_service_InvalidService()
 
-        def asl_service_states_execution():
+        def asl_service_states_startExecution():
             """
             Service Integration to stepfunctions. Initially this is limited to
             integrating with stepfunctions running on this local ASL Workflow
             Engine, however it should be possible to integrate with *real* AWS
-            stepfunctions too in due course. Note that real AWS stepfunctions
-            don't have a direct Service Integration to other stepfunctions and
-            require a lambda to do this, but there is no fundamental reason why
-            they couldn't (requiring an extra lambda of course generates more
-            revenue so that might be the reason, but it might just be that they
-            haven't got round to it.)
+            stepfunctions too in due course.
+
+            Up until September 2019 real AWS stepfunctions didn't have a direct
+            Service Integration to other stepfunctions and required a lambda to
+            do this, so be aware that many online examples likely illustrate the
+            use of a lambda as a proxy to the child stepfunction but this link
+            documents the new more direct service integration:            
+            https://docs.aws.amazon.com/step-functions/latest/dg/connect-stepfunctions.html
 
             The resource ARN should be of the form:
-            arn:aws:states:region:account-id:execution:stateMachineName:executionName
-            though note that for stepfunctions each execution should have a
-            unique name, so if we name a resource like that in theory it could
-            only execute once. In practice we don't *yet* handle all of the
-            execution behaviour correctly, but we should eventually. The way to
-            specify specific execution names (if desired) for launching via Task
-            states is most likely via ASL Parameters. Using Parameters we could
-            pass in the execution name in the stepfunction input and extract it
-            in the Parameter's JSONPath processing.
+            arn:aws:states:region:account-id:states:startExecution
 
-            if the executionName is not specified a UUID will be assigned, which
-            is more likely to be what is needed in practice.
-
-            # TODO handle additional Task state parameters for stepfunctions
-            integration. This will be needed to handle actual execution names
-            because, as mentioned above, they should be unique and so would
-            likely be passed as part of the calling stepfunction's input.
-
-            Some more thought is needed about exactly what form any parameters
-            should take, but something like the following is a starting point
-            that is we'd need a way to specify the execution name and the
-            stepfunction input data.
+            The Task must have a Parameters field of the form:
 
             "Parameters": {
-                "ExecutionName.$": "$.name",
-                "Input.$": "$.input"
-            }
+                "Input": "ChildStepFunctionInput",
+                "StateMachineArn": "ChildStateMachineArn",
+                "Name": "OptionalExecutionName"
+            },
+
+            if the execution Name is not specified in the Parameters a UUID will
+            be assigned by the service.
+
+            TODO: At the moment this integration only supports the direct
+            request/response stepfunction integration NOT the "run a job" (.sync)
+            or "wait for callback" (.waitForTaskToken) forms so at the moment
+            we can't yet wait for the child stepfunction to complete or wait
+            for a callback. To achieve this we *probably* need to poll
+            ListExecutions with statusFilter="SUCCEEDED" comparing the response
+            with our executionArn, which is mostly fairly straightforward but
+            becomes more involved in a clustered environment. The callback
+            integration might be slightly easier to implement as it shouldn't
+            need any polling but one oddity is that there doesn't seem to be
+            a stepfunctions integration for SendTaskSuccess (or SendTaskFailure
+            or SendTaskHeartbeat) as those are the APIs that relate to
+            triggering or cancelling a callback by implication there is no
+            direct mechanism yet for a child stepfunction to actually do the
+            callback other than proxying via a lambda. My guess is that this is
+            an accidental omission that was missed when implementing the
+            stepfunctions integration and will be added IDC.
             """
-            # print(parameters)
+            execution_name = parameters.get("Name", str(uuid.uuid4()))
 
-            print(resource.split(":"))
-            split = resource.split(":")
-            state_machine_name = split[0]
-            execution_name = split[1] if len(split) == 2 else str(uuid.uuid4())
+            state_machine_arn = parameters.get("StateMachineArn")
 
-            state_machine_arn = create_arn(
-                service="states",
-                region=arn.get("region", "local"),
-                account=arn["account"],
-                resource_type="stateMachine",
-                resource=state_machine_name,
-            )
+            arn = parse_arn(state_machine_arn)
+            state_machine_name = arn["resource"]
 
             execution_arn = create_arn(
                 service="states",
@@ -328,7 +326,7 @@ class TaskDispatcher(object):
             context = {
                 "Execution": {
                     "Id": execution_arn,
-                    "Input": parameters,
+                    "Input": parameters.get("Input", {}),
                     "Name": execution_name,
                     "RoleArn": match.get("roleArn"),
                     "StartTime": start_time,
@@ -337,7 +335,7 @@ class TaskDispatcher(object):
                 "StateMachine": {"Id": state_machine_arn, "Name": state_machine_name},
             }
 
-            event = {"data": parameters, "context": context}
+            event = {"data": parameters.get("Input", {}), "context": context}
 
             self.state_engine.event_dispatcher.publish(event)
 

@@ -3,7 +3,7 @@ This project is a workflow engine written in Python 3 based on the [Amazon State
 
 The initial goal is primarily learning about ASL and the focus will be on enabling relatively simple "straight line" state transitions (i.e. currently [Parallel](https://states-language.net/spec.html#parallel-state) states are not supported, though [Choice](https://states-language.net/spec.html#choice-state) states are) and [Task](https://states-language.net/spec.html#task-state) state resources shall initially concentrate on integrations with [Oracle Fn Project](https://github.com/fnproject), [OpenFaaS](https://github.com/openfaas/faas) and [AMQP](https://www.amqp.org/) based RPC Message invocations (as described here: https://www.rabbitmq.com/tutorials/tutorial-six-python.html).
 
-**Warning** the project is still very much a work-in-progress although the basics are in place.
+**Warning** the project is still very much a work-in-progress although most of the basics are now in place.
 
 ### Initial Design Choices
 ASL is essentially a Finite State Machine and a common approach for triggering FSMs is the [Event-driven Finite State Machine](https://en.wikipedia.org/wiki/Event-driven_finite-state_machine). ASL implementations can push [data](https://states-language.net/spec.html#data) between states in the form of JSON objects, so we need some way to facilitate this in the form of a queue of JSON objects. There are obviously many possible queue implementations and ideally we should abstract the detail, but initially we shall be using AMQP 0.9.1 via RabbitMQ and the Pika 1.0.1 client.
@@ -128,9 +128,13 @@ arn:aws:fn:local::function:function-name
 If the supplied resource starts with $ the resource will be treated as an environment variable and the real ARN will be looked up from there.
 
 #### Step Functions
-The ability to trigger "child" Step Functions is a useful pattern, especially in a hybrid orchestration/choreography microservice integration model. As a convenience the ASL Workflow Engine provides a direct Service Integration to other Step Functions, unlike the *official* Amazon AWS Step Functions implementation which requires the use of a Lambda intermediary. 
+The ability to trigger "child" Step Functions is a useful pattern, especially in a hybrid orchestration/choreography microservice integration model. Until recently (September 2019) the *official* Amazon AWS Step Functions implementation required the use of a Lambda intermediary to achieve this, however it now has a direct service integration, which this implementation also uses:
 
-The Service Integration to Step Functions is initially limited to integrating with Step Functions running on **ASL Workflow Engine**, however it should be possible to integrate with *real* AWS Step Functions relatively easily in due course using boto3, for example:
+https://docs.aws.amazon.com/step-functions/latest/dg/connect-stepfunctions.html
+
+https://docs.aws.amazon.com/step-functions/latest/dg/concepts-nested-workflows.html
+
+The Service Integration to Step Functions is initially limited to integrating with Step Functions running on this **ASL Workflow Engine**, however it should be possible to integrate with *real* AWS Step Functions relatively easily in due course using boto3, for example:
 ```
 import boto3
 from botocore.exceptions import ClientError
@@ -149,31 +153,32 @@ except ClientError as e:
 
 The resource URI specified in the Task State used to trigger the Step Function should be an ARN of the form:
 ```
-arn:aws:states:region:account-id:execution:stateMachineName:executionName
+arn:aws:states:region:account-id:states:startExecution
 ```
-Note however that for Step Functions each execution should have a unique name, so if we name a resource like that in theory it could only execute once. In practice we don't *yet* handle all of the execution behaviour correctly, but we should eventually and real AWS Step Functions would certainly have an issue.
-
-The way to specify specific execution names (if desired) for launching via Task states is most likely via ASL Parameters. Using Parameters we could pass in the execution name in the Step Function input and extract it in the Task Parameter's JSONPath processing.
-
-If the executionName is not specified a UUID will be assigned, which is more likely to be what is needed in practice.
-
-**TODO** handle additional Task state parameters for Step Functions integration. This will be needed to handle actual execution names because, as mentioned above, they should be unique and so would likely be passed as part of the calling Step Function's input.
-
-Some more thought is needed about exactly what form any parameters should take, but something like the following is a starting point where we use a Parameter as a way to specify the execution name and the Step Function input data.
+The  Resource field however does not have sufficient information, so this service integration requires the use of Task state Parameters:
 ```
- "Parameters": {
-    "ExecutionName.$": "$.name",
-    "Input.$": "$.input"
-}
+"Parameters": {
+    "Input": "ChildStepFunctionInput",
+    "StateMachineArn": "ChildStateMachineArn",
+    "Name": "OptionalExecutionName"
+},
 ```
-The example [step_by_step](py/test/step_by_step.py) illustrates the use of the Step Function Service Integration. The important part of the example is the Resource URI in the StepFunctionLauncher Task State in the caller ASL:
+If the optional execution Name is not specified in the Parameters a UUID will be assigned by the service. The way to specify specific execution names (if so desired) is to pass the execution name in the stepfunction input and extract it in the Parameter's JSONPath processing e.g. something like:
+```
+"Name.$": "$.executionName"
+```
+The example [step_by_step](py/test/step_by_step.py) illustrates the use of the Step Function Service Integration. The important parts of the example are the Resource URI and Parameters fields in the StepFunctionLauncher Task State in the caller ASL:
 ```
 {
     "StartAt": "StepFunctionLauncher",
     "States": {
         "StepFunctionLauncher": {
             "Type": "Task",
-            "Resource": "arn:aws:states:local:0123456789:execution:simple_state_machine",
+            "Resource": "arn:aws:states:local:0123456789:states:startExecution",
+            "Parameters": {  
+                "Input.$": "$",
+                "StateMachineArn": "arn:aws:states:local:0123456789:stateMachine:simple_state_machine"
+            },
             "End": true
         }
     }

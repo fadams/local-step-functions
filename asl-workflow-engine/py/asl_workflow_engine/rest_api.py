@@ -681,7 +681,7 @@ class RestAPI(object):
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html
                 """
-                print(params)
+                # print(params)
 
                 execution_arn = params.get("executionArn")
                 if not execution_arn:
