@@ -51,7 +51,7 @@ def parse_arn(arn):
     """
     Parse an ARN into a dictionary comprising the component parts of the ARN
     """
-    elements = arn.split(':', 5)
+    elements = arn.split(":", 5)
     result = {
         "arn": elements[0],
         "partition": elements[1],
@@ -62,7 +62,7 @@ def parse_arn(arn):
         "resource_type": None,
     }
     if "/" in result["resource"]:
-        result["resource_type"], result["resource"] = result["resource"].split("/",1)
+        result["resource_type"], result["resource"] = result["resource"].split("/", 1)
     elif ':' in result['resource']:
-        result["resource_type"], result["resource"] = result["resource"].split(":",1)
+        result["resource_type"], result["resource"] = result["resource"].split(":", 1)
     return result

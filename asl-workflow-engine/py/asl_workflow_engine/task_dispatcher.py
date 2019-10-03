@@ -64,7 +64,8 @@ class TaskDispatcher(object):
         "rpcmessage" based services as described in execute_task.
         """
         self.reply_to = session.consumer()
-        self.reply_to.capacity = 100  # Enable consumer prefetch
+        # Enable consumer prefetch
+        self.reply_to.capacity = 100
         self.reply_to.set_message_listener(self.handle_rpcmessage_response)
         self.producer = session.producer()
 
@@ -336,11 +337,11 @@ class TaskDispatcher(object):
                 "StateMachine": {"Id": state_machine_arn, "Name": state_machine_name},
             }
 
-            event = {"data": parameters,"context": context}
+            event = {"data": parameters, "context": context}
 
             self.state_engine.event_dispatcher.publish(event)
 
-            result = {"executionArn": execution_arn,"startDate": time.time()}
+            result = {"executionArn": execution_arn, "startDate": time.time()}
             callback(result)
 
         def asl_service_InvalidService():

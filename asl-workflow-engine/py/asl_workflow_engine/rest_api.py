@@ -196,7 +196,7 @@ class RestAPI(object):
                 state_machine_arn = create_arn(
                     service="states",
                     region=self.region,
-                    account=arn["account"], 
+                    account=arn["account"],
                     resource_type="stateMachine",
                     resource=name,
                 )
@@ -528,7 +528,7 @@ class RestAPI(object):
                 execution_arn = create_arn(
                     service="states",
                     region=arn.get("region", self.region),
-                    account=arn["account"], 
+                    account=arn["account"],
                     resource_type="execution",
                     resource=arn["resource"] + ":" + name,
                 )
@@ -551,7 +551,7 @@ class RestAPI(object):
                     "StateMachine": {
                         "Id": state_machine_arn,
                         "Name": match.get("name"),
-                    }
+                    },
                 }
 
                 event = {"data": input, "context": context}

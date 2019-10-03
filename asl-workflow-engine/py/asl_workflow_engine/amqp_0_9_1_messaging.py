@@ -264,7 +264,7 @@ class Destination(object):
             "durable": False,
             "exclusive": False,
             "auto-delete": False,
-            "arguments": None
+            "arguments": None,
         }
 
         # Defaults for subscription queues (exclusive and autodelete True)
@@ -275,7 +275,7 @@ class Destination(object):
             "durable": False,
             "exclusive": True,
             "auto-delete": True,
-            "arguments": None
+            "arguments": None,
         }
 
         self.bindings = []
@@ -576,7 +576,7 @@ class Consumer(Destination):
         self.name = result.method.queue
 
         for binding in self.bindings:
-            if binding["exchange"] == "" :
+            if binding["exchange"] == "":
                 continue  # Can't bind to default
             self.session.channel.queue_bind(
                 queue=binding["queue"],

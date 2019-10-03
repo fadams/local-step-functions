@@ -93,9 +93,7 @@ class WorkflowEngine(object):
         )
 
         se = config["state_engine"]
-        se["asl_cache"] = os.environ.get(
-            "STATE_ENGINE_ASL_CACHE", se.get("asl_cache")
-        )
+        se["asl_cache"] = os.environ.get("STATE_ENGINE_ASL_CACHE", se.get("asl_cache"))
 
         ra = config["rest_api"]
         ra["host"] = os.environ.get("REST_API_HOST", ra.get("host"))
@@ -117,7 +115,7 @@ if __name__ == "__main__":
         target=app.run,
         kwargs={
             "host": workflow_engine.rest_api.host,
-            "port": workflow_engine.rest_api.port
+            "port": workflow_engine.rest_api.port,
         },
     ).start()
     workflow_engine.start()

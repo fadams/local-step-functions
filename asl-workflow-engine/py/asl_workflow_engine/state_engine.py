@@ -87,14 +87,14 @@ TODO focussing on storage ATM need to look at replication stuff soon.
 """
 class ReplicatedDict(collections.MutableMapping):
     def __init__(self, transaction_log_name, *args, **kwargs):
-        self.logger = init_logging(log_name='asl_workflow_engine')
+        self.logger = init_logging(log_name="asl_workflow_engine")
         self.logger.info("Creating ReplicatedDict")
 
         self.transaction_log = transaction_log_name
         # print("self.transaction_log = " + self.transaction_log)
 
         try:
-            with open(self.transaction_log, 'r') as fp:
+            with open(self.transaction_log, "r") as fp:
                 self.store = json.load(fp)
             self.logger.info(
                 "ReplicatedDict loading: {}".format(self.transaction_log)
@@ -210,11 +210,7 @@ class StateEngine(object):
             self.executions[execution_arn]["status"] = "SUCCEEDED"
             self.executions[execution_arn]["output"] = data
         
-        self.update_execution_history(
-            execution_arn,
-            update_type,
-            {"output": data},
-        )
+        self.update_execution_history(execution_arn, update_type, {"output": data})
 
     def update_execution_history(self, execution_id, update_type, details):
         """
@@ -237,10 +233,10 @@ class StateEngine(object):
             details_type = update_type[0].lower() + update_type[1:] + "EventDetails"
         history.append(
             {
-                "timestamp": time.time(), 
-                details_type: details, 
-                "type": update_type, 
-                "id": id, 
+                "timestamp": time.time(),
+                details_type: details,
+                "type": update_type,
+                "id": id,
                 "previousEventId": id - 1,
             }
         )
@@ -500,7 +496,9 @@ class StateEngine(object):
             neither “Result” nor “ResultPath” are provided, the Pass state
             copies its input through to its output.
             """
-            result = state.get("Result", parameters) # Default is effective input as per spec.
+            result = state.get(
+                "Result", parameters
+            ) # Default is effective input as per spec.
 
             # Pass state applies ResultPath to "raw input"
             output = apply_resultpath(data, result, state.get("ResultPath", "$"))
@@ -614,9 +612,11 @@ class StateEngine(object):
                 def asl_choice_And():
                     if all(choose(ch) for ch in choice["And"]):
                         return next
+
                 def asl_choice_Or():
                     if any(choose(ch) for ch in choice["Or"]):
                         return next
+
                 def asl_choice_Not():
                     if (not choose(choice["Not"])):
                         return next
@@ -634,18 +634,22 @@ class StateEngine(object):
                     value = choice["NumericEquals"]
                     if isnumber(variable) and isnumber(value) and variable == value:
                         return next
+
                 def asl_choice_NumericGreaterThan():
                     value = choice["NumericGreaterThan"]
                     if isnumber(variable) and isnumber(value) and variable > value:
                         return next
+
                 def asl_choice_NumericGreaterThanEquals():
                     value = choice["NumericGreaterThanEquals"]
                     if isnumber(variable) and isnumber(value) and variable >= value:
                         return next
+
                 def asl_choice_NumericLessThan():
                     value = choice["NumericLessThan"]
                     if isnumber(variable) and isnumber(value) and variable < value:
                         return next
+
                 def asl_choice_NumericLessThanEquals():
                     value = choice["NumericLessThanEquals"]
                     if isnumber(variable) and isnumber(value) and variable <= value:
@@ -659,6 +663,7 @@ class StateEngine(object):
                         and variable == value
                     ):
                         return next
+
                 def asl_choice_CaseInsensitiveStringEquals():
                     # Not covered in ASL spec. but useful and trivial to handle.
                     value = choice["CaseInsensitiveStringEquals"]
@@ -668,6 +673,7 @@ class StateEngine(object):
                         and variable.lower() == value.lower()
                     ):
                         return next
+
                 def asl_choice_StringGreaterThan():
                     value = choice["StringGreaterThan"]
                     if (
@@ -676,6 +682,7 @@ class StateEngine(object):
                         and variable > value
                     ):
                         return next
+
                 def asl_choice_StringGreaterThanEquals():
                     value = choice["StringGreaterThanEquals"]
                     if (
@@ -684,6 +691,7 @@ class StateEngine(object):
                         and variable >= value
                     ):
                         return next
+
                 def asl_choice_StringLessThan():
                     value = choice["StringLessThan"]
                     if (
@@ -692,6 +700,7 @@ class StateEngine(object):
                         and variable < value
                     ):
                         return next
+
                 def asl_choice_StringLessThanEquals():
                     value = choice["StringLessThanEquals"]
                     if (
@@ -716,6 +725,7 @@ class StateEngine(object):
                     ).timestamp()
                     if timestamp == value:
                         return next
+
                 def asl_choice_TimestampGreaterThan():
                     timestamp = parse_rfc3339_datetime(variable).timestamp()
                     value = parse_rfc3339_datetime(
@@ -723,6 +733,7 @@ class StateEngine(object):
                     ).timestamp()
                     if timestamp > value:
                         return next
+
                 def asl_choice_TimestampGreaterThanEquals():
                     timestamp = parse_rfc3339_datetime(variable).timestamp()
                     value = parse_rfc3339_datetime(
@@ -730,6 +741,7 @@ class StateEngine(object):
                     ).timestamp()
                     if timestamp >= value:
                         return next
+
                 def asl_choice_TimestampLessThan():
                     timestamp = parse_rfc3339_datetime(variable).timestamp()
                     value = parse_rfc3339_datetime(
@@ -737,6 +749,7 @@ class StateEngine(object):
                     ).timestamp()
                     if timestamp < value:
                         return next
+
                 def asl_choice_TimestampLessThanEquals():
                     timestamp = parse_rfc3339_datetime(variable).timestamp()
                     value = parse_rfc3339_datetime(
@@ -754,7 +767,7 @@ class StateEngine(object):
                         next_state = locals().get("asl_choice_" + key, lambda: None)()
                     except Exception:
                         next_state = None
-                    
+
                     if next_state:
                         return next_state
 
