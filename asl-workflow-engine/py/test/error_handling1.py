@@ -17,30 +17,14 @@
 # under the License.
 #
 # Run with:
-# PYTHONPATH=.. python3 simple_state_machine2.py
+# PYTHONPATH=.. python3 error_handling1.py
 #
 """
 This test uses the AWS python SDK boto3 to access our local ASL Workflow Engine
 https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/stepfunctions.html
 https://docs.aws.amazon.com/code-samples/latest/catalog/code-catalog-python-example_code-stepfunctions.html
 
-Its behaviour is essentially the same as simple_state_machine1.py though this
-test explicitly calls create_state_machine. The start_execution call will result
-in a message being sent to the asl_workflow_events queue "under the hood".
 
-This test is the rough equivalent of running the following on the AWS CLI
-with item 1 to 4 differing by the --input below.
-
-aws stepfunctions --endpoint http://localhost:4584 start-execution --state-machine-arn $STATE_MACHINE_ARN --input '{"lambda":"Success"}' --name success-execution
-
-# InternalErrorNotHandled lambda
-aws stepfunctions --endpoint http://localhost:4584 start-execution --state-machine-arn $STATE_MACHINE_ARN --input '{"lambda":"InternalErrorNotHandled"}' --name internal-error-not-handled-execution
-
-# InternalErrorHandled lambda
-aws stepfunctions --endpoint http://localhost:4584 start-execution --state-machine-arn $STATE_MACHINE_ARN --input '{"lambda":"InternalErrorHandled"}' --name internal-error-handled-execution
-
-# Timeout lambda
-aws stepfunctions --endpoint http://localhost:4584 start-execution --state-machine-arn $STATE_MACHINE_ARN --input '{"lambda":"Timeout"}' --name timeout-execution
 """
 
 import sys
@@ -90,10 +74,30 @@ ASL = """{
             "Error": "NoLambdaError",
             "Cause": "No Matches!"
         },
+        "SuccessLambdaCatchState": {
+            "Type": "Fail",
+            "Error": "NoLambdaError",
+            "Cause": "No Matches!"
+        },
         "SuccessLambda": {
             "Type": "Task",
             "Resource": "arn:aws:rpcmessage:local::function:SuccessLambda",
-            "Next": "WaitState"
+            "Next": "WaitState",
+            "TimeoutSeconds": 10,
+            "Retry" : [
+                {
+                    "ErrorEquals": [ "States.Timeout" ],
+                    "IntervalSeconds": 3,
+                    "MaxAttempts": 2,
+                    "BackoffRate": 1.5
+                }
+            ],
+            "Catch": [
+                {
+                    "ErrorEquals": [ "States.ALL" ],
+                    "Next": "SuccessLambdaCatchState"
+                }
+            ]
         },
         "InternalErrorNotHandledLambda": {
             "Type": "Task",
@@ -127,26 +131,26 @@ items = ['{"lambda":"Success"}',
          '{"lambda":"InternalErrorHandled"}',
          '{"lambda":"Timeout"}']
 
-#items = ['{"lambda":"Success"}']
+items = ['{"lambda":"Success"}']
 #items = ['{"lambda":"InternalErrorNotHandled"}']
 #items = ['{"lambda":"InternalErrorHandled"}']
 #items = ['{"lambda":"Timeout"}']
 
 if __name__ == '__main__':
     # Initialise logger
-    logger = init_logging(log_name='simple_state_machine2')
+    logger = init_logging(log_name='error_handling1')
 
     # Initialise the boto3 client setting the endpoint_url to our local
     # ASL Workflow Engine
     # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html#boto3.session.Session.client
     sfn = boto3.client("stepfunctions", endpoint_url="http://localhost:4584")
-    state_machine_arn = "arn:aws:states:local:0123456789:stateMachine:simple_state_machine"
+    state_machine_arn = "arn:aws:states:local:0123456789:stateMachine:error_handling_state_machine"
 
     # Create state machine using a dummy roleArn. If it already exists an
     # exception will be thrown, we ignore that but raise other exceptions.
     try:
         response = sfn.create_state_machine(
-            name="simple_state_machine", definition=ASL,
+            name="error_handling_state_machine", definition=ASL,
             roleArn="arn:aws:iam::0123456789:role/service-role/MyRole"
         )
     except ClientError as e:

@@ -116,7 +116,10 @@ class Connection(object):
         BlockingConnection.process_data_events() and
         BlockingChannel.start_consuming() e.g. after the start() method below
         has been called.
+        Clamp delay to >= 0 as call_later doesn't handle negative values.
         """
+        if delay < 0:
+            delay = 0
         return self.connection.call_later(delay / 1000, callback)
 
     def clear_timeout(self, timeout_id):

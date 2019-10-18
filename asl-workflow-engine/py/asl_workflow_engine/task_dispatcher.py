@@ -30,8 +30,8 @@ from asl_workflow_engine.arn import *
 class TaskDispatcher(object):
     def __init__(self, state_engine, config):
         """
-        :param logger: The Workflow Engine logger
-        :type logger: logger
+        :param state_engine: The StateEngine calling this TaskDispatcher
+        :type state_engine: StateEngine
         :param config: Configuration dictionary
         :type config: dict
         """
@@ -53,11 +53,13 @@ class TaskDispatcher(object):
         with their subsequent responses, so this dictionary maps requests
         with their callbacks using correlation IDs.
         """
-        self.unmatched_requests = {}
+        self.pending_requests = {}
 
+    """
     def heartbeat(self):
         print("TaskDispatcher heartbeat")
-
+    """
+        
     def start(self, session):
         """
         Connect to the messaging fabric to enable Task States to integrate with
@@ -69,7 +71,6 @@ class TaskDispatcher(object):
         self.reply_to.set_message_listener(self.handle_rpcmessage_response)
         self.producer = session.producer()
 
-
         # print(self.reply_to.name)
         # print(self.producer.name)
 
@@ -78,18 +79,21 @@ class TaskDispatcher(object):
         This is a message listener receiving messages from the reply_to queue
         for this workflow engine instance.
         TODO cater for the case where requests are sent but responses never
-        arrive, this scenario will cause self.unmatched_requests to "leak" as
+        arrive, this scenario will cause self.pending_requests to "leak" as
         correlation_id keys get added but not removed. This situation should be
         improved as we add code to handle Task state "rainy day" scenarios such
         as Timeouts etc. so park for now, but something to be aware of.
         """
         correlation_id = message.correlation_id
-        requestor = self.unmatched_requests.get(correlation_id)
-        if requestor:
+        request = self.pending_requests.get(correlation_id)
+        if request:
             try:
-                del self.unmatched_requests[correlation_id]
-                if callable(requestor):
-                    requestor(json.loads(message.body.decode("utf8")))
+                del self.pending_requests[correlation_id]
+                callback, timeout_id = request
+                # Cancel the timeout previously set for this request.
+                self.state_engine.event_dispatcher.clear_timeout(timeout_id)
+                if callable(callback):
+                    callback(json.loads(message.body.decode("utf8")))
             except ValueError as e:
                 self.logger.error(
                     "Response {} does not contain valid JSON".format(message.body)
@@ -99,7 +103,7 @@ class TaskDispatcher(object):
 
         message.acknowledge()
 
-    def execute_task(self, resource_arn, parameters, callback):
+    def execute_task(self, resource_arn, parameters, callback, timeout):
         # TODO this import should be handled by the "Connection Factory for the
         # event queue" code in the constructor.
         from asl_workflow_engine.amqp_0_9_1_messaging import Message
@@ -169,12 +173,13 @@ class TaskDispatcher(object):
             resource_arn = os.environ.get(resource_arn[1:], resource_arn)
         # If resource_arn still starts with $ its value isn't in the environment
         if resource_arn.startswith("$"):
-            self.logger.error(
-                "Specified Task Resource {} is not available on the environment".format(
-                    resource_arn
-                )
+            message = "Specified Task Resource {} is not available on the environment".format(
+                resource_arn
             )
-            # TODO Handle error as per https://states-language.net/spec.html#errors
+            self.logger.error(message)
+            result = {"errorType": "InvalidResource", "errorMessage": message}
+            callback(result)
+            return
 
         arn = parse_arn(resource_arn)
         service = arn["service"]  # e.g. rpcmessage, fn, openfaas, lambda
@@ -214,7 +219,24 @@ class TaskDispatcher(object):
 
             # Associate response callback with this request via correlation ID
             correlation_id = str(uuid.uuid4())
-            self.unmatched_requests[correlation_id] = callback
+
+            """
+            Create a timeout in case the rpcmessage invocation fails.
+            The timeout sends an error response to the calling Task state and
+            deletes the pending request.
+            """
+            def on_timeout():
+                # Do lookup in case timeout is called after successful response.
+                request = self.pending_requests.get(correlation_id)
+                if request:
+                    del self.pending_requests[correlation_id]
+                    callback, timeout_id = request
+                    if callable(callback):
+                        callback({
+                            "errorType": "States.Timeout",
+                            "errorMessage": "State or Execution ran for longer than the specified TimeoutSeconds value",
+                        })
+
             message = Message(
                 json.dumps(parameters),
                 content_type="application/json",
@@ -222,9 +244,19 @@ class TaskDispatcher(object):
                 reply_to=self.reply_to.name,
                 correlation_id=correlation_id,
             )
-            # print(message)
+
+            timeout_id = self.state_engine.event_dispatcher.set_timeout(
+                on_timeout, timeout
+            )
+
+            """
+            The service response message is handled by handle_rpcmessage_response()
+            If the response occurs before the timeout expires the timeout
+            should be cancelled, so we store the timeout_id as well as the
+            required callback in the dict keyed by correlation_id.
+            """
+            self.pending_requests[correlation_id] = (callback, timeout_id)
             self.producer.send(message)
-            # N.B. The service response message is handled by handle_rpcmessage_response()
 
         # def asl_service_openfaas():  # TODO
         #    print("asl_service_openfaas")
@@ -311,12 +343,13 @@ class TaskDispatcher(object):
             # Look up stateMachineArn
             match = self.state_engine.asl_cache.get(state_machine_arn)
             if not match:
-                self.logger.error(
-                    "TaskDispatcher asl_service_states: State Machine {} does not exist".format(
-                        state_machine_arn
-                    )
+                message = "TaskDispatcher asl_service_states: State Machine {} does not exist".format(
+                    state_machine_arn
                 )
-                callback({"Error": "StateMachineDoesNotExist"})
+
+                self.logger.error(message)
+                result = {"errorType": "StateMachineDoesNotExist", "errorMessage": message}
+                callback(result)
                 return
 
             # Create the execution context and the event to publish to launch
@@ -336,19 +369,19 @@ class TaskDispatcher(object):
             }
 
             event = {"data": parameters.get("Input", {}), "context": context}
-
             self.state_engine.event_dispatcher.publish(event)
 
             result = {"executionArn": execution_arn, "startDate": time.time()}
             callback(result)
 
         def asl_service_InvalidService():
-            self.logger.error(
-                "TaskDispatcher ARN {} refers to unsupported service: {}".format(
-                    resource_arn, service
-                )
+            message = "TaskDispatcher ARN {} refers to unsupported service: {}".format(
+                resource_arn, service
             )
-            callback({"Error": "InvalidService"})
+
+            self.logger.error(message)
+            result = {"errorType": "InvalidService", "errorMessage": message}
+            callback(result)
 
         """
         Given the required service from the resource_arn dynamically invoke the

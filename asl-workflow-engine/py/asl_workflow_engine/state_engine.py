@@ -212,18 +212,27 @@ class StateEngine(object):
         
         self.update_execution_history(execution_arn, update_type, {"output": data})
 
-    def update_execution_history(self, execution_id, update_type, details):
+    def update_execution_history(self, execution_arn, update_type, details):
         """
-        This will be eventually used to store the execution information in a
-        way that will be accessible to the REST API, but initially just log it.
+        Store the execution information in a way that will be accessible to the
+        REST API.
         """
         # TODO logging the details object is likely to be expensive and in any
         # case the idea is to get execution history via the REST API
         # https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html
         # Probably need to be more selective about what is logged here.
-        self.logger.info("{} {} {}".format(execution_id, update_type, details))
+        self.logger.info("{} {} {}".format(execution_arn, update_type, details))
 
-        history = self.executions[execution_id]["history"]
+        """
+        This should only really happen if the StateEngine has failed and been
+        restarted and we are handling a redelivered message. When we add code
+        IDC to persist execution metadata state we should hopefully be able to
+        avoid the following condition upon StateEngine restart.
+        """
+        if self.executions.get(execution_arn) == None:
+            self.executions[execution_arn] = {"history": []}
+
+        history = self.executions[execution_arn]["history"]
         id = len(history) + 1
         if "StateEntered" in update_type:
             details_type = "stateEnteredEventDetails"
@@ -231,6 +240,7 @@ class StateEngine(object):
             details_type = "stateExitedEventDetails"
         else:
             details_type = update_type[0].lower() + update_type[1:] + "EventDetails"
+
         history.append(
             {
                 "timestamp": time.time(),
@@ -241,9 +251,10 @@ class StateEngine(object):
             }
         )
 
+    """
     def heartbeat(self):
-        print("StateEngine heartbeat")
         self.task_dispatcher.heartbeat()
+    """
 
     def notify(self, event, id):
         """
@@ -498,7 +509,7 @@ class StateEngine(object):
             """
             result = state.get(
                 "Result", parameters
-            ) # Default is effective input as per spec.
+            ) # Default is the "effective input" as per ASL spec.
 
             # Pass state applies ResultPath to "raw input"
             output = apply_resultpath(data, result, state.get("ResultPath", "$"))
@@ -538,16 +549,32 @@ class StateEngine(object):
             service integrated to the Task *actually* returns its result.
             """
             def on_response(result):
-                # Task state applies ResultPath to "raw input"
-                output = apply_resultpath(data, result, state.get("ResultPath", "$"))
-                event["data"] = apply_jsonpath(output, state.get("OutputPath", "$"))
+                error_type = result.get("errorType")
+                if error_type:
+                    print(result)
+                    retry = state.get("Retry")
+                    if retry and isinstance(retry, list):
+                        for retrier in retry:
+                            print(retrier)
 
-                if state.get("End"):
-                    self.end_state_machine(state_type, event)
-                else:
-                    self.change_state(state_type, state.get("Next"), event)
+                    catch = state.get("Catch")
+                    if catch and isinstance(catch, list):
+                        for catcher in catch:
+                            print(catcher)
 
-                self.event_dispatcher.acknowledge(id)
+                    self.event_dispatcher.acknowledge(id)
+
+                else:  # No error
+                    # Task state applies ResultPath to "raw input"
+                    output = apply_resultpath(data, result, state.get("ResultPath", "$"))
+                    event["data"] = apply_jsonpath(output, state.get("OutputPath", "$"))
+
+                    if state.get("End"):
+                        self.end_state_machine(state_type, event)
+                    else:
+                        self.change_state(state_type, state.get("Next"), event)
+
+                    self.event_dispatcher.acknowledge(id)
 
             input = apply_jsonpath(data, state.get("InputPath", "$"))
 
@@ -560,7 +587,7 @@ class StateEngine(object):
             States language does not constrain the URI scheme nor any other part
             of the URI.
             """
-            resource = state.get("Resource")
+            resource_arn = state.get("Resource")
 
             """
             https://states-language.net/spec.html#parameters
@@ -571,7 +598,36 @@ class StateEngine(object):
             parameters = evaluate_parameters(input, context, state.get("Parameters"))
             # print(parameters)
 
-            self.task_dispatcher.execute_task(resource, parameters, on_response)
+            """
+            Get the execution and state entry timestamps and the execution and
+            state timeout values (if present) and use those to compute the
+            Task expiry time that will be checked against the current time each
+            heartbeat and will eventually result in the Task returning a
+            States.Timeout Error if it expires before it completes. The default
+            State Machine execution timeout is 1 year 60*60*24*365 = 31536000
+            https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
+            The default Task state timeout is more confusing as this document
+            https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-task-state.html says: "If not provided, the default value is 99999999" whereas
+            https://states-language.net/spec.html#task-state says "If not
+            provided, the default value of “TimeoutSeconds” is 60."
+            """
+            current_timestamp = time.time()
+
+            start_time = context["Execution"].get("StartTime")
+            execution_timestamp = parse_rfc3339_datetime(start_time).timestamp()
+            t1 = (execution_timestamp + ASL.get("TimeoutSeconds", 31536000) - current_timestamp) * 1000
+
+            entered_time = context["State"].get("EnteredTime")
+            state_timestamp = parse_rfc3339_datetime(entered_time).timestamp()
+            t2 = (state_timestamp + state.get("TimeoutSeconds", 99999999) - current_timestamp) * 1000
+            #t2 = (state_timestamp + state.get("TimeoutSeconds", 60) - current_timestamp) * 1000
+            #t2 = (state_timestamp + state.get("TimeoutSeconds", 10) - current_timestamp) * 1000
+
+            timeout = t1 if t1 < t2 else t2
+
+            self.task_dispatcher.execute_task(
+                resource_arn, parameters, on_response, timeout
+            )
 
         def asl_state_Choice():
             """
@@ -835,7 +891,6 @@ class StateEngine(object):
             """
             def on_timeout():
                 event["data"] = apply_jsonpath(input, state.get("OutputPath", "$"))
-
                 if state.get("End"):
                     self.end_state_machine(state_type, event)
                 else:
@@ -872,15 +927,16 @@ class StateEngine(object):
             such a scenario, but it kind of seems logical for the wait time of
             a Wait state to be relative to when the state was actually entered.
             """
-            entry_time = context["State"].get("EnteredTime")
-            entry_timestamp = parse_rfc3339_datetime(entry_time).timestamp()
+            entered_time = context["State"].get("EnteredTime")
+            state_timestamp = parse_rfc3339_datetime(entered_time).timestamp()
+
             if seconds:
                 current_timestamp = time.time()
-                timeout = (entry_timestamp + seconds - current_timestamp) * 1000
+                timeout = (state_timestamp + seconds - current_timestamp) * 1000
             elif seconds_path:
                 seconds = apply_jsonpath(input, seconds_path)
                 current_timestamp = time.time()
-                timeout = (entry_timestamp + seconds - current_timestamp) * 1000
+                timeout = (state_timestamp + seconds - current_timestamp) * 1000
             elif timestamp:
                 try:
                     target_timestamp = parse_rfc3339_datetime(timestamp).timestamp()
@@ -971,6 +1027,19 @@ class StateEngine(object):
             # TODO
 
             print("PARALLEL - Not Yet Implemented")
+            print(event)
+
+            self.event_dispatcher.acknowledge(id)
+
+        def asl_state_Map():
+            """
+            https://states-language.net/spec.html#map-state
+            https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-map-state.html
+
+            """
+            # TODO
+
+            print("MAP - Not Yet Implemented")
             print(event)
 
             self.event_dispatcher.acknowledge(id)

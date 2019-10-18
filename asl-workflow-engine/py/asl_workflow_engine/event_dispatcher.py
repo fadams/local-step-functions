@@ -81,10 +81,11 @@ class EventDispatcher(object):
             self.logger.error(e)
             exit()
 
+    """
     def heartbeat(self):
-        print("EventDispatcher heartbeat")
         self.state_engine.heartbeat()
         self.set_timeout(self.heartbeat, 1000)
+    """
 
     def start(self):
         # Connect to event queue and start the main event loop.
@@ -109,8 +110,9 @@ class EventDispatcher(object):
             the event queue. This (hopefully temporary) approach is Pika specific.
             """
             self.set_timeout = connection.set_timeout
+            self.clear_timeout = connection.clear_timeout
 
-            # self.set_timeout(self.heartbeat, 1000)
+            #self.set_timeout(self.heartbeat, 1000)
 
             """
             Share messaging session with state_engine.task_dispatcher. This
