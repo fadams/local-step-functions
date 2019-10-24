@@ -181,8 +181,13 @@ class StateEngine(object):
             state_type + "StateExited",
             {"output": data, "name": state["Name"]},
         )
-        # Update the state
+        # Update the state with the next state's name and erase any retry info.
         state["Name"] = next_state
+        if "RetryCount" in state:
+            del state["RetryCount"]
+        if "RetryTimeout" in state:
+            del state["RetryTimeout"]
+
         # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
         state["EnteredTime"] = datetime.now(timezone.utc).astimezone().isoformat()
         self.event_dispatcher.publish(event)
@@ -522,22 +527,13 @@ class StateEngine(object):
 
             self.event_dispatcher.acknowledge(id)
 
-        def asl_state_Task():
+        def asl_state_Task_delegate():
             """
+            This represents the real Task state, it is delegated to by
+            asl_state_Task when any retry delay interval has expired.
+
             https://states-language.net/spec.html#task-state
             https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-task-state.html
-
-            TODO Timeouts & Hearbeats:
-            Tasks can optionally specify timeouts. Timeouts (the “TimeoutSeconds”
-            and “HeartbeatSeconds” fields) are specified in seconds and MUST be
-            positive integers. If provided, the “HeartbeatSeconds” interval MUST
-            be smaller than the “TimeoutSeconds” value.
-
-            If not provided, the default value of “TimeoutSeconds” is 60.
-
-            If the state runs longer than the specified timeout, or if more time
-            than the specified heartbeat elapses between heartbeats from the task,
-            then the interpreter fails the state with a States.Timeout Error Name.
             """
             # print("TASK")
             # print(state)
@@ -552,13 +548,77 @@ class StateEngine(object):
                 error_type = result.get("errorType")
                 if error_type:
                     print(result)
+                    """
+                    https://states-language.net/spec.html#retrying-after-error
+                    Task States, Parallel States, and Map States MAY have a
+                    field named “Retry”, whose value MUST be an array of
+                    objects, called Retriers.
+                    """
                     retry = state.get("Retry")
+                    retry_matched = False
                     if retry and isinstance(retry, list):
                         for retrier in retry:
-                            print(retrier)
+                            """
+                            Each Retrier MUST contain a field named “ErrorEquals”
+                            whose value MUST be a non-empty array of Strings,
+                            which match Error Names.
 
+                            When a state reports an error, the interpreter scans
+                            through the Retriers and, when the Error Name appears
+                            in the value of a Retrier’s “ErrorEquals” field,
+                            implements the retry policy described in that Retrier.
+                            """
+                            error_equals = retrier.get("ErrorEquals")
+                            if (
+                                error_type in error_equals
+                                or (len(error_equals) == 1
+                                    and error_equals[0] == "States.ALL")
+                            ):
+                                interval_seconds = retrier.get("IntervalSeconds", 1)
+                                max_attempts = retrier.get("MaxAttempts", 3)
+                                backoff_rate = retrier.get("BackoffRate", 2.0)
+
+                                retries = context["State"].get("RetryCount", 0)
+                                if retries < max_attempts:
+                                    retry_matched = True
+                                    timeout = interval_seconds * (backoff_rate ** retries)
+                                    retries += 1
+                                    context["State"]["RetryCount"] = retries
+                                    context["State"]["RetryTimeout"] = timeout * 1000
+                                    context["State"]["EnteredTime"] = (
+                                        datetime.fromtimestamp(
+                                            time.time() + timeout, timezone.utc
+                                        ).astimezone().isoformat()
+                                    )
+                                    """
+                                    Republish the Task state event with the new
+                                    RetryCount and RetryTimeout set. We also
+                                    adjust EnteredTime above. The ASL spec is
+                                    unclear on this, but if the error is due to
+                                    States.Timeout and we retry it would seem
+                                    logical to reset otherwise when we retry
+                                    the Task will timeout immediately, similarly
+                                    we add the RetryTimeout to the EnteredTime
+                                    as we don't actually start retrying any
+                                    Task resource until after RetryTimeout has
+                                    expired. TODO - check the behaviour of AWS
+                                    Step Functions to see what they actually do.
+                                    """
+                                    self.event_dispatcher.publish(event)
+
+                                break
+
+                    """
+                    https://states-language.net/spec.html#fallback-states
+                    When a state reports an error and either there is no Retrier,
+                    or retries have failed to resolve the error, the interpreter
+                    scans through the Catchers in array order, and when the Error
+                    Name appears in the value of a Catcher’s “ErrorEquals” field,
+                    transitions the machine to the state named in the value of
+                    the “Next” field.
+                    """
                     catch = state.get("Catch")
-                    if catch and isinstance(catch, list):
+                    if not retry_matched and catch and isinstance(catch, list):
                         for catcher in catch:
                             print(catcher)
 
@@ -575,6 +635,7 @@ class StateEngine(object):
                         self.change_state(state_type, state.get("Next"), event)
 
                     self.event_dispatcher.acknowledge(id)
+
 
             input = apply_jsonpath(data, state.get("InputPath", "$"))
 
@@ -599,6 +660,15 @@ class StateEngine(object):
             # print(parameters)
 
             """
+            Tasks can optionally specify timeouts. Timeouts (the “TimeoutSeconds”
+            and “HeartbeatSeconds” fields) are specified in seconds and MUST be
+            positive integers. If provided, the “HeartbeatSeconds” interval MUST
+            be smaller than the “TimeoutSeconds” value.
+
+            If the state runs longer than the specified timeout, or if more time
+            than the specified heartbeat elapses between heartbeats from the task,
+            then the interpreter fails the state with a States.Timeout Error Name.
+
             Get the execution and state entry timestamps and the execution and
             state timeout values (if present) and use those to compute the
             Task expiry time that will be checked against the current time each
@@ -628,6 +698,14 @@ class StateEngine(object):
             self.task_dispatcher.execute_task(
                 resource_arn, parameters, on_response, timeout
             )
+
+        def asl_state_Task():
+            """
+            This function delegates to the real Task state implementation
+            asl_state_Task_delegate when any retry timeout has expired.
+            """
+            retry_timeout = context["State"].get("RetryTimeout", 0)
+            self.event_dispatcher.set_timeout(asl_state_Task_delegate, retry_timeout)
 
         def asl_state_Choice():
             """
@@ -1049,16 +1127,26 @@ class StateEngine(object):
         """
         # ----------------------------------------------------------------------
 
+
+        """
+        Update the execution history with StateEntered information. The test for
+        RetryCount is because when we trigger a retry we do so by publishing
+        an event to the message queue that triggers a transition back to the
+        state being retried, but as this represents a retry and not an actual
+        entry to the state we want to suppress the history update.
+        """
+        if not context["State"].get("RetryCount"):
+            self.update_execution_history(
+                context["Execution"]["Id"],
+                state_type + "StateEntered",
+                {"input": data, "name": current_state},
+            )
+
         """
         Use the ASL state type of the current state to dynamically invoke the
         appropriate ASL state handler given state type. The (Python) lambda
         provides a default handler in case of malformed ASL. 
         """
-        self.update_execution_history(
-            context["Execution"]["Id"],
-            state_type + "StateEntered",
-            {"input": data, "name": current_state},
-        )
         locals().get(
             "asl_state_" + state_type,
             lambda: self.logger.error(

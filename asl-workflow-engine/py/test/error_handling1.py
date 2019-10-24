@@ -48,23 +48,8 @@ ASL = """{
             "Choices": [
                 {
                     "Variable": "$.lambda",
-                    "StringEquals": "InternalErrorNotHandled",
-                    "Next": "InternalErrorNotHandledLambda"
-                },
-                {
-                    "Variable": "$.lambda",
-                    "StringEquals": "InternalErrorHandled",
-                    "Next": "InternalErrorHandledLambda"
-                },
-                {
-                    "Variable": "$.lambda",
                     "StringEquals": "Success",
                     "Next": "SuccessLambda"
-                },
-                {
-                    "Variable": "$.lambda",
-                    "StringEquals": "Timeout",
-                    "Next": "TimeoutLambda"
                 }
             ],
             "Default": "FailState"
@@ -76,8 +61,8 @@ ASL = """{
         },
         "SuccessLambdaCatchState": {
             "Type": "Fail",
-            "Error": "NoLambdaError",
-            "Cause": "No Matches!"
+            "Error": "States.Timeout",
+            "Cause": "Lambda timed out and retries failed!"
         },
         "SuccessLambda": {
             "Type": "Task",
@@ -90,6 +75,9 @@ ASL = """{
                     "IntervalSeconds": 3,
                     "MaxAttempts": 2,
                     "BackoffRate": 1.5
+                },
+                {
+                    "ErrorEquals": [ "States.ALL" ]
                 }
             ],
             "Catch": [
@@ -98,21 +86,6 @@ ASL = """{
                     "Next": "SuccessLambdaCatchState"
                 }
             ]
-        },
-        "InternalErrorNotHandledLambda": {
-            "Type": "Task",
-            "Resource": "arn:aws:rpcmessage:local::function:InternalErrorNotHandledLambda",
-            "Next": "EndState"
-        },
-        "InternalErrorHandledLambda": {
-            "Type": "Task",
-            "Resource": "arn:aws:rpcmessage:local::function:InternalErrorHandledLambda",
-            "Next": "EndState"
-        },
-        "TimeoutLambda": {
-            "Type": "Task",
-            "Resource": "arn:aws:rpcmessage:local::function:TimeoutLambda",
-            "Next": "EndState"
         },
         "EndState": {
             "Type": "Pass",
@@ -126,15 +99,7 @@ ASL = """{
     }
 }"""
 
-items = ['{"lambda":"Success"}',
-         '{"lambda":"InternalErrorNotHandled"}',
-         '{"lambda":"InternalErrorHandled"}',
-         '{"lambda":"Timeout"}']
-
 items = ['{"lambda":"Success"}']
-#items = ['{"lambda":"InternalErrorNotHandled"}']
-#items = ['{"lambda":"InternalErrorHandled"}']
-#items = ['{"lambda":"Timeout"}']
 
 if __name__ == '__main__':
     # Initialise logger
