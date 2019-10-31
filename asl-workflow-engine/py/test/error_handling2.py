@@ -17,18 +17,15 @@
 # under the License.
 #
 # Run with:
-# PYTHONPATH=.. python3 error_handling1.py
+# PYTHONPATH=.. python3 error_handling2.py
 #
 """
 This test uses the AWS python SDK boto3 to access our local ASL Workflow Engine
 https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/stepfunctions.html
 https://docs.aws.amazon.com/code-samples/latest/catalog/code-catalog-python-example_code-stepfunctions.html
 
-This tests ASL retriers and catchers responding to a timeout caused by rpcmessage
-workers not being available to respond to the Task request. The second retrier
-should never be reached in thisw example because the only error is a timeout
-and when the number of retries for States.Timeout is exceeded it jumps straight
-to the catcher which is a match all and causes a transition to SuccessLambdaCatchState
+This tests what happens if a TimeoutSeconds is specified but no retriers or
+catchers are provided. This should result in the execution being terminated.
 """
 
 import sys
@@ -63,34 +60,11 @@ ASL = """{
             "Error": "NoLambdaError",
             "Cause": "No Matches!"
         },
-        "SuccessLambdaCatchState": {
-            "Type": "Fail",
-            "Error": "States.Timeout",
-            "Cause": "Lambda timed out and retries failed!"
-        },
         "SuccessLambda": {
             "Type": "Task",
             "Resource": "arn:aws:rpcmessage:local::function:SuccessLambda",
             "Next": "WaitState",
-            "TimeoutSeconds": 10,
-            "Retry" : [
-                {
-                    "ErrorEquals": [ "States.Timeout" ],
-                    "IntervalSeconds": 3,
-                    "MaxAttempts": 2,
-                    "BackoffRate": 1.5
-                },
-                {
-                    "ErrorEquals": [ "States.ALL" ]
-                }
-            ],
-            "Catch": [
-                {
-                    "ErrorEquals": [ "States.ALL" ],
-                    "ResultPath": "$.error-info",
-                    "Next": "SuccessLambdaCatchState"
-                }
-            ]
+            "TimeoutSeconds": 10
         },
         "EndState": {
             "Type": "Pass",
@@ -108,19 +82,19 @@ items = ['{"lambda":"Success"}']
 
 if __name__ == '__main__':
     # Initialise logger
-    logger = init_logging(log_name='error_handling1')
+    logger = init_logging(log_name='error_handling2')
 
     # Initialise the boto3 client setting the endpoint_url to our local
     # ASL Workflow Engine
     # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html#boto3.session.Session.client
     sfn = boto3.client("stepfunctions", endpoint_url="http://localhost:4584")
-    state_machine_arn = "arn:aws:states:local:0123456789:stateMachine:error_handling_state_machine"
+    state_machine_arn = "arn:aws:states:local:0123456789:stateMachine:error_handling_state_machine2"
 
     # Create state machine using a dummy roleArn. If it already exists an
     # exception will be thrown, we ignore that but raise other exceptions.
     try:
         response = sfn.create_state_machine(
-            name="error_handling_state_machine", definition=ASL,
+            name="error_handling_state_machine2", definition=ASL,
             roleArn="arn:aws:iam::0123456789:role/service-role/MyRole"
         )
     except ClientError as e:

@@ -158,6 +158,7 @@ class RestAPI(object):
             try:
                 params = json.loads(request.data.decode("utf8"))
             except ValueError as e:
+                params = ""
                 self.logger.error(
                     "Message body {} does not contain valid JSON".format(request.data)
                 )
@@ -216,6 +217,7 @@ class RestAPI(object):
                 try:
                     definition = json.loads(params.get("definition", ""))
                 except ValueError as e:
+                    definition = None
                     self.logger.error(
                         "RestAPI CreateStateMachine: State Machine definition {} does not contain valid JSON".format(
                             params.get("definition")
@@ -412,6 +414,7 @@ class RestAPI(object):
                     try:
                         definition = json.loads(params.get("definition", ""))
                     except ValueError as e:
+                        definition = None
                         self.logger.error(
                             "RestAPI UpdateStateMachine: State Machine definition {} does not contain valid JSON".format(
                                 params.get("definition")
@@ -488,7 +491,7 @@ class RestAPI(object):
 
                 if not valid_state_machine_arn(state_machine_arn):
                     self.logger.warning(
-                        "RestAPI DescribeStateMachine: {} is an invalid State Machine ARN".format(
+                        "RestAPI StartExecution: {} is an invalid State Machine ARN".format(
                             state_machine_arn
                         )
                     )

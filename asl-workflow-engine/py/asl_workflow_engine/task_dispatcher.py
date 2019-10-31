@@ -50,8 +50,8 @@ class TaskDispatcher(object):
         implemented over a messaging fabric with queues.
 
         In order to deal with this we need to be able to associate requests
-        with their subsequent responses, so this dictionary maps requests
-        with their callbacks using correlation IDs.
+        with their subsequent responses, so this pending_requests dictionary
+        maps requests with their callbacks using correlation IDs.
         """
         self.pending_requests = {}
 
@@ -105,7 +105,8 @@ class TaskDispatcher(object):
 
     def execute_task(self, resource_arn, parameters, callback, timeout):
         # TODO this import should be handled by the "Connection Factory for the
-        # event queue" code in the constructor.
+        # event queue" code in the constructor, but not sure yet how to do
+        # this cleanly.
         from asl_workflow_engine.amqp_0_9_1_messaging import Message
         """
         Use the value of the “Resource” field to determine the type of the task
@@ -176,7 +177,6 @@ class TaskDispatcher(object):
             message = "Specified Task Resource {} is not available on the environment".format(
                 resource_arn
             )
-            self.logger.error(message)
             result = {"errorType": "InvalidResource", "errorMessage": message}
             callback(result)
             return
@@ -328,6 +328,11 @@ class TaskDispatcher(object):
             execution_name = parameters.get("Name", str(uuid.uuid4()))
 
             state_machine_arn = parameters.get("StateMachineArn")
+            if not state_machine_arn:
+                message = "TaskDispatcher asl_service_states_startExecution: StateMachineArn must be specified"
+                result = {"errorType": "MissingRequiredParameter", "errorMessage": message}
+                callback(result)
+                return
 
             arn = parse_arn(state_machine_arn)
             state_machine_name = arn["resource"]
@@ -343,11 +348,9 @@ class TaskDispatcher(object):
             # Look up stateMachineArn
             match = self.state_engine.asl_cache.get(state_machine_arn)
             if not match:
-                message = "TaskDispatcher asl_service_states: State Machine {} does not exist".format(
+                message = "TaskDispatcher asl_service_states_startExecution: State Machine {} does not exist".format(
                     state_machine_arn
                 )
-
-                self.logger.error(message)
                 result = {"errorType": "StateMachineDoesNotExist", "errorMessage": message}
                 callback(result)
                 return
@@ -378,8 +381,6 @@ class TaskDispatcher(object):
             message = "TaskDispatcher ARN {} refers to unsupported service: {}".format(
                 resource_arn, service
             )
-
-            self.logger.error(message)
             result = {"errorType": "InvalidService", "errorMessage": message}
             callback(result)
 

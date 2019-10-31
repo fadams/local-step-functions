@@ -476,6 +476,164 @@ class StateEngine(object):
         """
 
         # ----------------------------------------------------------------------
+        def handle_error(error_type, error_message):
+            """
+            https://states-language.net/spec.html#retrying-after-error Task
+            States, Parallel States, and Map States MAY have a field named
+            “Retry”, whose value MUST be an array of objects, called Retriers.
+            """
+            retry_matched = False
+            catch_matched = False
+
+            retry = state.get("Retry")
+            if retry and isinstance(retry, list):
+                for retrier in retry:
+                    """
+                    Each Retrier MUST contain a field named “ErrorEquals”
+                    whose value MUST be a non-empty array of Strings,
+                    which match Error Names.
+
+                    When a state reports an error, the interpreter scans
+                    through the Retriers and, when the Error Name appears
+                    in the value of a Retrier’s “ErrorEquals” field,
+                    implements the retry policy described in that Retrier.
+
+                    How to correctly handle States.TaskFailed is a little
+                    unclear, but the AWS Error Handling document here:
+                    https://docs.aws.amazon.com/step-functions/latest/dg/concepts-error-handling.html
+                    says "States.TaskFailed, which matches any error that
+                    a Lambda function outputs." which suggests that if
+                    error_type has *any* value and States.TaskFailed is
+                    present in the ErrorEquals array then we should match.
+                    """
+                    error_equals = retrier.get("ErrorEquals")
+                    if (
+                        error_type in error_equals
+                        or "States.TaskFailed" in error_equals
+                        or (len(error_equals) == 1
+                            and error_equals[0] == "States.ALL")
+                    ):
+                        # Default values taken from ASL specification.
+                        interval_seconds = retrier.get("IntervalSeconds", 1)
+                        max_attempts = retrier.get("MaxAttempts", 3)
+                        backoff_rate = retrier.get("BackoffRate", 2.0)
+                        if backoff_rate < 1.0:
+                            backoff_rate = 1.0
+
+                        retries = context["State"].get("RetryCount", 0)
+                        if retries < max_attempts:
+                            retry_matched = True
+                            timeout = interval_seconds * (backoff_rate ** retries)
+                            retries += 1
+                            context["State"]["RetryCount"] = retries
+                            context["State"]["RetryTimeout"] = timeout * 1000
+                            context["State"]["EnteredTime"] = (
+                                datetime.fromtimestamp(
+                                    time.time() + timeout, timezone.utc
+                                ).astimezone().isoformat()
+                            )
+                            """
+                            Republish the Task state event with the new
+                            RetryCount and RetryTimeout set. We also adjust
+                            EnteredTime above. The ASL spec is unclear on
+                            this, but if the error is due to States.Timeout
+                            and we retry it would seem logical to reset,
+                            otherwise when we retry the Task will timeout
+                            immediately, similarly we add the RetryTimeout
+                            to the EnteredTime as we don't actually start
+                            retrying any Task resource until after
+                            RetryTimeout has expired.
+                            TODO - check the behaviour of AWS Step Functions
+                            to see what they actually do in this scenario.
+                            """
+                            self.event_dispatcher.publish(event)
+
+                        break
+
+            """
+            https://states-language.net/spec.html#fallback-states
+            When a state reports an error and either there is no Retrier, or
+            retries have failed to resolve the error, the interpreter scans
+            through the Catchers in array order, and when the Error Name appears
+            in the value of a Catcher’s “ErrorEquals” field, transitions the
+            machine to the state named in the value of the “Next” field.
+
+            When a state has both “Retry” and “Catch” fields, the interpreter
+            uses any appropriate Retriers first and only applies the a matching
+            Catcher transition if the retry policy fails to resolve the error.
+            """
+            catch = state.get("Catch")
+            if not retry_matched and catch and isinstance(catch, list):
+                for catcher in catch:
+                    """
+                    Each Catcher MUST contain a field named “ErrorEquals”,
+                    specified exactly as with the Retrier “ErrorEquals” field,
+                    and a field named “Next” whose value MUST be a string
+                    exactly matching a State Name.
+
+                    When a state reports an error and either there is no
+                    Retrier, or retries have failed to resolve the error,
+                    the interpreter scans through the Catchers in array order,
+                    and when the Error Name appears in the value of a Catcher’s 
+                    “ErrorEquals” field, transitions the machine to the state
+                    named in the value of the “Next” field.
+                    """
+                    error_equals = catcher.get("ErrorEquals")
+                    if (
+                        error_type in error_equals
+                        or "States.TaskFailed" in error_equals
+                        or (len(error_equals) == 1
+                            and error_equals[0] == "States.ALL")
+                    ):
+                        catch_matched = True
+                        """
+                        When a state reports an error and it matches a
+                        Catcher, causing a transfer to another state, the
+                        state’s Result (and thus the input to the state
+                        identified in the Catcher’s “Next” field) is a JSON
+                        object, called the Error Output. The Error Output
+                        MUST have a string-valued field named “Error”,
+                        containing the Error Name. It SHOULD have a string
+                        valued field named “Cause”, containing human-readable
+                        text about the error.
+                        """
+                        result = {"Error": error_type}
+                        if error_message:
+                            result["Cause"] = error_message
+
+                        """
+                        A Catcher MAY have an “ResultPath” field, which works
+                        exactly like a state’s top-level “ResultPath”, and
+                        may be used to inject the Error Output into the
+                        state’s original input to create the input for the
+                        Catcher’s “Next” state. The default value, if the
+                        “ResultPath” field is not provided, is “$”, meaning
+                        that the output consists entirely of the Error Output. 
+                        """
+                        # Catcher applies ResultPath to "raw input"
+                        output = apply_resultpath(
+                            data, result, catcher.get("ResultPath", "$")
+                        )
+                        event["data"] = apply_jsonpath(output, "$")
+
+                        self.change_state(state_type, catcher.get("Next"), event)
+                        break
+
+            """
+            When a state reports an error, the default course of action for the
+            interpreter is to fail the whole state machine, so if no retriers or
+            catchers match then fail the execution.
+            """
+            if not retry_matched and not catch_matched:
+                result = {"Error": error_type}
+                if error_message:
+                    result["Cause"] = error_message
+
+                event["data"] = result
+                self.end_state_machine(state_type, event)
+
+        # ----------------------------------------------------------------------
+
         """
         Define nested functions as handlers for each supported ASL state type.
         Using nested functions so we can use the context extracted in notify.
@@ -529,101 +687,33 @@ class StateEngine(object):
 
         def asl_state_Task_delegate():
             """
-            This represents the real Task state, it is delegated to by
-            asl_state_Task when any retry delay interval has expired.
+            This function represents the real Task state, it is delegated to by
+            the asl_state_Task function when any retry delay interval has expired.
 
             https://states-language.net/spec.html#task-state
             https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-task-state.html
             """
-            # print("TASK")
-            # print(state)
-            # print(event)
 
             """
-            It's important for this function to be nested as we want the event,
-            state and id to be wrapped in its closure, to be used when the
-            service integrated to the Task *actually* returns its result.
+            It's important for the on_response function to be nested as we want
+            the event, state and id to be wrapped in its closure, to be used when
+            the service integrated to the Task *actually* returns its result.
             """
             def on_response(result):
+                """
+                The use of the "errorType" field to report an error invoking a
+                Task isn't actually mentioned in the ASL specification, but this
+                is the pattern adopted for error messages returned by AWS Lambda
+                so is almost certainly a fair starting point.
+                https://docs.aws.amazon.com/lambda/latest/dg/python-exceptions.html
+                https://docs.aws.amazon.com/lambda/latest/dg/nodejs-prog-mode-exceptions.html
+                https://docs.aws.amazon.com/lambda/latest/dg/java-exceptions.html
+                """
                 error_type = result.get("errorType")
                 if error_type:
-                    print(result)
-                    """
-                    https://states-language.net/spec.html#retrying-after-error
-                    Task States, Parallel States, and Map States MAY have a
-                    field named “Retry”, whose value MUST be an array of
-                    objects, called Retriers.
-                    """
-                    retry = state.get("Retry")
-                    retry_matched = False
-                    if retry and isinstance(retry, list):
-                        for retrier in retry:
-                            """
-                            Each Retrier MUST contain a field named “ErrorEquals”
-                            whose value MUST be a non-empty array of Strings,
-                            which match Error Names.
-
-                            When a state reports an error, the interpreter scans
-                            through the Retriers and, when the Error Name appears
-                            in the value of a Retrier’s “ErrorEquals” field,
-                            implements the retry policy described in that Retrier.
-                            """
-                            error_equals = retrier.get("ErrorEquals")
-                            if (
-                                error_type in error_equals
-                                or (len(error_equals) == 1
-                                    and error_equals[0] == "States.ALL")
-                            ):
-                                interval_seconds = retrier.get("IntervalSeconds", 1)
-                                max_attempts = retrier.get("MaxAttempts", 3)
-                                backoff_rate = retrier.get("BackoffRate", 2.0)
-
-                                retries = context["State"].get("RetryCount", 0)
-                                if retries < max_attempts:
-                                    retry_matched = True
-                                    timeout = interval_seconds * (backoff_rate ** retries)
-                                    retries += 1
-                                    context["State"]["RetryCount"] = retries
-                                    context["State"]["RetryTimeout"] = timeout * 1000
-                                    context["State"]["EnteredTime"] = (
-                                        datetime.fromtimestamp(
-                                            time.time() + timeout, timezone.utc
-                                        ).astimezone().isoformat()
-                                    )
-                                    """
-                                    Republish the Task state event with the new
-                                    RetryCount and RetryTimeout set. We also
-                                    adjust EnteredTime above. The ASL spec is
-                                    unclear on this, but if the error is due to
-                                    States.Timeout and we retry it would seem
-                                    logical to reset otherwise when we retry
-                                    the Task will timeout immediately, similarly
-                                    we add the RetryTimeout to the EnteredTime
-                                    as we don't actually start retrying any
-                                    Task resource until after RetryTimeout has
-                                    expired. TODO - check the behaviour of AWS
-                                    Step Functions to see what they actually do.
-                                    """
-                                    self.event_dispatcher.publish(event)
-
-                                break
-
-                    """
-                    https://states-language.net/spec.html#fallback-states
-                    When a state reports an error and either there is no Retrier,
-                    or retries have failed to resolve the error, the interpreter
-                    scans through the Catchers in array order, and when the Error
-                    Name appears in the value of a Catcher’s “ErrorEquals” field,
-                    transitions the machine to the state named in the value of
-                    the “Next” field.
-                    """
-                    catch = state.get("Catch")
-                    if not retry_matched and catch and isinstance(catch, list):
-                        for catcher in catch:
-                            print(catcher)
-
-                    self.event_dispatcher.acknowledge(id)
-
+                    error_message = result.get("errorMessage", "")
+                    self.logger.warning("{} {}".format(error_type, error_message))
+                    handle_error(error_type, error_message)
                 else:  # No error
                     # Task state applies ResultPath to "raw input"
                     output = apply_resultpath(data, result, state.get("ResultPath", "$"))
@@ -634,7 +724,7 @@ class StateEngine(object):
                     else:
                         self.change_state(state_type, state.get("Next"), event)
 
-                    self.event_dispatcher.acknowledge(id)
+                self.event_dispatcher.acknowledge(id)
 
 
             input = apply_jsonpath(data, state.get("InputPath", "$"))
@@ -940,11 +1030,9 @@ class StateEngine(object):
             if next_state:
                 self.change_state(state_type, next_state, event)
             else:
-                self.logger.error(
-                    "States.NoChoiceMatched: {}".format(json.dumps(context))
-                )
-                # TODO actually emit/publish an error to the caller when the
-                # mechanism for returning data/errors has been determined.
+                message = "Choice state {} failed to find a match for the condition field extracted from its input".format(current_state)
+                self.logger.warning("States.NoChoiceMatched {}".format(message))
+                handle_error("States.NoChoiceMatched", message)
 
             self.event_dispatcher.acknowledge(id)
 
