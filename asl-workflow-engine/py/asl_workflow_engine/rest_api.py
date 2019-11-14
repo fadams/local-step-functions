@@ -16,6 +16,18 @@
 # specific language governing permissions and limitations
 # under the License.
 #
+
+"""
+-------------------------------- READ ME FIRST ---------------------------------
+Note that in JSON and dict manipulation herein there may be a mix of camel case
+and fields starting with capitals. This is unfortunate, but somewhat deliberate
+as we are trying to follow the patterns used in real AWS Step Functions, which
+seems to use camel case in the REST API calls but in the Context object and
+indeed in the ASL specification the fields start with capitals. Be aware of this
+if suddenly overcome by the urge to "make everything consistent"
+--------------------------------------------------------------------------------
+"""
+
 """
 This implements the REST API for the ASL Workflow Engine. The intention is to
 implement the AWS Step Functions API as described in the AWS documentation:

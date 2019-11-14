@@ -17,6 +17,17 @@
 # under the License.
 #
 
+"""
+-------------------------------- READ ME FIRST ---------------------------------
+Note that in JSON and dict manipulation herein there may be a mix of camel case
+and fields starting with capitals. This is unfortunate, but somewhat deliberate
+as we are trying to follow the patterns used in real AWS Step Functions, which
+seems to use camel case in the REST API calls but in the Context object and
+indeed in the ASL specification the fields start with capitals. Be aware of this
+if suddenly overcome by the urge to "make everything consistent"
+--------------------------------------------------------------------------------
+"""
+
 import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
@@ -207,7 +218,7 @@ class StateEngine(object):
         )
         update_type = "ExecutionSucceeded"
         self.executions[execution_arn]["stopDate"] = time.time()
-        if data.get("Error"):
+        if isinstance(data, dict) and data.get("Error"):
             update_type = "ExecutionFailed"
             self.executions[execution_arn]["status"] = "FAILED"
             self.executions[execution_arn]["output"] = None
@@ -422,7 +433,14 @@ class StateEngine(object):
                 execution["Input"] = data
 
             if not execution.get("RoleArn"):
-                execution["RoleArn"] = asl_item["roleArn"]
+                """
+                The default dummy ARN case shouldn't generally occur unless
+                the asl_cache "database" has been manually edited because when
+                it is updated via the API the roleArn field gets populated.
+                """
+                execution["RoleArn"] = asl_item.get(
+                    "roleArn", "arn:aws:iam:::role/dummy-role/dummy"
+                )
 
             # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
             start_time = datetime.now(timezone.utc).astimezone().isoformat()
@@ -674,14 +692,21 @@ class StateEngine(object):
                 "Result", parameters
             ) # Default is the "effective input" as per ASL spec.
 
-            # Pass state applies ResultPath to "raw input"
-            output = apply_resultpath(data, result, state.get("ResultPath", "$"))
-            event["data"] = apply_jsonpath(output, state.get("OutputPath", "$"))
+            try:
+                # Pass state applies ResultPath to "raw input"
+                output = apply_resultpath(
+                    data, result, state.get("ResultPath", "$")
+                )
+                event["data"] = apply_jsonpath(
+                    output, state.get("OutputPath", "$")
+                )
 
-            if state.get("End"):
-                self.end_state_machine(state_type, event)
-            else:
-                self.change_state(state_type, state.get("Next"), event)
+                if state.get("End"):
+                    self.end_state_machine(state_type, event)
+                else:
+                    self.change_state(state_type, state.get("Next"), event)
+            except ResultPathMatchFailure as e:
+                handle_error("States.ResultPathMatchFailure", str(e))
 
             self.event_dispatcher.acknowledge(id)
 
@@ -715,14 +740,21 @@ class StateEngine(object):
                     self.logger.warning("{} {}".format(error_type, error_message))
                     handle_error(error_type, error_message)
                 else:  # No error
-                    # Task state applies ResultPath to "raw input"
-                    output = apply_resultpath(data, result, state.get("ResultPath", "$"))
-                    event["data"] = apply_jsonpath(output, state.get("OutputPath", "$"))
+                    try:
+                        # Task state applies ResultPath to "raw input"
+                        output = apply_resultpath(
+                            data, result, state.get("ResultPath", "$")
+                        )
+                        event["data"] = apply_jsonpath(
+                            output, state.get("OutputPath", "$")
+                        )
 
-                    if state.get("End"):
-                        self.end_state_machine(state_type, event)
-                    else:
-                        self.change_state(state_type, state.get("Next"), event)
+                        if state.get("End"):
+                            self.end_state_machine(state_type, event)
+                        else:
+                            self.change_state(state_type, state.get("Next"), event)
+                    except ResultPathMatchFailure as e:
+                        handle_error("States.ResultPathMatchFailure", str(e))
 
                 self.event_dispatcher.acknowledge(id)
 
@@ -823,7 +855,9 @@ class StateEngine(object):
             def choose(choice):
                 # variable_field may be None for And, Or, Not choice rules
                 variable_field = choice.get("Variable")
-                variable = apply_jsonpath(input, variable_field)
+                variable = apply_jsonpath(
+                    input, variable_field, return_false_on_failed_match=True
+                )
                 next = choice.get("Next", True)
 
                 def isnumber(x):

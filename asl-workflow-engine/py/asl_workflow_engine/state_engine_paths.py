@@ -49,21 +49,53 @@ from jsonpath import jsonpath  # sudo pip3 install jsonpath
 from asl_workflow_engine.asl_exceptions import *
 
 
-def apply_jsonpath(input, path="$"):
+def apply_jsonpath(input, path="$", return_false_on_failed_match=False):
     """
     Performs the InputPath and OutputPath logic described in the ASL spec.
     https://states-language.net/spec.html#filters
     This is mostly just calling jsonpath() and applying the specified defaults.
+
+    The return_false_on_failed_match parameter allows callers to select whether
+    a failed JSONPath match will return boolean False or an empty object.
+    This is because it's a little unclear what the best/most useful behaviour
+    is in this circumstance. The default is currently to return an empty object
+    this is because the behaviour of InputPath and OutputPath being null is to
+    return an empty JSON object and a null JSONPath result is somewhat
+    consistent with this. OTOH deliberately returning False on match failure
+    is also useful especially in the Choice state Variable field as that allows
+    us to match a BooleanEquals False Choice for the case of no JSONPath match.
+    TODO need to check what AWS StepFunctions actually do with these cases
+    'cause it's a bit poorly specified and I suspect that it also largely
+    depends on the underlying JSONPath engine - and what to do in this case
+    doesn't seem obvious from the JSONPath specification either.
     """
     if input == None or path == None:
         return {}
     if path == "$":
         return input
     result = jsonpath(input, path)
+
     if result == False:
-        return {}
+        if return_false_on_failed_match:
+            return False
+        else:
+            return {}
+
+    """
+    The following is a little subtle. Unfortunately the JSONPath specification
+    is vague on a few points and some implementations, such as Python jsonpath,
+    return a list of matches, but for most scenarios if a single item matches
+    it is more intuitive to have that item returned rather than a list that
+    contains that item. Other implementations such as the Java Jayway (which
+    I think is the one used in AWS Step Functions) behave in that way. An
+    exception is where the path contains an array slice operator because then
+    we intuitively expect to return an array/list even if only a single item
+    is matched. The code below attempts to handle that array slice edge case.
+    """
     if len(result) == 1:
-        return result[0]
+        path_has_slice = re.search(r"\[.*:.*\]", path)
+        if not path_has_slice:
+            return result[0]
     return result
 
 def apply_resultpath(input, result, path="$"):

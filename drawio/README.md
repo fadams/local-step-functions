@@ -28,6 +28,6 @@ We're using the Step Functions Plugin found at https://github.com/sakazuki/step-
 
 1. Select Menu [Extras]-[Plugins]
 2. Click [Add]
-3. Input https://cdn.jsdelivr.net/gh/sakazuki/step-functions-draw.io@0.3.0/aws-step-functions.js
+3. Input https://cdn.jsdelivr.net/gh/sakazuki/step-functions-draw.io@0.5.0/dist/aws-step-functions.js
 4. [Apply]
 5. Reload the page

@@ -120,10 +120,12 @@ class TestStateEnginePaths(unittest.TestCase):
         result = apply_jsonpath(goessner, "$..book[(@.length-1)]")
         print(result)
         self.assertEqual(result, {"category": "fiction", "price": 22.99, "author": "J. R. R. Tolkien", "isbn": "0-395-19395-8", "title": "The Lord of the Rings"})
-        # Or alternatively using different syntax/filter
+
+        # Or alternatively using slicing. Note that in this case a single item
+        # array containing the object is returned from the slice operator.
         result = apply_jsonpath(goessner, "$..book[-1:]")
         print(result)
-        self.assertEqual(result, {"category": "fiction", "price": 22.99, "author": "J. R. R. Tolkien", "isbn": "0-395-19395-8", "title": "The Lord of the Rings"})
+        self.assertEqual(result, [{"category": "fiction", "price": 22.99, "author": "J. R. R. Tolkien", "isbn": "0-395-19395-8", "title": "The Lord of the Rings"}])
 
     def test_goessner07(self):
         print("The first two books.")
@@ -141,7 +143,7 @@ class TestStateEnginePaths(unittest.TestCase):
         self.assertEqual(result, [{"isbn": "0-553-21311-3", "price": 8.99, "title": "Moby Dick", "author": "Herman Melville", "category": "fiction"}, {"isbn": "0-395-19395-8", "price": 22.99, "title": "The Lord of the Rings", "author": "J. R. R. Tolkien", "category": "fiction"}])
 
     def test_goessner09(self):
-        print("Filter all books cheapier than 10")
+        print("Filter all books cheaper than 10")
         result = apply_jsonpath(goessner, "$..book[?(@.price<10)]")
         print(result)
         self.assertEqual(result, [{"title": "Sayings of the Century", "author": "Nigel Rees", "price": 8.95, "category": "reference"}, {"isbn": "0-553-21311-3", "title": "Moby Dick", "author": "Herman Melville", "price": 8.99, "category": "fiction"}])
