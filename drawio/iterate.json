@@ -1,0 +1,37 @@
+{
+    "Comment": "State Machine to illustrate iterating an array and passing each array item to a child Step Function",
+    "StartAt": "IsEmptyArray",
+    "States": {
+        "IsEmptyArray": {
+            "Comment": "This Choice state checks for an empty array. Note that it relies on the JSONPath engine explicitly returning False if the path fails to match. As it happens the Python jsonpath library does this but I've not checked the behaviour of AWS StepFunctions for this edge case yet. It is possible that a Task state may be required to return an explicit value for an empty array but it depends on the JSONPath implementation and returning False for ths case is reasonable behaviour though the JSONPath specification is unclear about what should happen in this case.",
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$[0]",
+                    "BooleanEquals": false,
+                    "Next": "EndState"
+                }
+            ],
+            "Default": "StepFunctionLauncher"
+        },
+        "StepFunctionLauncher": {
+            "Comment": "Launch the child Step Function. In the Parameters section we extract the first item from the array passed as input to the state and use that as the input to the child Step Function. The ResultPath of null causes the input to be passed to the output.",
+            "Type": "Task",
+            "Resource": "arn:aws:states:local:0123456789:states:startExecution",
+            "Parameters": {  
+                "Input.$": "$[0]",
+                "StateMachineArn": "arn:aws:states:local:0123456789:stateMachine:child_state_machine"
+            },
+            "ResultPath": null,
+            "Next": "RemoveFirstItemFromArray"
+        },
+        "RemoveFirstItemFromArray": {
+            "Type": "Pass",
+            "InputPath": "$[1:]",
+            "Next": "IsEmptyArray"
+        },
+        "EndState": {
+            "Type": "Succeed"
+        }
+    }
+}
