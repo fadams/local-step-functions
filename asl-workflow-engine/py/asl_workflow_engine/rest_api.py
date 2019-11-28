@@ -165,7 +165,7 @@ class RestAPI(object):
                 return "Malformed header x-amz-target", 400
 
             action = target.split(".")[1]
-            print(action)
+            # print(action)
 
             try:
                 params = json.loads(request.data.decode("utf8"))

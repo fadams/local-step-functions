@@ -21,8 +21,9 @@ import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 
-import json, os, time, uuid
+import json, os, time, uuid, opentracing
 from datetime import datetime, timezone
+
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.messaging_exceptions import *
 from asl_workflow_engine.arn import *
@@ -37,8 +38,15 @@ class TaskDispatcher(object):
         """
         self.logger = init_logging(log_name="asl_workflow_engine")
         self.logger.info("Creating TaskDispatcher")
-        # self.config = config["task_dispatcher"]  # TODO Handle missing config
-        # TODO validate that config contains the keys we need.
+
+        """
+        Get the messaging peer.address, e.g. the Broker address for use
+        by OpenTracing later.
+        """
+        peer_address = config.get("event_queue", {}).get("connection_url",
+                                                         "amqp://localhost:5672")
+        self.peer_address = peer_address.split("?")[0]
+
         self.state_engine = state_engine
 
         """
@@ -84,22 +92,48 @@ class TaskDispatcher(object):
         improved as we add code to handle Task state "rainy day" scenarios such
         as Timeouts etc. so park for now, but something to be aware of.
         """
-        correlation_id = message.correlation_id
-        request = self.pending_requests.get(correlation_id)
-        if request:
-            try:
-                del self.pending_requests[correlation_id]
-                callback, timeout_id = request
-                # Cancel the timeout previously set for this request.
-                self.state_engine.event_dispatcher.clear_timeout(timeout_id)
-                if callable(callback):
-                    callback(json.loads(message.body.decode("utf8")))
-            except ValueError as e:
-                self.logger.error(
-                    "Response {} does not contain valid JSON".format(message.body)
-                )
-        else:
-            self.logger.info("Response {} has no matching requestor".format(message))
+
+        """
+        Extract the parent OpenTracing SpanContext from the Message application
+        properties. Log message if we can't extract SpanContext.
+        https://opentracing.io/docs/overview/inject-extract/
+        """
+        try:
+            span_context = opentracing.tracer.extract(
+                opentracing.Format.TEXT_MAP, message.properties
+            )
+
+        except Exception:
+            self.logger.error("Missing trace-id property, unable to deserialise SpanContext. "
+                              "Will have to create new trace")
+            span_context = opentracing.tracer.start_span(operation_name="dangling_process")
+
+        with opentracing.tracer.start_active_span(
+            operation_name="Task",
+            child_of=span_context,
+            tags={
+                "component": "task_dispatcher",
+                "message_bus.destination": self.reply_to.name,
+                "span.kind": "consumer",
+                "peer.address": self.peer_address
+            }
+        ) as scope:
+            correlation_id = message.correlation_id
+            request = self.pending_requests.get(correlation_id)
+            if request:
+                try:
+                    del self.pending_requests[correlation_id]
+                    callback, timeout_id = request
+                    # Cancel the timeout previously set for this request.
+                    self.state_engine.event_dispatcher.clear_timeout(timeout_id)
+                    if callable(callback):
+                        callback(json.loads(message.body.decode("utf8")))
+                except ValueError as e:
+                    self.logger.error(
+                        "Response {} does not contain valid JSON".format(message.body)
+                    )
+            else:
+                self.logger.info("Response {} has no matching requestor".format(message))
 
         message.acknowledge()
 
@@ -236,27 +270,53 @@ class TaskDispatcher(object):
                             "errorType": "States.Timeout",
                             "errorMessage": "State or Execution ran for longer than the specified TimeoutSeconds value",
                         })
-
-            message = Message(
-                json.dumps(parameters),
-                content_type="application/json",
-                subject=resource,
-                reply_to=self.reply_to.name,
-                correlation_id=correlation_id,
-            )
-
-            timeout_id = self.state_engine.event_dispatcher.set_timeout(
-                on_timeout, timeout
-            )
-
             """
-            The service response message is handled by handle_rpcmessage_response()
-            If the response occurs before the timeout expires the timeout
-            should be cancelled, so we store the timeout_id as well as the
-            required callback in the dict keyed by correlation_id.
+            Start an OpenTracing trace for the rpcmessage request.
+            https://opentracing.io/guides/python/tracers/ standard tags are from
+            https://opentracing.io/specification/conventions/
             """
-            self.pending_requests[correlation_id] = (callback, timeout_id)
-            self.producer.send(message)
+            with opentracing.tracer.start_active_span(
+                operation_name="Task",
+                child_of=opentracing.tracer.active_span,
+                tags={
+                    "component": "task_dispatcher",
+                    "resource_arn": resource_arn,
+                    "message_bus.destination": resource,
+                    "span.kind": "producer",
+                    "peer.address": self.peer_address
+                }
+            ) as scope:
+                """
+                Inject the OpenTracing SpanContext into a TEXT_MAP carrier
+                in order to transport it via the Message application properties
+                https://opentracing.io/docs/overview/inject-extract/
+                """
+                carrier = {}
+                opentracing.tracer.inject(scope.span, opentracing.Format.TEXT_MAP, carrier)
+
+                self.logger.info("Tracing active span: carrier {}".format(carrier))
+
+                message = Message(
+                    json.dumps(parameters),
+                    properties=carrier,
+                    content_type="application/json",
+                    subject=resource,
+                    reply_to=self.reply_to.name,
+                    correlation_id=correlation_id,
+                )
+
+                timeout_id = self.state_engine.event_dispatcher.set_timeout(
+                    on_timeout, timeout
+                )
+
+                """
+                The service response message is handled by handle_rpcmessage_response()
+                If the response occurs before the timeout expires the timeout
+                should be cancelled, so we store the timeout_id as well as the
+                required callback in the dict keyed by correlation_id.
+                """
+                self.pending_requests[correlation_id] = (callback, timeout_id)
+                self.producer.send(message)
 
         # def asl_service_openfaas():  # TODO
         #    print("asl_service_openfaas")

@@ -240,10 +240,11 @@ class StateEngine(object):
         self.logger.info("{} {} {}".format(execution_arn, update_type, details))
 
         """
-        This should only really happen if the StateEngine has failed and been
-        restarted and we are handling a redelivered message. When we add code
-        IDC to persist execution metadata state we should hopefully be able to
-        avoid the following condition upon StateEngine restart.
+        self.executions.get(execution_arn) == None should only really happen if
+        the StateEngine has failed and been restarted and we are handling a
+        redelivered message. When we add code IDC to persist execution metadata
+        state we should hopefully be able to avoid the following condition upon
+        StateEngine restart.
         """
         if self.executions.get(execution_arn) == None:
             self.executions[execution_arn] = {"history": []}

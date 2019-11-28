@@ -22,12 +22,8 @@
 """
 This is the main application entry point to the ASL Workflow Engine.
 This class reads the JSON configuration file config.json and stores the config
-object for the rest of the application to use, it then creates and starts an
-StateEngine and EventDispatcher.
-
-TODO start a Web Server to handle AWS CLI/SDK REST API invocations for Step
-Functions and any other infrastructure services needed to manage ASL state
-machine instances based on Step Functions API.
+object for the rest of the application to use, it then creates and starts a
+StateEngine and EventDispatcher and a Web Server to handle AWS CLI/SDK REST API.
 """
 
 import sys
@@ -102,6 +98,8 @@ class WorkflowEngine(object):
         ra["port"] = int(os.environ.get("REST_API_PORT", ra.get("port")))
         ra["region"] = os.environ.get("REST_API_REGION", ra.get("region"))
 
+        # Initialise opentracing.tracer before creating the StateEngine,
+        # EventDispatcher and RestAPIinstances.
         create_tracer(config)
 
         state_engine = StateEngine(config)

@@ -17,8 +17,8 @@
 # under the License.
 #
 """
-This creates an OpenTracing tracer. It will default to the null opentracing
-tracer and use JaegerTracing if configured to do so.
+This creates an OpenTracing tracer instance. It will default to the null
+opentracing tracer and use JaegerTracing if configured to do so.
 """
 
 import sys
@@ -28,18 +28,17 @@ import opentracing  # Provides a default null opentracing.tracer instance
 
 from asl_workflow_engine.logger import init_logging
 
-def create_tracer(config):
-    logger = init_logging(log_name="asl_workflow_engine")
+def create_tracer(config, log_name="asl_workflow_engine"):
+    logger = init_logging(log_name)
     logger.info("Creating OpenTracing Tracer")
 
     config = config.get("tracer")
-    #print(config)
-
     if config:
-        # Store default tracer in case creating implementation fails.
+        # Store default tracer in case creating concrete implementation fails.
         tracer = opentracing.tracer
         if config.get("implementation") == "Jaeger":
             try:
+                # import deferred until Jaeger is selected in config.
                 import jaeger_client
 
                 jaeger = jaeger_client.Config(
@@ -48,26 +47,23 @@ def create_tracer(config):
                 )
 
                 """
-                jaeger = jaeger_client.Config(
-                    config={
-                        'sampler': {
-                            'type': 'const',
-                            'param': 1,
-                        },
-                    'logging': False,
-                    },
-                    service_name="service",
-                )
+                The init_logging(log_name="tornado") is important, though a bit
+                obtuse. Without it all subsequent log messages generated will
+                be duplicated. The issue is that "under the covers" Jaeger uses
+                the tornado https://www.tornadoweb.org async networking library.
+                Tornado's IOLoop creates a log handler if necessary when it
+                is started, because if there were no handler configured
+                you'd never see any of its event loop exception messages.
+                The default handler is created for the root logger and ends up
+                resulting in duplicate messages for other logs. By explicitly
+                adding a handler for the tornado logger, as the following line
+                does, the logging should be correctly handled. See:
+                https://stackoverflow.com/questions/30373620/why-does-ioloop-in-tornado-seem-to-add-root-logger-handler
                 """
-
-                # Initialising Jaeger tracer seems to break logging????
-                # When this line is enabled from then on I get everything
-                # logged twice, not sure what is happening but it's not right!
-                #jaeger.initialize_tracer()
+                init_logging(log_name="tornado")
+                jaeger.initialize_tracer()
                 logger.info("Jaeger Tracer initialised")
             except Exception as e:
                 logger.warning("Failed to initialise Jaeger Tracer : {}".format(e))
                 opentracing.tracer = tracer
-
-    print(opentracing.tracer)
 

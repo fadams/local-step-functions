@@ -23,11 +23,10 @@
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import json
-import threading
-import time
+import json, time, threading, opentracing
 
 from asl_workflow_engine.logger import init_logging
+from asl_workflow_engine.open_tracing_factory import create_tracer
 from asl_workflow_engine.amqp_0_9_1_messaging import Connection, Message
 from asl_workflow_engine.messaging_exceptions import *
 
@@ -42,19 +41,72 @@ class Worker(threading.Thread):
         print(self.getName() + " working")
         print(message)
 
-        reply = {"reply": self.getName() + " reply"}
+        """
+        Extract the parent OpenTracing SpanContext from the Message application
+        properties. Log message if we can't extract SpanContext.
+        https://opentracing.io/docs/overview/inject-extract/
+        """
+        try:
+            span_context = opentracing.tracer.extract(
+                opentracing.Format.TEXT_MAP, message.properties
+            )
 
-        """
-        Create the response message by reusing the request note that this
-        approach retains the correlation_id, which is necessary. If a fresh
-        Message instance is created we would need to get the correlation_id
-        from the request Message and use that value in the response message.
-        """
-        message.subject = message.reply_to
-        message.reply_to = None
-        message.body = json.dumps(reply)
-        self.producer.send(message)
-        message.acknowledge() # Acknowledges the original request
+        except Exception:
+            self.logger.error("Missing trace-id property, unable to deserialise SpanContext. "
+                              "Will have to create new trace")
+            span_context = opentracing.tracer.start_span(operation_name="dangling_process")
+
+        with opentracing.tracer.start_active_span(
+            operation_name=self.getName(),
+            child_of=span_context,
+            tags={
+                "component": "workers",
+                "message_bus.destination": self.getName(),
+                "span.kind": "consumer",
+                "peer.address": "amqp://localhost:5672"
+            }
+        ) as scope:
+            # Create simple reply. In a real processor **** DO WORK HERE ****
+            reply = {"reply": self.getName() + " reply"}
+
+            """
+            Create the response message by reusing the request note that this
+            approach retains the correlation_id, which is necessary. If a fresh
+            Message instance is created we would need to get the correlation_id
+            from the request Message and use that value in the response message.
+            """
+
+            """
+            Start an OpenTracing trace for the rpcmessage response.
+            https://opentracing.io/guides/python/tracers/ standard tags are from
+            https://opentracing.io/specification/conventions/
+            """
+            with opentracing.tracer.start_active_span(
+                operation_name=self.getName(),
+                child_of=opentracing.tracer.active_span,
+                tags={
+                    "component": "workers",
+                    "message_bus.destination": message.reply_to,
+                    "span.kind": "producer",
+                    "peer.address": "amqp://localhost:5672"
+                }
+            ) as scope:
+                """
+                Inject the OpenTracing SpanContext into a TEXT_MAP carrier
+                in order to transport it via the Message application properties
+                https://opentracing.io/docs/overview/inject-extract/
+                """
+                carrier = {}
+                opentracing.tracer.inject(scope.span, opentracing.Format.TEXT_MAP, carrier)
+
+                self.logger.info("Tracing active span: carrier {}".format(carrier))
+
+                message.properties=carrier
+                message.subject = message.reply_to
+                message.reply_to = None
+                message.body = json.dumps(reply)
+                self.producer.send(message)
+                message.acknowledge() # Acknowledges the original request
 
     def run(self):
         # Connect to worker queue and process data.
@@ -76,7 +128,31 @@ class Worker(threading.Thread):
         connection.close();
 
 if __name__ == '__main__':
-    workers = ["SuccessLambda", "TimeoutLambda", "InternalErrorHandledLambda", "InternalErrorNotHandledLambda", "mime-id",]
+    """
+    Initialising OpenTracing here rather than in the Worker constructor as
+    opentracing.tracer is a per process object not per thread.
+    """
+    config = {
+        "tracer": {
+            "implementation": "Jaeger",
+            "service_name": "workers",
+            "config": {
+                "sampler": {
+                    "type": "const",
+                    "param": 1
+                },
+                "logging": False
+            }
+        }
+    }
+    # Initialise opentracing.tracer
+    create_tracer(config, log_name="workers")
+
+    workers = ["SuccessLambda",
+               "TimeoutLambda",
+               "InternalErrorHandledLambda",
+               "InternalErrorNotHandledLambda",
+               "mime-id",]
     #workers = ["SuccessLambda"]
     for w in workers:
         worker = Worker(name = w)
