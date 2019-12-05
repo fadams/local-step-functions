@@ -137,7 +137,7 @@ class TaskDispatcher(object):
 
         message.acknowledge()
 
-    def execute_task(self, resource_arn, parameters, callback, timeout):
+    def execute_task(self, resource_arn, parameters, callback, timeout, context):
         # TODO this import should be handled by the "Connection Factory for the
         # event queue" code in the constructor, but not sure yet how to do
         # this cleanly.
@@ -270,6 +270,25 @@ class TaskDispatcher(object):
                             "errorType": "States.Timeout",
                             "errorMessage": "State or Execution ran for longer than the specified TimeoutSeconds value",
                         })
+
+            """
+            Extract the parent OpenTracing SpanContext from the ASL Context
+            object. Log message if we can't extract SpanContext.
+            https://opentracing.io/docs/overview/inject-extract/
+            """
+            try:
+                carrier = context.get("Tracer", {})
+                span_context = opentracing.tracer.extract(
+                    opentracing.Format.TEXT_MAP, carrier
+                )
+
+            except Exception:
+                self.logger.error("Missing trace-id property, unable to deserialise "
+                                  "SpanContext. Will have to create new trace")
+                span_context = opentracing.tracer.start_span(
+                    operation_name="dangling_process"
+                )
+
             """
             Start an OpenTracing trace for the rpcmessage request.
             https://opentracing.io/guides/python/tracers/ standard tags are from
@@ -277,13 +296,14 @@ class TaskDispatcher(object):
             """
             with opentracing.tracer.start_active_span(
                 operation_name="Task",
-                child_of=opentracing.tracer.active_span,
+                child_of=span_context,
                 tags={
                     "component": "task_dispatcher",
                     "resource_arn": resource_arn,
                     "message_bus.destination": resource,
                     "span.kind": "producer",
-                    "peer.address": self.peer_address
+                    "peer.address": self.peer_address,
+                    "execution_arn": context["Execution"]["Id"]
                 }
             ) as scope:
                 """
@@ -415,27 +435,71 @@ class TaskDispatcher(object):
                 callback(result)
                 return
 
-            # Create the execution context and the event to publish to launch
-            # the requested new state machine execution.
-            # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
-            start_time = datetime.now(timezone.utc).astimezone().isoformat()
-            context = {
-                "Execution": {
-                    "Id": execution_arn,
-                    "Input": parameters.get("Input", {}),
-                    "Name": execution_name,
-                    "RoleArn": match.get("roleArn"),
-                    "StartTime": start_time,
-                },
-                "State": {"EnteredTime": start_time, "Name": ""},  # Start state
-                "StateMachine": {"Id": state_machine_arn, "Name": state_machine_name},
-            }
+            """
+            Extract the parent OpenTracing SpanContext from the ASL Context
+            object. Log message if we can't extract SpanContext.
+            https://opentracing.io/docs/overview/inject-extract/
+            """
+            try:
+                carrier = context.get("Tracer", {})
+                span_context = opentracing.tracer.extract(
+                    opentracing.Format.TEXT_MAP, carrier
+                )
 
-            event = {"data": parameters.get("Input", {}), "context": context}
-            self.state_engine.event_dispatcher.publish(event)
+            except Exception:
+                self.logger.error("Missing trace-id property, unable to deserialise "
+                                  "SpanContext. Will have to create new trace")
+                span_context = opentracing.tracer.start_span(
+                    operation_name="dangling_process"
+                )
 
-            result = {"executionArn": execution_arn, "startDate": time.time()}
-            callback(result)
+            """
+            Start an OpenTracing trace for the child StartExecution request.
+            https://opentracing.io/guides/python/tracers/ standard tags are from
+            https://opentracing.io/specification/conventions/
+            """
+            with opentracing.tracer.start_active_span(
+                operation_name="Task",
+                child_of=span_context,
+                tags={
+                    "component": "task_dispatcher",
+                    "resource_arn": resource_arn,
+                    "execution_arn": context["Execution"]["Id"],
+                    "child_execution_arn": execution_arn,
+                }
+            ) as scope:
+                """
+                Inject the OpenTracing SpanContext into a TEXT_MAP carrier
+                in order to transport it via the ASL Context object
+                https://opentracing.io/docs/overview/inject-extract/
+                """
+                carrier = {}
+                opentracing.tracer.inject(scope.span, opentracing.Format.TEXT_MAP, carrier)
+
+                self.logger.info("Tracing active span: carrier {}".format(carrier))
+
+                # Create the execution context and the event to publish to launch
+                # the requested new state machine execution.
+                # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
+                start_time = datetime.now(timezone.utc).astimezone().isoformat()
+                child_context = {
+                    "Tracer": carrier,
+                    "Execution": {
+                        "Id": execution_arn,
+                        "Input": parameters.get("Input", {}),
+                        "Name": execution_name,
+                        "RoleArn": match.get("roleArn"),
+                        "StartTime": start_time,
+                    },
+                    "State": {"EnteredTime": start_time, "Name": ""},  # Start state
+                    "StateMachine": {"Id": state_machine_arn, "Name": state_machine_name},
+                }
+
+                event = {"data": parameters.get("Input", {}), "context": child_context}
+                self.state_engine.event_dispatcher.publish(event)
+
+                result = {"executionArn": execution_arn, "startDate": time.time()}
+                callback(result)
 
         def asl_service_InvalidService():
             message = "TaskDispatcher ARN {} refers to unsupported service: {}".format(

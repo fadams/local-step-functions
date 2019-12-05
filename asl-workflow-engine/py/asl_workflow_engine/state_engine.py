@@ -32,7 +32,7 @@ import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 
-import json, time, uuid
+import json, time, uuid, opentracing
 
 from datetime import datetime, timezone, timedelta
 from asl_workflow_engine.state_engine_paths import (
@@ -180,6 +180,84 @@ class StateEngine(object):
         self.task_dispatcher = TaskDispatcher(self, config)
         # self.event_dispatcher set by EventDispatcher
 
+    def start_state_machine(self, start_state, event):
+        """
+        Initialise the state machine execution's state, in particular this will
+        set any context metadata that hasn't previously been set elsewhere.
+        This is mostly only necessary if the execution was started in a
+        "low-level" e.g. way by publishing directly to the event queue whereas
+        if the execution was started via the REST API the context metadata should
+        already be set and this method's purpose is then simply to update the
+        execution history metadata.
+        """
+        data = event["data"]
+        context = event["context"]
+        state_machine_id = context["StateMachine"]["Id"]
+
+        context["State"]["Name"] = start_state
+
+        if context.get("Execution") == None:
+            context["Execution"] = {}
+        execution = context["Execution"]
+
+        if not execution.get("Name"):
+            execution["Name"] = str(uuid.uuid4())
+
+        if not execution.get("Id"):
+            # Create Id
+            # Form executionArn from stateMachineArn and uuid
+            arn = parse_arn(state_machine_id)
+            execution_arn = create_arn(
+                service="states",
+                region=arn.get("region", "local"),
+                account=arn["account"],
+                resource_type="execution",
+                resource=arn["resource"] + ":" + execution["Name"],
+            )
+            execution["Id"] = execution_arn
+        # execution["Input"] holds the initial Step Function input
+        if execution.get("Input") == None:
+            execution["Input"] = data
+
+        if not execution.get("RoleArn"):
+            """
+            The default dummy ARN case shouldn't generally occur unless
+            the asl_cache "database" has been manually edited because when
+            it is updated via the API the roleArn field gets populated.
+            """
+            execution["RoleArn"] = asl_item.get(
+                "roleArn", "arn:aws:iam:::role/dummy-role/dummy"
+            )
+
+        # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
+        start_time = datetime.now(timezone.utc).astimezone().isoformat()
+        if execution.get("StartTime") == None:
+            execution["StartTime"] = start_time
+
+        """
+        For the start state set EnteredTime here, which will be reset if
+        the message gets redelivered, for other state transitions we will
+        set EnteredTime when the transition occurs so if redeliveries
+        occur the EnteredTime will reflect the time the state was entered
+        not the time the redelivery occurred.
+        """
+        if context["State"].get("EnteredTime") == None:
+            context["State"]["EnteredTime"] = start_time
+            
+        self.executions[execution["Id"]] = {
+            "input": data,
+            "name": execution["Name"],
+            "startDate": time.time(),
+            "stateMachineArn": state_machine_id,
+            "status": "RUNNING",
+            "history": [],
+        }
+        self.update_execution_history(
+            execution["Id"],
+            "ExecutionStarted",
+            {"input": data, "roleArn": execution["RoleArn"]},
+        )
+
     def change_state(self, state_type, next_state, event):
         """
         Set event's new current state in $$.State.Name to Next state.
@@ -318,7 +396,8 @@ class StateEngine(object):
         context = event.get("context")
         if context == None:
             self.logger.error(
-                "StateEngine: event {} has no $.context field, dropping the message!".format(
+                "StateEngine: event {} has no $.context field, "
+                "dropping the message!".format(
                     event
                 )
             )
@@ -328,7 +407,8 @@ class StateEngine(object):
         state_machine = context.get("StateMachine")
         if state_machine == None:
             self.logger.error(
-                "StateEngine: event {} has no $.context.StateMachine field, dropping the message!".format(
+                "StateEngine: event {} has no $.context.StateMachine field, "
+                "dropping the message!".format(
                     event
                 )
             )
@@ -338,7 +418,8 @@ class StateEngine(object):
         state_machine_id = state_machine.get("Id")
         if not state_machine_id:
             self.logger.error(
-                "StateEngine: event {} has no $.context.StateMachine.Id field, dropping the message!".format(
+                "StateEngine: event {} has no $.context.StateMachine.Id field, "
+                "dropping the message!".format(
                     event
                 )
             )
@@ -365,6 +446,7 @@ class StateEngine(object):
             }
             del state_machine["Definition"]
 
+
         asl_item = self.asl_cache.get(state_machine_id, {})
         ASL = asl_item.get("definition")
         if not ASL:
@@ -374,7 +456,8 @@ class StateEngine(object):
             if a State Machine is deleted executions should also be deleted.
             """
             self.logger.error(
-                "StateEngine: State Machine {} does not exist, dropping the message!".format(
+                "StateEngine: State Machine {} does not exist, "
+                "dropping the message!".format(
                     state_machine_id
                 )
             )
@@ -407,70 +490,50 @@ class StateEngine(object):
             context["State"] = {"Name": None}
         current_state = context["State"].get("Name")
 
-        if not current_state:  # Start state. Initialise unset context fields.
+        if not current_state:
+            """
+            If current_state is uninitialised it means we are the Start State.
+            If so initialise unset context fields and start OpenTracing span.
+            """
             current_state = ASL["StartAt"]
-            context["State"]["Name"] = current_state
-            if context.get("Execution") == None:
-                context["Execution"] = {}
-            execution = context["Execution"]
-
-            if not execution.get("Name"):
-                execution["Name"] = str(uuid.uuid4())
-
-            if not execution.get("Id"):
-                # Create Id
-                # Form executionArn from stateMachineArn and uuid
-                arn = parse_arn(state_machine_id)
-                execution_arn = create_arn(
-                    service="states",
-                    region=arn.get("region", "local"),
-                    account=arn["account"],
-                    resource_type="execution",
-                    resource=arn["resource"] + ":" + execution["Name"],
-                )
-                execution["Id"] = execution_arn
-            # execution["Input"] holds the initial Step Function input
-            if execution.get("Input") == None:
-                execution["Input"] = data
-
-            if not execution.get("RoleArn"):
-                """
-                The default dummy ARN case shouldn't generally occur unless
-                the asl_cache "database" has been manually edited because when
-                it is updated via the API the roleArn field gets populated.
-                """
-                execution["RoleArn"] = asl_item.get(
-                    "roleArn", "arn:aws:iam:::role/dummy-role/dummy"
-                )
-
-            # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
-            start_time = datetime.now(timezone.utc).astimezone().isoformat()
-            if execution.get("StartTime") == None:
-                execution["StartTime"] = start_time
+            self.start_state_machine(current_state, event)
 
             """
-            For the start state set EnteredTime here, which will be reset if
-            the message gets redelivered, for other state transitions we will
-            set EnteredTime when the transition occurs so if redeliveries
-            occur the EnteredTime will reflect the time the state was entered
-            not the time the redelivery occurred.
+            Extract the parent OpenTracing SpanContext from the ASL Context
+            object. Log message if we can't extract SpanContext.
+            https://opentracing.io/docs/overview/inject-extract/
             """
-            if context["State"].get("EnteredTime") == None:
-                context["State"]["EnteredTime"] = start_time
+            try:
+                carrier = context.get("Tracer", {})
+                span_context = opentracing.tracer.extract(
+                    opentracing.Format.TEXT_MAP, carrier
+                )
 
-            self.executions[execution["Id"]] = {
-                "input": data,
-                "name": execution["Name"],
-                "startDate": time.time(),
-                "stateMachineArn": state_machine_id,
-                "status": "RUNNING",
-                "history": [],
-            }
-            self.update_execution_history(
-                execution["Id"],
-                "ExecutionStarted",
-                {"input": data, "roleArn": execution["RoleArn"]},
-            )
+            except Exception:
+                self.logger.error("Missing trace-id property, unable to deserialise "
+                                  "SpanContext. Will have to create new trace")
+                span_context = opentracing.tracer.start_span(
+                    operation_name="dangling_process"
+                )
+
+            with opentracing.tracer.start_active_span(
+                operation_name="StartExecution",
+                child_of=span_context,
+                tags={
+                    "component": "state_engine",
+                    "execution_arn": context["Execution"]["Id"]
+                }
+            ) as scope:
+                """
+                Inject the OpenTracing SpanContext into a TEXT_MAP carrier
+                in order to transport it via the ASL Context object
+                https://opentracing.io/docs/overview/inject-extract/
+                """
+                carrier = {}
+                opentracing.tracer.inject(scope.span, opentracing.Format.TEXT_MAP, carrier)
+
+                self.logger.info("Tracing active span: carrier {}".format(carrier))
+                context["Tracer"] = carrier
 
 
         state = ASL["States"].get(current_state)
@@ -819,7 +882,7 @@ class StateEngine(object):
             timeout = t1 if t1 < t2 else t2
 
             self.task_dispatcher.execute_task(
-                resource_arn, parameters, on_response, timeout
+                resource_arn, parameters, on_response, timeout, context
             )
 
         def asl_state_Task():
