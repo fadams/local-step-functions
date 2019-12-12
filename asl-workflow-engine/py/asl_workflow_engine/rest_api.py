@@ -78,11 +78,12 @@ import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 
-import re, json, time, uuid, logging
+import re, json, time, uuid, logging, opentracing
 from datetime import datetime, timezone
 from flask import Flask, escape, request, jsonify, abort
 
 from asl_workflow_engine.logger import init_logging
+from asl_workflow_engine.open_tracing_factory import span_context, inject_span
 from asl_workflow_engine.arn import *
 
 def valid_name(name):
@@ -493,7 +494,6 @@ class RestAPI(object):
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_StartExecution.html
                 """
                 # print(params)
-
                 state_machine_arn = params.get("stateMachineArn")
                 if not state_machine_arn:
                     self.logger.warning(
@@ -509,6 +509,13 @@ class RestAPI(object):
                     )
                     return "InvalidArn", 400
 
+                """
+                If name isn't provided create one from a UUID. TODO names should
+                be unique within a 90 day period, at the moment there is no code
+                to check for uniqueness of provided names so client code that
+                doesn't honour this may currently succeed in this implementation
+                but fail if calling real AWS StepFunctions.
+                """
                 name = params.get("name", str(uuid.uuid4()))
                 if not valid_name(name):
                     self.logger.warning(
@@ -548,38 +555,47 @@ class RestAPI(object):
                     resource=arn["resource"] + ":" + name,
                 )
 
-                """
-                The application context is described in the AWS documentation:
-                https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
-                """
-                # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
-                start_time = datetime.now(timezone.utc).astimezone().isoformat()
-                context = {
-                    "Execution": {
-                        "Id": execution_arn,
-                        "Input": input,
-                        "Name": name,
-                        "RoleArn": match.get("roleArn"),
-                        "StartTime": start_time,
-                    },
-                    "State": {"EnteredTime": start_time, "Name": ""},  # Start state
-                    "StateMachine": {
-                        "Id": state_machine_arn,
-                        "Name": match.get("name"),
-                    },
-                }
+                with opentracing.tracer.start_active_span(
+                    operation_name="StartExecution",
+                    child_of=span_context("http_headers", request.headers, self.logger),
+                    tags={
+                        "component": "rest_api",
+                        "execution_arn": execution_arn
+                    }
+                ) as scope:
+                    """
+                    The application context is described in the AWS documentation:
+                    https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
+                    """
+                    # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
+                    start_time = datetime.now(timezone.utc).astimezone().isoformat()
+                    context = {
+                        "Tracer": inject_span("text_map", scope.span, self.logger),
+                        "Execution": {
+                            "Id": execution_arn,
+                            "Input": input,
+                            "Name": name,
+                            "RoleArn": match.get("roleArn"),
+                            "StartTime": start_time,
+                        },
+                        "State": {"EnteredTime": start_time, "Name": ""},  # Start state
+                        "StateMachine": {
+                            "Id": state_machine_arn,
+                            "Name": match.get("name"),
+                        },
+                    }
 
-                event = {"data": input, "context": context}
+                    event = {"data": input, "context": context}
 
-                """
-                threadsafe=True is important here as the RestAPI runs in a
-                different thread to the main event_dispatcher loop.
-                """
-                self.event_dispatcher.publish(event, threadsafe=True)
+                    """
+                    threadsafe=True is important here as the RestAPI runs in a
+                    different thread to the main event_dispatcher loop.
+                    """
+                    self.event_dispatcher.publish(event, threadsafe=True)
 
-                resp = {"executionArn": execution_arn, "startDate": time.time()}
+                    resp = {"executionArn": execution_arn, "startDate": time.time()}
 
-                return jsonify(resp), 200
+                    return jsonify(resp), 200
 
             def aws_api_ListExecutions():
                 """
@@ -634,10 +650,10 @@ class RestAPI(object):
                     "executions": [
                         {
                             "executionArn": k,
-                            "name": v["name"],
+                            "name": v.get("name"),
                             "startDate": v.get("startDate"),
-                            "stateMachineArn": v["stateMachineArn"],
-                            "status": v["status"],
+                            "stateMachineArn": v.get("stateMachineArn"),
+                            "status": v.get("status"),
                             "stopDate": v.get("stopDate"),
                         }
                         for k, v in self.executions.items()

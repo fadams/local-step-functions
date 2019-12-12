@@ -42,6 +42,7 @@ from asl_workflow_engine.state_engine_paths import (
 )
 
 from asl_workflow_engine.logger import init_logging
+from asl_workflow_engine.open_tracing_factory import span_context, inject_span
 from asl_workflow_engine.task_dispatcher import TaskDispatcher
 
 from asl_workflow_engine.asl_exceptions import *
@@ -325,7 +326,23 @@ class StateEngine(object):
         StateEngine restart.
         """
         if self.executions.get(execution_arn) == None:
-            self.executions[execution_arn] = {"history": []}
+            self.logger.warning(
+                "StateEngine: update_execution_history: Execution {} does not "
+                "exist, probably due to StateEngine restart. Some history "
+                "metadata has been lost!".format(execution_arn))
+
+            # Derive missing fields from execution_arn
+            split = execution_arn.rpartition(':')
+            state_machine_arn = split[0]
+            name = split[2]
+
+            self.executions[execution_arn] = {
+                "name": name,
+                "startDate": time.time(),
+                "stateMachineArn": state_machine_arn,
+                "status": "RUNNING",
+                "history": []
+            }
 
         history = self.executions[execution_arn]["history"]
         id = len(history) + 1
@@ -345,11 +362,6 @@ class StateEngine(object):
                 "previousEventId": id - 1,
             }
         )
-
-    """
-    def heartbeat(self):
-        self.task_dispatcher.heartbeat()
-    """
 
     def notify(self, event, id):
         """
@@ -498,42 +510,15 @@ class StateEngine(object):
             current_state = ASL["StartAt"]
             self.start_state_machine(current_state, event)
 
-            """
-            Extract the parent OpenTracing SpanContext from the ASL Context
-            object. Log message if we can't extract SpanContext.
-            https://opentracing.io/docs/overview/inject-extract/
-            """
-            try:
-                carrier = context.get("Tracer", {})
-                span_context = opentracing.tracer.extract(
-                    opentracing.Format.TEXT_MAP, carrier
-                )
-
-            except Exception:
-                self.logger.error("Missing trace-id property, unable to deserialise "
-                                  "SpanContext. Will have to create new trace")
-                span_context = opentracing.tracer.start_span(
-                    operation_name="dangling_process"
-                )
-
             with opentracing.tracer.start_active_span(
                 operation_name="StartExecution",
-                child_of=span_context,
+                child_of=span_context("text_map", context.get("Tracer", {}), self.logger),
                 tags={
                     "component": "state_engine",
                     "execution_arn": context["Execution"]["Id"]
                 }
             ) as scope:
-                """
-                Inject the OpenTracing SpanContext into a TEXT_MAP carrier
-                in order to transport it via the ASL Context object
-                https://opentracing.io/docs/overview/inject-extract/
-                """
-                carrier = {}
-                opentracing.tracer.inject(scope.span, opentracing.Format.TEXT_MAP, carrier)
-
-                self.logger.info("Tracing active span: carrier {}".format(carrier))
-                context["Tracer"] = carrier
+                context["Tracer"] = inject_span("text_map", scope.span, self.logger)
 
 
         state = ASL["States"].get(current_state)

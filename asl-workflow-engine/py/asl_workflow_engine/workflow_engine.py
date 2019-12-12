@@ -100,7 +100,7 @@ class WorkflowEngine(object):
 
         # Initialise opentracing.tracer before creating the StateEngine,
         # EventDispatcher and RestAPIinstances.
-        create_tracer(config)
+        create_tracer("asl_workflow_engine", config["tracer"])
 
         state_engine = StateEngine(config)
         self.event_dispatcher = EventDispatcher(state_engine, config)

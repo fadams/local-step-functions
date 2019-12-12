@@ -25,6 +25,7 @@ import json, os, time, uuid, opentracing
 from datetime import datetime, timezone
 
 from asl_workflow_engine.logger import init_logging
+from asl_workflow_engine.open_tracing_factory import span_context, inject_span
 from asl_workflow_engine.messaging_exceptions import *
 from asl_workflow_engine.arn import *
 
@@ -62,11 +63,6 @@ class TaskDispatcher(object):
         maps requests with their callbacks using correlation IDs.
         """
         self.pending_requests = {}
-
-    """
-    def heartbeat(self):
-        print("TaskDispatcher heartbeat")
-    """
         
     def start(self, session):
         """
@@ -92,25 +88,9 @@ class TaskDispatcher(object):
         improved as we add code to handle Task state "rainy day" scenarios such
         as Timeouts etc. so park for now, but something to be aware of.
         """
-
-        """
-        Extract the parent OpenTracing SpanContext from the Message application
-        properties. Log message if we can't extract SpanContext.
-        https://opentracing.io/docs/overview/inject-extract/
-        """
-        try:
-            span_context = opentracing.tracer.extract(
-                opentracing.Format.TEXT_MAP, message.properties
-            )
-
-        except Exception:
-            self.logger.error("Missing trace-id property, unable to deserialise SpanContext. "
-                              "Will have to create new trace")
-            span_context = opentracing.tracer.start_span(operation_name="dangling_process")
-
         with opentracing.tracer.start_active_span(
             operation_name="Task",
-            child_of=span_context,
+            child_of=span_context("text_map", message.properties, self.logger),
             tags={
                 "component": "task_dispatcher",
                 "message_bus.destination": self.reply_to.name,
@@ -272,31 +252,13 @@ class TaskDispatcher(object):
                         })
 
             """
-            Extract the parent OpenTracing SpanContext from the ASL Context
-            object. Log message if we can't extract SpanContext.
-            https://opentracing.io/docs/overview/inject-extract/
-            """
-            try:
-                carrier = context.get("Tracer", {})
-                span_context = opentracing.tracer.extract(
-                    opentracing.Format.TEXT_MAP, carrier
-                )
-
-            except Exception:
-                self.logger.error("Missing trace-id property, unable to deserialise "
-                                  "SpanContext. Will have to create new trace")
-                span_context = opentracing.tracer.start_span(
-                    operation_name="dangling_process"
-                )
-
-            """
             Start an OpenTracing trace for the rpcmessage request.
             https://opentracing.io/guides/python/tracers/ standard tags are from
             https://opentracing.io/specification/conventions/
             """
             with opentracing.tracer.start_active_span(
                 operation_name="Task",
-                child_of=span_context,
+                child_of=span_context("text_map", context.get("Tracer", {}), self.logger),
                 tags={
                     "component": "task_dispatcher",
                     "resource_arn": resource_arn,
@@ -306,19 +268,9 @@ class TaskDispatcher(object):
                     "execution_arn": context["Execution"]["Id"]
                 }
             ) as scope:
-                """
-                Inject the OpenTracing SpanContext into a TEXT_MAP carrier
-                in order to transport it via the Message application properties
-                https://opentracing.io/docs/overview/inject-extract/
-                """
-                carrier = {}
-                opentracing.tracer.inject(scope.span, opentracing.Format.TEXT_MAP, carrier)
-
-                self.logger.info("Tracing active span: carrier {}".format(carrier))
-
                 message = Message(
                     json.dumps(parameters),
-                    properties=carrier,
+                    properties=inject_span("text_map", scope.span, self.logger),
                     content_type="application/json",
                     subject=resource,
                     reply_to=self.reply_to.name,
@@ -436,31 +388,13 @@ class TaskDispatcher(object):
                 return
 
             """
-            Extract the parent OpenTracing SpanContext from the ASL Context
-            object. Log message if we can't extract SpanContext.
-            https://opentracing.io/docs/overview/inject-extract/
-            """
-            try:
-                carrier = context.get("Tracer", {})
-                span_context = opentracing.tracer.extract(
-                    opentracing.Format.TEXT_MAP, carrier
-                )
-
-            except Exception:
-                self.logger.error("Missing trace-id property, unable to deserialise "
-                                  "SpanContext. Will have to create new trace")
-                span_context = opentracing.tracer.start_span(
-                    operation_name="dangling_process"
-                )
-
-            """
             Start an OpenTracing trace for the child StartExecution request.
             https://opentracing.io/guides/python/tracers/ standard tags are from
             https://opentracing.io/specification/conventions/
             """
             with opentracing.tracer.start_active_span(
                 operation_name="Task",
-                child_of=span_context,
+                child_of=span_context("text_map", context.get("Tracer", {}), self.logger),
                 tags={
                     "component": "task_dispatcher",
                     "resource_arn": resource_arn,
@@ -468,22 +402,12 @@ class TaskDispatcher(object):
                     "child_execution_arn": execution_arn,
                 }
             ) as scope:
-                """
-                Inject the OpenTracing SpanContext into a TEXT_MAP carrier
-                in order to transport it via the ASL Context object
-                https://opentracing.io/docs/overview/inject-extract/
-                """
-                carrier = {}
-                opentracing.tracer.inject(scope.span, opentracing.Format.TEXT_MAP, carrier)
-
-                self.logger.info("Tracing active span: carrier {}".format(carrier))
-
                 # Create the execution context and the event to publish to launch
                 # the requested new state machine execution.
                 # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
                 start_time = datetime.now(timezone.utc).astimezone().isoformat()
                 child_context = {
-                    "Tracer": carrier,
+                    "Tracer": inject_span("text_map", scope.span, self.logger),
                     "Execution": {
                         "Id": execution_arn,
                         "Input": parameters.get("Input", {}),

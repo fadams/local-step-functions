@@ -30,6 +30,5 @@ setup(
                       "jsonpath",
                       "flask",
                       "opentracing>=2.2",
-                      "requests_opentracing",
                       "jaeger_client"]
 )

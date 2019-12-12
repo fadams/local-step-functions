@@ -42,10 +42,11 @@ https://docs.aws.amazon.com/code-samples/latest/catalog/code-catalog-python-exam
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import boto3
+import boto3, time
 from botocore.exceptions import ClientError
 
 from asl_workflow_engine.logger import init_logging
+from asl_workflow_engine.open_tracing_factory import create_tracer
 
 """
 In the Resource ARN below the execution Name is not specified, so a UUID will
@@ -154,10 +155,15 @@ if __name__ == '__main__':
     # Initialise logger
     logger = init_logging(log_name='step_by_step')
 
+    # Initialising OpenTracing. It's important to do this before the boto3.client
+    # call as create_tracer "patches" boto3 to add the OpenTracing hooks.
+    create_tracer("step_by_step", {"implementation": "Jaeger"})
+
     # Initialise the boto3 client setting the endpoint_url to our local
     # ASL Workflow Engine
     # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html#boto3.session.Session.client
     sfn = boto3.client("stepfunctions", endpoint_url="http://localhost:4584")
+
     caller_state_machine_arn = "arn:aws:states:local:0123456789:stateMachine:caller_state_machine"
     state_machine_arn = "arn:aws:states:local:0123456789:stateMachine:simple_state_machine"
 
@@ -228,5 +234,7 @@ if __name__ == '__main__':
             #print(executions)
 
     except ClientError as e:
-        self.logger.error(e.response)
+        logger.error(e.response)
+
+    time.sleep(1)  # Give OpenTracing a chance to flush buffer before exiting
 

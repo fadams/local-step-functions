@@ -34,10 +34,11 @@ to the catcher which is a match all and causes a transition to SuccessLambdaCatc
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import boto3
+import boto3, time
 from botocore.exceptions import ClientError
 
 from asl_workflow_engine.logger import init_logging
+from asl_workflow_engine.open_tracing_factory import create_tracer
 
 ASL = """{
     "Comment": "Test Step Function",
@@ -110,6 +111,10 @@ if __name__ == '__main__':
     # Initialise logger
     logger = init_logging(log_name='error_handling1')
 
+    # Initialising OpenTracing. It's important to do this before the boto3.client
+    # call as create_tracer "patches" boto3 to add the OpenTracing hooks.
+    create_tracer("error_handling1", {"implementation": "Jaeger"})
+
     # Initialise the boto3 client setting the endpoint_url to our local
     # ASL Workflow Engine
     # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html#boto3.session.Session.client
@@ -144,5 +149,7 @@ if __name__ == '__main__':
             input=item
         )
     except ClientError as e:
-        self.logger.error(e.response)
+        logger.error(e.response)
+
+    time.sleep(1)  # Give OpenTracing a chance to flush buffer before exiting
 

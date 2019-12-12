@@ -45,10 +45,11 @@ https://docs.aws.amazon.com/code-samples/latest/catalog/code-catalog-python-exam
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 
-import boto3
+import boto3, time
 from botocore.exceptions import ClientError
 
 from asl_workflow_engine.logger import init_logging
+from asl_workflow_engine.open_tracing_factory import create_tracer
 
 iterate1_ASL = """{
     "Comment": "State Machine to illustrate iterating an array and passing each array item to a child Step Function",
@@ -104,7 +105,11 @@ items = ['[{"category": "reference", "author": "Nigel Rees", "title": "Sayings o
 
 if __name__ == '__main__':
     # Initialise logger
-    logger = init_logging(log_name='step_by_step')
+    logger = init_logging(log_name='iterate1')
+
+    # Initialising OpenTracing. It's important to do this before the boto3.client
+    # call as create_tracer "patches" boto3 to add the OpenTracing hooks.
+    create_tracer("iterate1", {"implementation": "Jaeger"})
 
     # Initialise the boto3 client setting the endpoint_url to our local
     # ASL Workflow Engine
@@ -180,5 +185,7 @@ if __name__ == '__main__':
             #print(executions)
 
     except ClientError as e:
-        self.logger.error(e.response)
+        logger.error(e.response)
+
+    time.sleep(1)  # Give OpenTracing a chance to flush buffer before exiting
 

@@ -26,7 +26,7 @@ assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 import json, time, threading, opentracing
 
 from asl_workflow_engine.logger import init_logging
-from asl_workflow_engine.open_tracing_factory import create_tracer
+from asl_workflow_engine.open_tracing_factory import create_tracer, span_context, inject_span
 from asl_workflow_engine.amqp_0_9_1_messaging import Connection, Message
 from asl_workflow_engine.messaging_exceptions import *
 
@@ -41,24 +41,9 @@ class Worker(threading.Thread):
         print(self.getName() + " working")
         print(message)
 
-        """
-        Extract the parent OpenTracing SpanContext from the Message application
-        properties. Log message if we can't extract SpanContext.
-        https://opentracing.io/docs/overview/inject-extract/
-        """
-        try:
-            span_context = opentracing.tracer.extract(
-                opentracing.Format.TEXT_MAP, message.properties
-            )
-
-        except Exception:
-            self.logger.error("Missing trace-id property, unable to deserialise SpanContext. "
-                              "Will have to create new trace")
-            span_context = opentracing.tracer.start_span(operation_name="dangling_process")
-
         with opentracing.tracer.start_active_span(
             operation_name=self.getName(),
-            child_of=span_context,
+            child_of=span_context("text_map", message.properties, self.logger),
             tags={
                 "component": "workers",
                 "message_bus.destination": self.getName(),
@@ -91,17 +76,7 @@ class Worker(threading.Thread):
                     "peer.address": "amqp://localhost:5672"
                 }
             ) as scope:
-                """
-                Inject the OpenTracing SpanContext into a TEXT_MAP carrier
-                in order to transport it via the Message application properties
-                https://opentracing.io/docs/overview/inject-extract/
-                """
-                carrier = {}
-                opentracing.tracer.inject(scope.span, opentracing.Format.TEXT_MAP, carrier)
-
-                self.logger.info("Tracing active span: carrier {}".format(carrier))
-
-                message.properties=carrier
+                message.properties=inject_span("text_map", scope.span, self.logger)
                 message.subject = message.reply_to
                 message.reply_to = None
                 message.body = json.dumps(reply)
@@ -132,21 +107,7 @@ if __name__ == '__main__':
     Initialising OpenTracing here rather than in the Worker constructor as
     opentracing.tracer is a per process object not per thread.
     """
-    config = {
-        "tracer": {
-            "implementation": "Jaeger",
-            "service_name": "workers",
-            "config": {
-                "sampler": {
-                    "type": "const",
-                    "param": 1
-                },
-                "logging": False
-            }
-        }
-    }
-    # Initialise opentracing.tracer
-    create_tracer(config, log_name="workers")
+    create_tracer("workers", {"implementation": "Jaeger"})
 
     workers = ["SuccessLambda",
                "TimeoutLambda",
