@@ -556,7 +556,7 @@ class RestAPI(object):
                 )
 
                 with opentracing.tracer.start_active_span(
-                    operation_name="StartExecution",
+                    operation_name="StartExecution:ExecutionLaunching",
                     child_of=span_context("http_headers", request.headers, self.logger),
                     tags={
                         "component": "rest_api",

@@ -226,6 +226,7 @@ class StateEngine(object):
             the asl_cache "database" has been manually edited because when
             it is updated via the API the roleArn field gets populated.
             """
+            asl_item = self.asl_cache.get(state_machine_id, {})
             execution["RoleArn"] = asl_item.get(
                 "roleArn", "arn:aws:iam:::role/dummy-role/dummy"
             )
@@ -297,13 +298,30 @@ class StateEngine(object):
         )
         update_type = "ExecutionSucceeded"
         self.executions[execution_arn]["stopDate"] = time.time()
-        if isinstance(data, dict) and data.get("Error"):
-            update_type = "ExecutionFailed"
-            self.executions[execution_arn]["status"] = "FAILED"
-            self.executions[execution_arn]["output"] = None
-        else:
-            self.executions[execution_arn]["status"] = "SUCCEEDED"
-            self.executions[execution_arn]["output"] = data
+
+        with opentracing.tracer.start_active_span(
+            operation_name="StartExecution:ExecutionEnding",
+            child_of=span_context("text_map", context.get("Tracer", {}), self.logger),
+            tags={
+                "component": "state_engine",
+                "execution_arn": context["Execution"]["Id"]
+            }
+        ) as scope:
+            if isinstance(data, dict) and data.get("Error"):
+                opentracing.tracer.active_span.set_tag("error", True)
+                opentracing.tracer.active_span.log_kv(
+                    {
+                        "message": "ExecutionFailed",
+                    }
+                )
+                update_type = "ExecutionFailed"
+                opentracing.tracer.active_span.set_tag("status", "FAILED")
+                self.executions[execution_arn]["status"] = "FAILED"
+                self.executions[execution_arn]["output"] = None
+            else:
+                opentracing.tracer.active_span.set_tag("status", "SUCCEEDED")
+                self.executions[execution_arn]["status"] = "SUCCEEDED"
+                self.executions[execution_arn]["output"] = data
         
         self.update_execution_history(execution_arn, update_type, {"output": data})
 
@@ -511,7 +529,7 @@ class StateEngine(object):
             self.start_state_machine(current_state, event)
 
             with opentracing.tracer.start_active_span(
-                operation_name="StartExecution",
+                operation_name="StartExecution:ExecutionStarting",
                 child_of=span_context("text_map", context.get("Tracer", {}), self.logger),
                 tags={
                     "component": "state_engine",
@@ -786,7 +804,7 @@ class StateEngine(object):
                 error_type = result.get("errorType")
                 if error_type:
                     error_message = result.get("errorMessage", "")
-                    self.logger.warning("{} {}".format(error_type, error_message))
+                    self.logger.warning("{}: {}".format(error_type, error_message))
                     handle_error(error_type, error_message)
                 else:  # No error
                     try:

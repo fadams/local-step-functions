@@ -103,11 +103,22 @@ class TaskDispatcher(object):
             if request:
                 try:
                     del self.pending_requests[correlation_id]
-                    callback, timeout_id = request
+                    callback, timeout_id, carrier = request
                     # Cancel the timeout previously set for this request.
                     self.state_engine.event_dispatcher.clear_timeout(timeout_id)
                     if callable(callback):
-                        callback(json.loads(message.body.decode("utf8")))
+                        result = json.loads(message.body.decode("utf8"))
+                        error_type = result.get("errorType")
+                        if error_type:
+                            opentracing.tracer.active_span.set_tag("error", True)
+                            opentracing.tracer.active_span.log_kv(
+                                {
+                                    "event": error_type,
+                                    "message": result.get("errorMessage", ""),
+                                }
+                            )
+
+                        callback(result)
                 except ValueError as e:
                     self.logger.error(
                         "Response {} does not contain valid JSON".format(message.body)
@@ -180,6 +191,29 @@ class TaskDispatcher(object):
         an environment variable and the real ARN will be looked up from there.
         """
 
+        def error_callback(carrier, error, callback):
+            """
+            A wrapper for for use when returning errors to the calling Task.
+            The wrapper is mainly to provide OpenTracing boilerplate.
+            We pass in the callback to be used by this function as it may be
+            called from something asynchronous like a timeout, where the
+            callback may have been stored in pending_requests rather than using
+            the callback wrapped in the closure of execute_task.
+            """
+            with opentracing.tracer.start_active_span(
+                operation_name="Task",
+                child_of=span_context("text_map", carrier, self.logger),
+            ) as scope:
+                opentracing.tracer.active_span.set_tag("error", True)
+                opentracing.tracer.active_span.log_kv(
+                    {
+                        "event": error["errorType"],
+                        "message": error["errorMessage"],
+                    }
+                )
+                if callable(callback):
+                    callback(error)
+
         """
         If resource_arn starts with $ then attempt to look up its value from
         the environment, and if that fails return its original value.
@@ -191,8 +225,8 @@ class TaskDispatcher(object):
             message = "Specified Task Resource {} is not available on the environment".format(
                 resource_arn
             )
-            result = {"errorType": "InvalidResource", "errorMessage": message}
-            callback(result)
+            error = {"errorType": "InvalidResource", "errorMessage": message}
+            error_callback(context.get("Tracer", {}), error, callback)
             return
 
         arn = parse_arn(resource_arn)
@@ -240,16 +274,17 @@ class TaskDispatcher(object):
             deletes the pending request.
             """
             def on_timeout():
-                # Do lookup in case timeout is called after successful response.
+                # Do lookup in case timeout fires after a successful response.
                 request = self.pending_requests.get(correlation_id)
                 if request:
                     del self.pending_requests[correlation_id]
-                    callback, timeout_id = request
-                    if callable(callback):
-                        callback({
-                            "errorType": "States.Timeout",
-                            "errorMessage": "State or Execution ran for longer than the specified TimeoutSeconds value",
-                        })
+                    callback, timeout_id, carrier = request
+                    error = {
+                        "errorType": "States.Timeout",
+                        "errorMessage": "State or Execution ran for longer " \
+                            "than the specified TimeoutSeconds value",
+                    }
+                    error_callback(carrier, error, callback)
 
             """
             Start an OpenTracing trace for the rpcmessage request.
@@ -268,9 +303,15 @@ class TaskDispatcher(object):
                     "execution_arn": context["Execution"]["Id"]
                 }
             ) as scope:
+                """
+                We also pass tracer carrier to pending_requests so we can use
+                it in case of a timeout. For a normal response we use the
+                tracer from the response message instead.
+                """
+                carrier = inject_span("text_map", scope.span, self.logger)
                 message = Message(
                     json.dumps(parameters),
-                    properties=inject_span("text_map", scope.span, self.logger),
+                    properties=carrier,
                     content_type="application/json",
                     subject=resource,
                     reply_to=self.reply_to.name,
@@ -286,8 +327,11 @@ class TaskDispatcher(object):
                 If the response occurs before the timeout expires the timeout
                 should be cancelled, so we store the timeout_id as well as the
                 required callback in the dict keyed by correlation_id.
+                As mentioned above we also store the serialised OpenTracing
+                span context so that if a timeout occurs we can use the request
+                span as the parent context.
                 """
-                self.pending_requests[correlation_id] = (callback, timeout_id)
+                self.pending_requests[correlation_id] = (callback, timeout_id, carrier)
                 self.producer.send(message)
 
         # def asl_service_openfaas():  # TODO
@@ -361,9 +405,10 @@ class TaskDispatcher(object):
 
             state_machine_arn = parameters.get("StateMachineArn")
             if not state_machine_arn:
-                message = "TaskDispatcher asl_service_states_startExecution: StateMachineArn must be specified"
-                result = {"errorType": "MissingRequiredParameter", "errorMessage": message}
-                callback(result)
+                message = "TaskDispatcher asl_service_states_startExecution: " \
+                          "StateMachineArn must be specified"
+                error = {"errorType": "MissingRequiredParameter", "errorMessage": message}
+                error_callback(context.get("Tracer", {}), error, callback)
                 return
 
             arn = parse_arn(state_machine_arn)
@@ -380,11 +425,12 @@ class TaskDispatcher(object):
             # Look up stateMachineArn
             match = self.state_engine.asl_cache.get(state_machine_arn)
             if not match:
-                message = "TaskDispatcher asl_service_states_startExecution: State Machine {} does not exist".format(
+                message = "TaskDispatcher asl_service_states_startExecution: " \
+                          "State Machine {} does not exist".format(
                     state_machine_arn
                 )
-                result = {"errorType": "StateMachineDoesNotExist", "errorMessage": message}
-                callback(result)
+                error = {"errorType": "StateMachineDoesNotExist", "errorMessage": message}
+                error_callback(context.get("Tracer", {}), error, callback)
                 return
 
             """
@@ -426,11 +472,11 @@ class TaskDispatcher(object):
                 callback(result)
 
         def asl_service_InvalidService():
-            message = "TaskDispatcher ARN {} refers to unsupported service: {}".format(
-                resource_arn, service
+            message = "TaskDispatcher ARN {} refers to unsupported service".format(
+                resource_arn
             )
-            result = {"errorType": "InvalidService", "errorMessage": message}
-            callback(result)
+            error = {"errorType": "InvalidService", "errorMessage": message}
+            error_callback(context.get("Tracer", {}), error, callback)
 
         """
         Given the required service from the resource_arn dynamically invoke the
