@@ -35,7 +35,8 @@ class EventDispatcher(object):
         """
         self.logger = init_logging(log_name="asl_workflow_engine")
         self.logger.info("Creating EventDispatcher")
-        self.config = config["event_queue"]  # TODO Handle missing config
+        self.queue_config = config["event_queue"]  # TODO Handle missing config
+        self.notifier_config = config["notifier"]  # TODO Handle missing config
         # TODO validate that config contains the keys we need.
 
         """
@@ -63,7 +64,7 @@ class EventDispatcher(object):
         implementations in order to allow maximum flexibility.
         """
         name = (
-            self.config.get("queue_type", "AMQP-0.9.1")
+            self.queue_config.get("queue_type", "AMQP-0.9.1")
             .lower()
             .replace("-", "_")
             .replace(".", "_")
@@ -91,14 +92,35 @@ class EventDispatcher(object):
         # Connect to event queue and start the main event loop.
         # TODO This code will connect on broker startup, but need to add code to
         # reconnect for cases where the broker fails and then restarts.
-        connection = Connection(self.config["connection_url"])
+        connection = Connection(self.queue_config["connection_url"])
         try:
             connection.open()
             session = connection.session()
-            event_consumer = session.consumer(self.config["queue_name"])
-            event_consumer.capacity = 100  # Enable consumer prefetch
-            event_consumer.set_message_listener(self.dispatch)
-            self.event_producer = session.producer(self.config["queue_name"])
+            """
+            The asl_workflow_events queue is a shared event queue, that is to
+            say every asl_workflow_engine instance receives events from this
+            queue. This is used to publish StartExecution events to and is non-
+            exclusive so multiple asl_workflow_engine instances can consume from
+            it and will thus load-balance executions across multiple instances.
+
+            TODO:
+            the instance_event_consumer is an event queue that is set up for
+            each asl_workflow_engine instance. This should be an exclusive
+            queue such that only a single instance can consume from it. This
+            queue is used for the remainder of the events for each execution.
+            The idea of having an event queue per instance is because most
+            messaging implementations scale across queues so simply having lots
+            of consumers on a single queue is fine if the bottleneck is due to
+            the consumer performance, but if the bottleneck is due to limits
+            of the messaging fabric then it won't help. Another reason for a
+            per instance queue is because with the Parallel and Map states we
+            would like each branch to notify the same instance when complete.
+            """
+            shared_event_consumer = session.consumer(self.queue_config["queue_name"])
+            shared_event_consumer.capacity = 100  # Enable consumer prefetch
+            shared_event_consumer.set_message_listener(self.dispatch)
+            self.event_queue_producer = session.producer(self.queue_config["queue_name"])
+            self.topic_producer = session.producer(self.notifier_config["topic"])
 
             """
             TODO Passing connection.set_timeout here is kind of ugly but I can't
@@ -182,7 +204,7 @@ class EventDispatcher(object):
 
     def publish(self, item, threadsafe=False):
         """
-        Publish supplied item to the event queue hosted on the underlying
+        Publish the supplied item to the event queue hosted on the underlying
         messaging fabric. This method is mainly here to abstract some of the
         implementation details from the state engine.
 
@@ -191,5 +213,19 @@ class EventDispatcher(object):
         https://www.ietf.org/rfc/rfc4627.txt.
         """
         message = Message(json.dumps(item), content_type="application/json")
-        self.event_producer.send(message, threadsafe)
+        self.event_queue_producer.send(message, threadsafe)
+
+    def broadcast(self, subject, item):
+        """
+        Broadcast the supplied item to the topic hosted on the underlying
+        messaging fabric. This method is mainly here to abstract some of the
+        implementation details from the state engine.
+
+        Setting content_type to application/json isn't necessary for correct
+        operation, however it is the correct thing to do:
+        https://www.ietf.org/rfc/rfc4627.txt.
+        """
+        message = Message(json.dumps(item), content_type="application/json")
+        message.subject = subject
+        self.topic_producer.send(message)
 

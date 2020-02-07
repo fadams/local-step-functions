@@ -1,7 +1,8 @@
 # Local Step Functions
 This repository is about art of the possible in terms of running AWS Step Functions/Amazon States Language locally. The repository contains a range of links to resources about ASL including GUIs and possibilities for calling out to alternate serveless frameworks such as Fn or OpenFaaS or whatever.
 
-For a (work in progress) implementation of ASL see the [ASL Workflow Engine](asl-workflow-engine) in this repository.
+### ASL Workflow Engine Implementation
+For a (work in progress) implementation of an ASL engine that exposes the AWS Step Functions API see the [ASL Workflow Engine](asl-workflow-engine) in this repository.
 
 ### AWS Step Function Links
 * https://states-language.net/spec.html

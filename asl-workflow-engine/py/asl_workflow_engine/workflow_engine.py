@@ -66,6 +66,7 @@ class WorkflowEngine(object):
 
         # Provide defaults for any unset config key
         config["event_queue"] = config.get("event_queue", {})
+        config["notifier"] = config.get("notifier", {})
         config["state_engine"] = config.get("state_engine", {})
         config["rest_api"] = config.get("rest_api", {})
         config["tracer"] = config.get("tracer", {})
@@ -80,6 +81,9 @@ class WorkflowEngine(object):
         eq["queue_name"] = os.environ.get(
             "EVENT_QUEUE_QUEUE_NAME", eq.get("queue_name")
         )
+        eq["instance_id"] = os.environ.get(
+            "EVENT_QUEUE_INSTANCE_ID", eq.get("instance_id")
+        )
         eq["queue_type"] = os.environ.get(
             "EVENT_QUEUE_QUEUE_TYPE", eq.get("queue_type")
         )
@@ -88,6 +92,11 @@ class WorkflowEngine(object):
         )
         eq["connection_options"] = os.environ.get(
             "EVENT_QUEUE_CONNECTION_OPTIONS", eq.get("connection_options")
+        )
+
+        no = config["notifier"]
+        no["topic"] = os.environ.get(
+            "NOTIFIER_TOPIC", no.get("topic")
         )
 
         se = config["state_engine"]

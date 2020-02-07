@@ -349,13 +349,25 @@ class Destination(object):
         news-service/sports; {"node": {"x-declare": {"exchange": "news-service", "exchange-type": "topic"}}}
 
         news-service/sports; {"node": {"x-declare": {"exchange": "news-service", "exchange-type": "topic", "auto-delete": true}}, "link": {"x-declare": {"queue": "news-queue", "exclusive": false}}}
+
+        Topic exchanges can be declared by message producers as follows:
+        ; {"node": {"x-declare": {"exchange": "news-service", "exchange-type": "topic"}}}
+
+        For the case where the address comprises just the options string
+        the leading semicolon is optional e.g. the following is also valid:
+        {"node": {"x-declare": {"exchange": "news-service", "exchange-type": "topic"}}}
+
         """
         kv = address.split(";")
         options_string = kv[1] if len(kv) == 2 else "{}"
-        # TODO parse options string into x-bindings/x-declare, etc.
         kv = kv[0].split("/")
-        self.subject = kv[1] if len(kv) == 2 else ""
-        self.name = kv[0]
+        self.subject = kv[1].strip() if len(kv) == 2 else ""
+        self.name = kv[0].strip()
+
+        # Handle case where address comprises just the options string.
+        if len(self.name) >= 2 and self.name[0] == "{":
+            options_string = self.name
+            self.name = ""
 
         options = json.loads(options_string)
 
@@ -369,12 +381,25 @@ class Destination(object):
             x_declare = node.get("x-declare")
             if x_declare and type(x_declare) == type(self.declare):
                 self.declare.update(x_declare)
-                # If node type is set then set queue or exchange name in
-                # declare if not already explicitly set in x-declare
-                if node.get("type") == "queue" and not self.declare.get("queue"):
-                    self.declare["queue"] = self.name
-                if node.get("type") == "topic" and not self.declare.get("exchange"):
-                    self.declare["exchange"] = self.name
+                if self.name:
+                    # If node type is set then set queue or exchange name in
+                    # declare if not already explicitly set in x-declare
+                    if node.get("type") == "queue" and not self.declare.get("queue"):
+                        self.declare["queue"] = self.name
+                    if node.get("type") == "topic" and not self.declare.get("exchange"):
+                        self.declare["exchange"] = self.name
+                else:
+                    # Handle case where address comprises just the options string.
+                    if node.get("type") == "queue":
+                        self.name = self.declare.get("queue", "")
+                    if node.get("type") == "topic":
+                        self.name = self.declare.get("exchange", "")
+                    # Handle edge cases where node type is not explicitly set
+                    if not self.name:
+                        self.name = self.declare.get("exchange", "")
+                    if not self.name:
+                        self.name = self.declare.get("queue", "")
+
             # Can set durable and auto-delete on node as a shortcut if we don't
             # need any other declare overrides.
             if node.get("durable"):
@@ -657,7 +682,7 @@ class Consumer(Destination):
 class Message(object):
     def __init__(
         self,
-        body=None,
+        body="",  # Pika expects empty string not None for no body.
         properties=None,
         content_type=None,
         content_encoding=None,

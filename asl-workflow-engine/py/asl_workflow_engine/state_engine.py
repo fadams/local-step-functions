@@ -181,6 +181,78 @@ class StateEngine(object):
         self.task_dispatcher = TaskDispatcher(self, config)
         # self.event_dispatcher set by EventDispatcher
 
+
+    def broadcast_notification(self, execution_arn):
+        """
+        Broadcasts notification of execution status changes to a topic.
+
+        The intention is to act rather like AWS CloudWatch events:
+        https://docs.aws.amazon.com/step-functions/latest/dg/cw-events.html
+        https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/CloudWatchEventsandEventPatterns.html
+        The events are published to the topic/subject:
+        asl_workflow_engine/<state_machine_arn>.<status>
+
+        That is to say the asl_workflow_engine topic exchange with a subject
+        comprising the state_machine_arn and the status separated by a dot. e.g. 
+        asl_workflow_engine/arn:aws:states:local:0123456789:stateMachine:simple_state_machine.SUCCEEDED
+
+        Consumers may subscribe to specific events using the full subject or
+        groups of event using wildcards, for example the subscription:
+        asl_workflow_engine/arn:aws:states:local:0123456789:stateMachine:simple_state_machine.*
+        Subscribes to all notification events published for a given state machine.
+
+        The format of the message body is as described in
+        https://docs.aws.amazon.com/step-functions/latest/dg/cw-events.html
+        the "detail" field gives access to the "executionArn", "stateMachineArn",
+        "input", "output" and other relevant information and provides the same
+        information as the DescribeExecution API.
+        """
+        
+        # Look up executionArn
+        match = self.executions.get(execution_arn)
+        if not match:
+            self.logger.info(
+                "StateEngine: broadcast_notification: Execution {} does not exist".format(
+                    execution_arn
+                )
+            )
+            return
+
+        detail = {
+            "executionArn": execution_arn,
+            "input": match["input"],
+            "name": match["name"],
+            "output": match["output"],
+            "startDate": match["startDate"],
+            "stateMachineArn": match["stateMachineArn"],
+            "status": match["status"],
+            "stopDate": match["stopDate"],
+        }
+
+        arn = parse_arn(execution_arn)
+        region=arn.get("region", "local")
+        account=arn["account"]
+
+        # https://docs.aws.amazon.com/step-functions/latest/dg/cw-events.html
+        # https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/CloudWatchEventsandEventPatterns.html
+
+        # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
+        event_time = datetime.now(timezone.utc).astimezone().isoformat()
+        cw_event = {
+            "version": "0",  # By default, this is set to 0 (zero) in all events.
+            "id": str(uuid.uuid4()),  # A unique value is generated for every event.
+            "detail-type": "Step Functions Execution Status Change",
+            "source": "aws.states",  # Identifies the service that sourced the event.
+            "account": account,  # The 12-digit number identifying an AWS account.
+            "time": event_time,  # Seems to be in rfc-3339 format in examples.
+            "region": region,  # Identifies the AWS region where the event originated.
+            "resources": [execution_arn],
+            "detail": detail,
+        }
+
+        subject = detail["stateMachineArn"] + "." + detail["status"]
+        self.event_dispatcher.broadcast(subject, cw_event)
+
     def start_state_machine(self, start_state, event):
         """
         Initialise the state machine execution's state, in particular this will
@@ -248,8 +320,10 @@ class StateEngine(object):
             
         self.executions[execution["Id"]] = {
             "input": data,
+            "output": None,
             "name": execution["Name"],
             "startDate": time.time(),
+            "stopDate": None,
             "stateMachineArn": state_machine_id,
             "status": "RUNNING",
             "history": [],
@@ -259,6 +333,7 @@ class StateEngine(object):
             "ExecutionStarted",
             {"input": data, "roleArn": execution["RoleArn"]},
         )
+        self.broadcast_notification(execution["Id"])
 
     def change_state(self, state_type, next_state, event):
         """
@@ -324,6 +399,7 @@ class StateEngine(object):
                 self.executions[execution_arn]["output"] = data
         
         self.update_execution_history(execution_arn, update_type, {"output": data})
+        self.broadcast_notification(execution_arn)
 
     def update_execution_history(self, execution_arn, update_type, details):
         """
@@ -355,8 +431,11 @@ class StateEngine(object):
             name = split[2]
 
             self.executions[execution_arn] = {
+                "input": None,
+                "output": None,
                 "name": name,
                 "startDate": time.time(),
+                "stopDate": None,
                 "stateMachineArn": state_machine_arn,
                 "status": "RUNNING",
                 "history": []

@@ -1,9 +1,15 @@
 {
     "event_queue": {
+        "comment": "instance_id should be unique for each instance of the workflow engine in a cluster. It will be used to create a unique per-instance event queue.",
         "queue_name": "asl_workflow_events",
+        "instance_id": "9256f7e8-55ec-47ea-885e-8ee1f922efa8",
         "queue_type": "AMQP-0.9.1",
         "connection_url": "amqp://localhost:5672?connection_attempts=20&retry_delay=10&heartbeat=0",
         "connection_options": ""
+    },
+    "notifier": {
+        "comment": "The topic the workflow engine will publish notifications to. These are rather like AWS CloudWatch events. If this currently maps to an AMQP topic exchange and if it is not the default amq.topic then an address string describing the node should be used with full x-declare syntax so that the exchange is declared before it is used.",
+        "topic": "{\"node\": {\"x-declare\": {\"exchange\": \"asl_workflow_engine\", \"exchange-type\": \"topic\", \"durable\": true}}}"
     },
     "state_engine": {
         "asl_cache": "ASL.json"
