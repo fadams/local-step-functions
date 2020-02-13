@@ -281,6 +281,18 @@ class Destination(object):
             "arguments": None,
         }
 
+        """
+        The x-subscribe map of a link controls the exclusive and arguments
+        fields of a subscription, which relates to the AMQP 0.9.1 basic.consume
+        or the AMQP 0.10 message.subscribe protocol commands. This is mainly
+        used to request an exclusive subscription. This prevents other
+        subscribers from subscribing to the queue.
+        """
+        self.link_subscribe = {
+            "exclusive": False,
+            "arguments": None,
+        }
+
         self.bindings = []
 
     def parse_address(self, address):
@@ -343,6 +355,8 @@ class Destination(object):
         myqueue; {"node": {"x-declare": {"durable": true, "auto-delete": true}, "x-bindings": [{"exchange": "amq.match", "queue": "myqueue", "key": "data1", "arguments": {"x-match": "all", "data-service": "amqp-delivery", "item-owner": "Sauron"}}]}}
 
         myqueue; {"node": {"durable": true, "x-bindings": [{"exchange": "amq.match", "queue": "myqueue", "key": "data1", "arguments": {"x-match": "all", "data-service": "amqp-delivery", "item-owner": "Sauron"}}, {"exchange": "amq.match", "queue": "myqueue", "key": "data2", "arguments": {"x-match": "all", "data-service": "amqp-delivery", "item-owner": "Gandalf"}}]}}
+
+        myqueue; {"node": {"x-declare": {"durable": true, "auto-delete": false}}, "link": {"x-subscribe": {"exclusive": true}}}'
 
         news-service/sports
 
@@ -416,6 +430,9 @@ class Destination(object):
             x_declare = link.get("x-declare")
             if x_declare and type(x_declare) == type(self.link_declare):
                 self.link_declare.update(x_declare)
+            x_subscribe = link.get("x-subscribe")
+            if x_subscribe and type(x_subscribe) == type(self.link_subscribe):
+                self.link_subscribe.update(x_subscribe)
 
 # ------------------------------------------------------------------------------
 
@@ -621,10 +638,14 @@ class Consumer(Destination):
         basic_consume(queue, on_message_callback, auto_ack=False,
                       exclusive=False, consumer_tag=None, arguments=None,
                       callback=None)
+
+        To specify an exclusive subscription to a queue use an address like:
+        myqueue; {"node": {"x-declare": {"durable": true, "auto-delete": false}}, "link": {"x-subscribe": {"exclusive": true}}}'
         """
+        ex = self.link_subscribe.get("exclusive", False)
         self._message_listener = message_listener
         self.session.channel.basic_consume(
-            on_message_callback=self.message_listener, queue=self.name
+            on_message_callback=self.message_listener, queue=self.name, exclusive=ex
         )
 
     def message_listener(self, channel, method, properties, body):

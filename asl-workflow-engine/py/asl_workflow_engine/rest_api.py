@@ -591,7 +591,9 @@ class RestAPI(object):
                     threadsafe=True is important here as the RestAPI runs in a
                     different thread to the main event_dispatcher loop.
                     """
-                    self.event_dispatcher.publish(event, threadsafe=True)
+                    self.event_dispatcher.publish(
+                        event, threadsafe=True, start_execution=True
+                    )
 
                     resp = {"executionArn": execution_arn, "startDate": time.time()}
 

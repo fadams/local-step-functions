@@ -82,11 +82,12 @@ class EventDispatcher(object):
             self.logger.error(e)
             exit()
 
-    """
+    
     def heartbeat(self):
-        self.state_engine.heartbeat()
+        print("**** EventDispatcher heartbeat ****")
+        #self.state_engine.heartbeat()
         self.set_timeout(self.heartbeat, 1000)
-    """
+    
 
     def start(self):
         # Connect to event queue and start the main event loop.
@@ -102,8 +103,14 @@ class EventDispatcher(object):
             queue. This is used to publish StartExecution events to and is non-
             exclusive so multiple asl_workflow_engine instances can consume from
             it and will thus load-balance executions across multiple instances.
+            """
+            self.queue_name = self.queue_config.get("queue_name", "asl_workflow_events")
+            shared_queue = self.queue_name + '; {"node": {"durable": true}}'
+            shared_event_consumer = session.consumer(shared_queue)
+            shared_event_consumer.capacity = 100  # Enable consumer prefetch
+            shared_event_consumer.set_message_listener(self.dispatch)
 
-            TODO:
+            """
             the instance_event_consumer is an event queue that is set up for
             each asl_workflow_engine instance. This should be an exclusive
             queue such that only a single instance can consume from it. This
@@ -116,10 +123,29 @@ class EventDispatcher(object):
             per instance queue is because with the Parallel and Map states we
             would like each branch to notify the same instance when complete.
             """
-            shared_event_consumer = session.consumer(self.queue_config["queue_name"])
-            shared_event_consumer.capacity = 100  # Enable consumer prefetch
-            shared_event_consumer.set_message_listener(self.dispatch)
-            self.event_queue_producer = session.producer(self.queue_config["queue_name"])
+            instance_id = self.queue_config.get("instance_id", "")
+            self.instance_queue_name = self.queue_name + "-" + instance_id
+            instance_queue = self.instance_queue_name + '; {"node": {"durable": true}, "link": {"x-subscribe": {"exclusive": true}}}'
+
+            instance_event_consumer = session.consumer(instance_queue)
+            instance_event_consumer.capacity = 100  # Enable consumer prefetch
+            instance_event_consumer.set_message_listener(self.dispatch)
+
+            """
+            The event_queue_producer is used to publish events corresponding
+            to state transitions. This can publish to both the asl_workflow_events
+            queue that is shared by every asl_workflow_engine instance and also
+            the per-instance queues of each instance. The Message subject is
+            used to select which queue the Message should be published to.
+            """
+            self.event_queue_producer = session.producer(self.queue_name)
+
+            """
+            The topic_producer specifies the topic that notification events
+            should be published to. Notification events are analogous to AWS
+            CloudWatch events and the JSON format of the notification Messages
+            is the same as that used by CloudWatch.
+            """
             self.topic_producer = session.producer(self.notifier_config["topic"])
 
             """
@@ -134,6 +160,16 @@ class EventDispatcher(object):
             self.set_timeout = connection.set_timeout
             self.clear_timeout = connection.clear_timeout
 
+            """
+            Start a periodic "heartbeat". The idea of this is that sometimes
+            "bad things happen", for example if a service goes down we might
+            be sat stuck in a Task state. Now things *should* carry on when the
+            service is restarted, but for that to work we'd need to ensure
+            redelivery of unacknowledged messages via recover call. Similarly
+            in the TaskDispatcher we might have message requests for which no
+            responses have been received and those are likely to require reaping
+            for cases where no explicit timeout has been added to the State.
+            """
             #self.set_timeout(self.heartbeat, 1000)
 
             """
@@ -202,17 +238,27 @@ class EventDispatcher(object):
         message.acknowledge()
         del self.unacknowledged_messages[id]
 
-    def publish(self, item, threadsafe=False):
+    def publish(self, item, threadsafe=False, start_execution=False):
         """
         Publish the supplied item to the event queue hosted on the underlying
         messaging fabric. This method is mainly here to abstract some of the
         implementation details from the state engine.
 
+        The start_execution field is used to select between publishing to the
+        event queue that is shared by all instances of asl_workflow_engine and
+        the per instance queue.
+
         Setting content_type to application/json isn't necessary for correct
         operation, however it is the correct thing to do:
         https://www.ietf.org/rfc/rfc4627.txt.
         """
+        if start_execution:
+            subject = self.queue_name
+        else:
+            subject = self.instance_queue_name
+
         message = Message(json.dumps(item), content_type="application/json")
+        message.subject = subject  # Selects the queue to publish to
         self.event_queue_producer.send(message, threadsafe)
 
     def broadcast(self, subject, item):

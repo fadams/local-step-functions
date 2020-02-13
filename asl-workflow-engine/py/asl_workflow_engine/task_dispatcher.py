@@ -466,7 +466,9 @@ class TaskDispatcher(object):
                 }
 
                 event = {"data": parameters.get("Input", {}), "context": child_context}
-                self.state_engine.event_dispatcher.publish(event)
+                self.state_engine.event_dispatcher.publish(
+                    event, start_execution=True
+                )
 
                 result = {"executionArn": execution_arn, "startDate": time.time()}
                 callback(result)
