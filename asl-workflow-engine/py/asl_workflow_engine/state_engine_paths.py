@@ -98,6 +98,18 @@ def apply_jsonpath(input, path="$", return_false_on_failed_match=False):
             return result[0]
     return result
 
+def get_full_jsonpath(input, path):
+    """
+    Given an input and a JSONPath query path return the full JSONPath path of
+    the query. This can be useful because JSONPath doesn't support getting
+    parents of matching nodes
+    """
+    result = jsonpath(input, path, result_type="PATH")
+    if result and len(result) == 1:
+        return result[0]
+    else:
+        return ""
+
 def apply_resultpath(input, result, path="$"):
     """
     Performs the ResultPath logic described in the ASL spec.

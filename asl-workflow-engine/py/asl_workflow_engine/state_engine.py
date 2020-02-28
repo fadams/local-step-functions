@@ -37,6 +37,7 @@ import json, time, uuid, opentracing
 from datetime import datetime, timezone, timedelta
 from asl_workflow_engine.state_engine_paths import (
     apply_jsonpath,
+    get_full_jsonpath,
     apply_resultpath,
     evaluate_parameters,
 )
@@ -178,6 +179,14 @@ class StateEngine(object):
         each Step Function, so that we can do things like get execution history.
         """
         self.executions = {}
+
+        """
+        Holds the results of Parallel state Branches or Map state Iterations.
+        It holds objects keyed by the execution ARN and each object is another
+        dict which contains arrays keyed by the Parallel or Map state name.
+        """
+        self.branch_results = {}
+
         self.task_dispatcher = TaskDispatcher(self, config)
         # self.event_dispatcher set by EventDispatcher
 
@@ -462,12 +471,19 @@ class StateEngine(object):
 
     def notify(self, event, id):
         """
+        ------------------------------------------------------------------------
+        This method is the main entry point to the StateEngine. It is called by
+        the EventDispatcher when State events are available on the event queue.
+        ------------------------------------------------------------------------
+
         :item event: Describes the data, current state and the ASL State Machine
         :type event: dict as described below. N.B. note that the expected type
          is a dictionary i.e. a JSON object and NOT a JSON string!
         :item id: The ID of the event as given by the EventDispatcher, it is
          primarily used for acknowledging the event.
         :type id: A string representing the event ID, it may just be a number.
+
+        The event dict passed to the notify method has the following format:
 
         {
 	        "data": <Object representing application data>,
@@ -617,22 +633,61 @@ class StateEngine(object):
             ) as scope:
                 context["Tracer"] = inject_span("text_map", scope.span, self.logger)
 
+        """
+        States in any given “States” field can transition only to each other,
+        and no state outside of that “States” field can transition into it.
+        That is to say a parent state machine cannot transition directly to
+        a state within a Parallel branch or Map Iterator state machine nor
+        can states within those state machines directly transition to states
+        outside of their own “States” field. We use current_state_machine to
+        check that state transitions only occur within the correct "States".
 
-        state = ASL["States"].get(current_state)
+        The parent is None if state is from the main parent state machine or
+        is the Map or Parallel state that contains the nested state machine. 
+        The parent_state is the name of the parent state described above.
+        """
+        parent_state = ""
+        parent = None
+        current_state_machine = ASL["States"]
+        state = current_state_machine.get(current_state)
         if state == None:
-            self.logger.error(
-                "StateEngine: State {} does not exist, dropping the message!".format(
-                    current_state
+            """
+            If the state can't be found in the parent state machine search for
+            it more deeply using recursive descent as the specified state might
+            actually be in a Parallel branch or Map Iterator state machine.
+            Because JSONPath doesn't have a parent operator and we want to get
+            the parent States object and also the Map or Parallel state which
+            contains that States object we get the full JSONPath string for the
+            query then use simple string splits to find the paths of those.
+            """
+            path = get_full_jsonpath(current_state_machine, "$.." + current_state)
+            states_path = path.rpartition("['States']")[0]
+            parent_path = path.rpartition("['Iterator']")[0]
+            if not parent_path:
+                parent_path = path.rpartition("['Branches']")[0]
+
+            if path and states_path and parent_path:
+                parent = apply_jsonpath(current_state_machine, parent_path)
+                parent_state = parent_path.rpartition("['")[2].partition("']")[0]
+                branch = apply_jsonpath(current_state_machine, states_path)
+                current_state_machine = branch["States"]
+                state = current_state_machine.get(current_state)
+            else:
+                self.logger.error(
+                    "StateEngine: State {} does not exist, dropping the message!".format(
+                        current_state
+                    )
                 )
-            )
-            self.event_dispatcher.acknowledge(id)
-            return
+                self.event_dispatcher.acknowledge(id)
+                return
 
         # Determine the ASL state type of the current state.
         state_type = state["Type"]
 
         """
         print("state_machine_id = " + state_machine_id)
+        print("parent_state = " + parent_state)
+        print("parent = " + str(parent))
         print("current_state = " + current_state)
         print("state = " + str(state))
         print("data = " + str(data))
@@ -798,6 +853,27 @@ class StateEngine(object):
 
         # ----------------------------------------------------------------------
 
+
+        def handle_terminal_state():
+            """
+            This function handles the boilerplate needed for terminal states.
+            It should have the same state (id, state_type, event, etc.) available
+            to it as the calling function as it is wrapped in the same closure.
+            """
+            if context.get("Parallel"):
+                execution_arn = context["Execution"]["Id"]
+                self.update_execution_history(
+                    execution_arn,
+                    state_type + "StateExited",
+                    {"output": event["data"], "name": current_state},
+                )
+                asl_state_Parallel_collect_results()
+            elif context.get("Map"):
+                asl_state_Map_collect_results()
+            else:
+                self.end_state_machine(state_type, event)
+                self.event_dispatcher.acknowledge(id)
+
         """
         Define nested functions as handlers for each supported ASL state type.
         Using nested functions so we can use the context extracted in notify.
@@ -848,13 +924,13 @@ class StateEngine(object):
                 )
 
                 if state.get("End"):
-                    self.end_state_machine(state_type, event)
+                    handle_terminal_state()
                 else:
                     self.change_state(state_type, state.get("Next"), event)
+                    self.event_dispatcher.acknowledge(id)
             except ResultPathMatchFailure as e:
                 handle_error("States.ResultPathMatchFailure", str(e))
-
-            self.event_dispatcher.acknowledge(id)
+                self.event_dispatcher.acknowledge(id)
 
         def asl_state_Task_delegate():
             """
@@ -885,6 +961,7 @@ class StateEngine(object):
                     error_message = result.get("errorMessage", "")
                     self.logger.warning("{}: {}".format(error_type, error_message))
                     handle_error(error_type, error_message)
+                    self.event_dispatcher.acknowledge(id)
                 else:  # No error
                     try:
                         # Task state applies ResultPath to "raw input"
@@ -896,13 +973,13 @@ class StateEngine(object):
                         )
 
                         if state.get("End"):
-                            self.end_state_machine(state_type, event)
+                            handle_terminal_state()
                         else:
                             self.change_state(state_type, state.get("Next"), event)
+                            self.event_dispatcher.acknowledge(id)
                     except ResultPathMatchFailure as e:
                         handle_error("States.ResultPathMatchFailure", str(e))
-
-                self.event_dispatcher.acknowledge(id)
+                        self.event_dispatcher.acknowledge(id)
 
 
             input = apply_jsonpath(data, state.get("InputPath", "$"))
@@ -1238,11 +1315,10 @@ class StateEngine(object):
             def on_timeout():
                 event["data"] = apply_jsonpath(input, state.get("OutputPath", "$"))
                 if state.get("End"):
-                    self.end_state_machine(state_type, event)
+                    handle_terminal_state()
                 else:
                     self.change_state(state_type, state.get("Next"), event)
-
-                self.event_dispatcher.acknowledge(id)
+                    self.event_dispatcher.acknowledge(id)
 
             """
             The time can be specified as a wait duration, specified in seconds,
@@ -1333,9 +1409,7 @@ class StateEngine(object):
             """
             input = apply_jsonpath(data, state.get("InputPath", "$"))
             event["data"] = apply_jsonpath(input, state.get("OutputPath", "$"))
-
-            self.end_state_machine(state_type, event)
-            self.event_dispatcher.acknowledge(id)
+            handle_terminal_state()
 
         def asl_state_Fail():
             """
@@ -1361,21 +1435,130 @@ class StateEngine(object):
 
             # Fail states don't allow InputPath, OutputPath or ResultPath
             event["data"] = error
-            self.end_state_machine(state_type, event)
-            self.event_dispatcher.acknowledge(id)
+            handle_terminal_state()
 
         def asl_state_Parallel():
             """
             https://states-language.net/spec.html#parallel-state
             https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-parallel-state.html
 
-            """
-            # TODO
+            A Parallel state causes the interpreter to execute each branch
+            starting with the state named in its “StartAt” field, as concurrently
+            as possible.
 
-            print("PARALLEL - Not Yet Implemented")
-            print(event)
+            The "wait until each branch terminates (reaches a terminal state)
+            before processing the Parallel state's “Next” field." part of the 
+            Parallel state is implemented in asl_state_Parallel_collect_results()
+
+            The Parallel state passes its input (potentially as filtered by the
+            “InputPath” field) as the input to each branch’s “StartAt” state.
+            """
+            input = apply_jsonpath(data, state.get("InputPath", "$"))
+
+            """
+            https://states-language.net/spec.html#parameters
+
+            If the “Parameters” field is provided, its value, after the
+            extraction and embedding, becomes the effective input.
+            """
+            parameters = evaluate_parameters(input, context, state.get("Parameters"))
+            # print(parameters)
+
+            """
+            A Parallel State MUST contain a field named “Branches” which is an
+            array whose elements MUST be objects. Each object MUST contain fields
+            named “States” and “StartAt” whose meanings are exactly like those
+            in the top level of a State Machine.
+
+            Iterate through the branches and launch each branch State Machine.
+            The index of each branch is needed to create the final result, so
+            we store it using the same "pattern" that is used for the Map state
+            index as described in the AWS documentation for the context object.
+            https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
+            """
+            branches = state.get("Branches", [])
+            for index, branch in enumerate(branches):
+                context["State"]["Name"] = branch.get("StartAt")
+                context["State"]["EnteredTime"] = (
+                    datetime.now(timezone.utc).astimezone().isoformat()
+                )
+                # Store the index in the context as described above.
+                context["Parallel"] = {
+                    "Item": {
+                        "Input": data,  # Save the raw input to the Parallel state
+                        "Index": index,
+                    },
+                }
+                event["data"] = parameters
+                self.event_dispatcher.publish(event)
 
             self.event_dispatcher.acknowledge(id)
+
+        def asl_state_Parallel_collect_results():
+            """
+            Wait until each Parallel branch terminates (reaches a terminal
+            state) before processing the Parallel state's “Next” field.
+            """
+            # Retrieve data from event again to ensure we have result not input.
+            data = event["data"]
+
+            execution_arn = context["Execution"]["Id"]
+            index = context["Parallel"]["Item"]["Index"]
+
+            # Initialise branch_results if necessary
+            if not execution_arn in self.branch_results:
+                self.branch_results[execution_arn] = {}
+            if not parent_state in self.branch_results[execution_arn]:
+                length = len(parent["Branches"])
+                self.branch_results[execution_arn][parent_state] = {
+                    "results": [None]*length,
+                    "ids": [None]*length,
+                }
+
+            """
+            Record the event id so we can acknowledge the event when the
+            results from all branches have been returned.
+            """
+            branch_results = self.branch_results[execution_arn][parent_state]
+            result = branch_results["results"]
+            event_ids = branch_results["ids"]
+            result[index] = data
+            event_ids[index] = id
+
+            # print(result)
+
+            # Return if we haven't yet received the results from all branches
+            if None in result:
+                return
+
+            # Parallel state applies ResultPath to "raw input"
+            data = context["Parallel"]["Item"]["Input"]  # Get saved raw input
+            output = apply_resultpath(
+                data, result, parent.get("ResultPath", "$")
+            )
+            event["data"] = apply_jsonpath(
+                output, parent.get("OutputPath", "$")
+            )
+
+            del context["Parallel"]
+            context["State"]["Name"] = parent_state
+
+            """
+            Publish any new state change before acknowledging the events.
+            """
+            if not parent.get("End"):
+                self.change_state("Parallel", parent.get("Next"), event)
+
+            # Acknowledge the events for each branch's terminal state
+            for event_id in event_ids:
+                self.event_dispatcher.acknowledge(event_id)
+
+            """
+            Need to do this *after* acknowledging the events as it deletes the
+            Parallel branch results for the current execution.
+            """
+            if parent.get("End"):
+                self.end_state_machine("Parallel", event)
 
         def asl_state_Map():
             """
@@ -1389,6 +1572,24 @@ class StateEngine(object):
             print(event)
 
             self.event_dispatcher.acknowledge(id)
+
+        def asl_state_Map_collect_results():
+            print()
+            print("asl_state_Map_collect_results")
+            """
+            #print()
+            #print(event)
+            #print()
+            #print(state)
+            print(data)
+            print()
+            print(parent_state)
+            print(parent)
+            print("index = " + str(index))
+            print("id = " + str(id))
+            print(execution_arn)
+            print()
+            """
 
         """
         End of nested state handler functions.
