@@ -407,6 +407,10 @@ class StateEngine(object):
                 self.executions[execution_arn]["status"] = "SUCCEEDED"
                 self.executions[execution_arn]["output"] = data
         
+        # Tidy up self.branch_results for current execution_arn.
+        if execution_arn in self.branch_results:
+            del self.branch_results[execution_arn]
+
         self.update_execution_history(execution_arn, update_type, {"output": data})
         self.broadcast_notification(execution_arn)
 
@@ -860,16 +864,14 @@ class StateEngine(object):
             It should have the same state (id, state_type, event, etc.) available
             to it as the calling function as it is wrapped in the same closure.
             """
-            if context.get("Parallel"):
+            if "Parallel" in context or "Map" in context:
                 execution_arn = context["Execution"]["Id"]
                 self.update_execution_history(
                     execution_arn,
                     state_type + "StateExited",
                     {"output": event["data"], "name": current_state},
                 )
-                asl_state_Parallel_collect_results()
-            elif context.get("Map"):
-                asl_state_Map_collect_results()
+                asl_state_collect_results()
             else:
                 self.end_state_machine(state_type, event)
                 self.event_dispatcher.acknowledge(id)
@@ -899,7 +901,6 @@ class StateEngine(object):
             extraction and embedding, becomes the effective input.
             """
             parameters = evaluate_parameters(input, context, state.get("Parameters"))
-            # print(parameters)
 
             """
             A Pass State MAY have a field named “Result”. If present, its value
@@ -1002,7 +1003,6 @@ class StateEngine(object):
             extraction and embedding, becomes the effective input.
             """
             parameters = evaluate_parameters(input, context, state.get("Parameters"))
-            # print(parameters)
 
             """
             Tasks can optionally specify timeouts. Timeouts (the “TimeoutSeconds”
@@ -1448,7 +1448,7 @@ class StateEngine(object):
 
             The "wait until each branch terminates (reaches a terminal state)
             before processing the Parallel state's “Next” field." part of the 
-            Parallel state is implemented in asl_state_Parallel_collect_results()
+            Parallel state is implemented in asl_state_collect_results()
 
             The Parallel state passes its input (potentially as filtered by the
             “InputPath” field) as the input to each branch’s “StartAt” state.
@@ -1462,7 +1462,6 @@ class StateEngine(object):
             extraction and embedding, becomes the effective input.
             """
             parameters = evaluate_parameters(input, context, state.get("Parameters"))
-            # print(parameters)
 
             """
             A Parallel State MUST contain a field named “Branches” which is an
@@ -1494,23 +1493,159 @@ class StateEngine(object):
 
             self.event_dispatcher.acknowledge(id)
 
-        def asl_state_Parallel_collect_results():
+        def asl_state_Map():
             """
-            Wait until each Parallel branch terminates (reaches a terminal
-            state) before processing the Parallel state's “Next” field.
+            https://states-language.net/spec.html#map-state
+            https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-map-state.html
+
+            A Map State causes the interpreter to process all the elements of an
+            array, potentially in parallel, with the processing of each element
+            independent of the others. The specification uses the term “iteration”
+            to describe each such nested execution.
+
+            The Parallel state applies multiple different state-machine branches
+            to the same input, while the Map state applies a single state machine
+            to multiple input elements.
+
+            The “InputPath” field operates as usual, selecting part of the raw input .
             """
-            # Retrieve data from event again to ensure we have result not input.
+            input = apply_jsonpath(data, state.get("InputPath", "$"))
+
+            """
+            The “ItemsPath” field’s value is a reference path identifying where
+            in the effective input the array field is found.
+
+            The default value of “ItemsPath” is “$”, which is to say the whole
+            effective input. So, if a Map State has neither an “InputPath” nor a
+            “ItemsPath” field, it is assuming that the raw input to the state
+            will be a JSON array.
+            """
+            items_path = apply_jsonpath(input, state.get("ItemsPath", "$"))
+            if not isinstance(items_path, list):
+                items_path = []
+
+            """
+            The “Iterator” field’s value is an object that defines a state
+            machine which will process each element of the array.
+            """
+            iterator = state.get("Iterator", {})
+
+            """
+            The “MaxConcurrency” field’s value is an integer that provides an
+            upper bound on how many invocations of the Iterator may run in parallel.
+            """
+            max_concurrency = state.get("MaxConcurrency", {})
+
+            """
+            Save these values from the Map state. We want to use these values
+            in the context evaluated by the parameter evaluation.
+            """
+            map_state_name = context["State"]["Name"]
+            map_state_entered = context["State"]["EnteredTime"]
+
+            """
+            A Map State MUST contain an object field named “Iterator” which MUST
+            contain fields named “States” and “StartAt”, whose meanings are
+            exactly like those in the top level of a State Machine.
+
+            Iterate through the items_path and launch each item's State Machine.
+            The index of each item is needed to create the final result, so
+            we store it using the Map state index as described in the AWS
+            documentation for the context object.
+            https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
+            """
+            length = len(items_path)
+            for index, item in enumerate(items_path):
+                #print(item)
+                """
+                Ensure the context evaluated by the parameter evaluation is
+                that of the parent Map state not the new Iterator StartAt state.
+                """
+                context["State"]["Name"] = map_state_name
+                context["State"]["EnteredTime"] = map_state_entered
+                # Store the index in the context as described above.
+                context["Map"] = {
+                    "Item": {
+                        "Input": data,  # Save the raw input to the Parallel state
+                        "Length": length,
+                        "Index": index,
+                        "Value": item,
+                    },
+                }
+
+                #print(context)
+
+                """
+                https://states-language.net/spec.html#parameters
+
+                If the “Parameters” field is provided, its value, after the
+                extraction and embedding, becomes the effective input.
+                """
+                parameters = evaluate_parameters(input, context, state.get("Parameters"))
+
+                #print("parameters")
+                #print(parameters)
+                #print()
+
+                event["data"] = parameters
+
+                # Update the context for the new Iterator StartAt state.
+                context["State"]["Name"] = iterator.get("StartAt")
+                context["State"]["EnteredTime"] = (
+                    datetime.now(timezone.utc).astimezone().isoformat()
+                )
+
+                self.event_dispatcher.publish(event)
+
+            self.event_dispatcher.acknowledge(id)
+
+        def asl_state_collect_results():
+            """
+            Collect the results from the branches of Parallel and Map states.
+            Wait until every branch terminates (reaches a terminal state) before
+            processing the Parallel or Map state's “Next” field.
+            """
+            # Get data object from event again to ensure we have result not input.
             data = event["data"]
 
-            execution_arn = context["Execution"]["Id"]
-            index = context["Parallel"]["Item"]["Index"]
+            state = parent
+            state_type = state["Type"]
+            current_state = parent_state
 
+            index = context[state_type]["Item"]["Index"]
+
+            """
+            print()
+            print("asl_state_collect_results")
+            print(state_type)
+            
+            #print()
+            #print(event)
+            #print()
+            #print(state)
+            #print(data)
+            #print()
+            print("index = " + str(index))
+            print("id = " + str(id))
+            print()
+            """
+
+            #TODO Tidy up self.branch_results for current execution_arn when execution ends.
+
+            execution_arn = context["Execution"]["Id"]
             # Initialise branch_results if necessary
             if not execution_arn in self.branch_results:
                 self.branch_results[execution_arn] = {}
-            if not parent_state in self.branch_results[execution_arn]:
-                length = len(parent["Branches"])
-                self.branch_results[execution_arn][parent_state] = {
+            if not current_state in self.branch_results[execution_arn]:
+                length = 0
+                if "Branches" in state:
+                    length = len(state["Branches"])
+                else:
+                    length = context[state_type]["Item"]["Length"]
+                #print("length")
+                #print(length)
+
+                self.branch_results[execution_arn][current_state] = {
                     "results": [None]*length,
                     "ids": [None]*length,
                 }
@@ -1519,7 +1654,7 @@ class StateEngine(object):
             Record the event id so we can acknowledge the event when the
             results from all branches have been returned.
             """
-            branch_results = self.branch_results[execution_arn][parent_state]
+            branch_results = self.branch_results[execution_arn][current_state]
             result = branch_results["results"]
             event_ids = branch_results["ids"]
             result[index] = data
@@ -1531,23 +1666,23 @@ class StateEngine(object):
             if None in result:
                 return
 
-            # Parallel state applies ResultPath to "raw input"
-            data = context["Parallel"]["Item"]["Input"]  # Get saved raw input
+            # Map state applies ResultPath to "raw input"
+            data = context[state_type]["Item"]["Input"]  # Get saved raw input
             output = apply_resultpath(
-                data, result, parent.get("ResultPath", "$")
+                data, result, state.get("ResultPath", "$")
             )
             event["data"] = apply_jsonpath(
-                output, parent.get("OutputPath", "$")
+                output, state.get("OutputPath", "$")
             )
 
-            del context["Parallel"]
-            context["State"]["Name"] = parent_state
+            del context[state_type]
+            context["State"]["Name"] = current_state
 
             """
             Publish any new state change before acknowledging the events.
             """
-            if not parent.get("End"):
-                self.change_state("Parallel", parent.get("Next"), event)
+            if not state.get("End"):
+                self.change_state(state_type, state.get("Next"), event)
 
             # Acknowledge the events for each branch's terminal state
             for event_id in event_ids:
@@ -1555,41 +1690,10 @@ class StateEngine(object):
 
             """
             Need to do this *after* acknowledging the events as it deletes the
-            Parallel branch results for the current execution.
+            Map branch results for the current execution.
             """
-            if parent.get("End"):
-                self.end_state_machine("Parallel", event)
-
-        def asl_state_Map():
-            """
-            https://states-language.net/spec.html#map-state
-            https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-map-state.html
-
-            """
-            # TODO
-
-            print("MAP - Not Yet Implemented")
-            print(event)
-
-            self.event_dispatcher.acknowledge(id)
-
-        def asl_state_Map_collect_results():
-            print()
-            print("asl_state_Map_collect_results")
-            """
-            #print()
-            #print(event)
-            #print()
-            #print(state)
-            print(data)
-            print()
-            print(parent_state)
-            print(parent)
-            print("index = " + str(index))
-            print("id = " + str(id))
-            print(execution_arn)
-            print()
-            """
+            if state.get("End"):
+                self.end_state_machine(state_type, event)
 
         """
         End of nested state handler functions.
