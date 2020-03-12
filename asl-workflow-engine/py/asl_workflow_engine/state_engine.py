@@ -267,7 +267,7 @@ class StateEngine(object):
         Initialise the state machine execution's state, in particular this will
         set any context metadata that hasn't previously been set elsewhere.
         This is mostly only necessary if the execution was started in a
-        "low-level" e.g. way by publishing directly to the event queue whereas
+        "low-level" e.g. way by publishing directly to the event queue, whereas
         if the execution was started via the REST API the context metadata should
         already be set and this method's purpose is then simply to update the
         execution history metadata.
@@ -858,23 +858,24 @@ class StateEngine(object):
         # ----------------------------------------------------------------------
 
 
-        def handle_terminal_state():
+        def handle_terminal_state(ack=True):
             """
             This function handles the boilerplate needed for terminal states.
             It should have the same state (id, state_type, event, etc.) available
             to it as the calling function as it is wrapped in the same closure.
             """
-            if "Parallel" in context or "Map" in context:
+            if "Branch" in context["State"]:
                 execution_arn = context["Execution"]["Id"]
                 self.update_execution_history(
                     execution_arn,
                     state_type + "StateExited",
                     {"output": event["data"], "name": current_state},
                 )
-                asl_state_collect_results()
+                asl_state_collect_results(ack)
             else:
                 self.end_state_machine(state_type, event)
-                self.event_dispatcher.acknowledge(id)
+                if ack:
+                    self.event_dispatcher.acknowledge(id)
 
         """
         Define nested functions as handlers for each supported ASL state type.
@@ -1470,24 +1471,33 @@ class StateEngine(object):
             in the top level of a State Machine.
 
             Iterate through the branches and launch each branch State Machine.
-            The index of each branch is needed to create the final result, so
-            we store it using the same "pattern" that is used for the Map state
-            index as described in the AWS documentation for the context object.
-            https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
+
+            The index of each branch and the Parallel state's raw input is
+            needed to create the final result, so we have to store those in the
+            context of the events traversing the branch state machines. Moreover,
+            it is possible that we could have Parallel or Map states nested in
+            the branch state machines. To cater for this we add a "Branch" field
+            to the "State" object in the context. The "Branch" field is a list
+            of objects holding Input and Index as necessary. Each nested Map or
+            Parallel state can append to that list, which behaves like a stack.
             """
+            context_state = context["State"]
+            if not "Branch" in context_state:
+                context_state["Branch"] = []
+            context_state["Branch"].append({})
+
             branches = state.get("Branches", [])
             for index, branch in enumerate(branches):
-                context["State"]["Name"] = branch.get("StartAt")
-                context["State"]["EnteredTime"] = (
+                context_state["Name"] = branch.get("StartAt")
+                context_state["EnteredTime"] = (
                     datetime.now(timezone.utc).astimezone().isoformat()
                 )
-                # Store the index in the context as described above.
-                context["Parallel"] = {
-                    "Item": {
-                        "Input": data,  # Save the raw input to the Parallel state
-                        "Index": index,
-                    },
+                context_state["Branch"][-1] = {
+                    "Parent": current_state,
+                    "Input": data,  # Save the raw input to the Parallel state
+                    "Index": index, # Index of the current branch
                 }
+
                 event["data"] = parameters
                 self.event_dispatcher.publish(event)
 
@@ -1540,8 +1550,9 @@ class StateEngine(object):
             Save these values from the Map state. We want to use these values
             in the context evaluated by the parameter evaluation.
             """
-            map_state_name = context["State"]["Name"]
-            map_state_entered = context["State"]["EnteredTime"]
+            context_state = context["State"]
+            map_state_name = context_state["Name"]
+            map_state_entered = context_state["EnteredTime"]
 
             """
             A Map State MUST contain an object field named “Iterator” which MUST
@@ -1549,25 +1560,29 @@ class StateEngine(object):
             exactly like those in the top level of a State Machine.
 
             Iterate through the items_path and launch each item's State Machine.
-            The index of each item is needed to create the final result, so
-            we store it using the Map state index as described in the AWS
-            documentation for the context object.
+            The index and value of each item is needed to evaluate the parameter,
+            so we store it in the "Map" field of the context as described in the
+            AWS documentation for the context object.
             https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
+            Also, like the Parallel state, the index of each branch and the Map
+            state's raw input is needed to create the final result, so we again
+            add a "Branch" field to the "State" object in the context.
             """
+            if not "Branch" in context_state:
+                context_state["Branch"] = []
+            context_state["Branch"].append({})
+
             length = len(items_path)
             for index, item in enumerate(items_path):
-                #print(item)
                 """
                 Ensure the context evaluated by the parameter evaluation is
                 that of the parent Map state not the new Iterator StartAt state.
                 """
-                context["State"]["Name"] = map_state_name
-                context["State"]["EnteredTime"] = map_state_entered
-                # Store the index in the context as described above.
+                context_state["Name"] = map_state_name
+                context_state["EnteredTime"] = map_state_entered
+                # Store the index and value in the context as described above.
                 context["Map"] = {
                     "Item": {
-                        "Input": data,  # Save the raw input to the Parallel state
-                        "Length": length,
                         "Index": index,
                         "Value": item,
                     },
@@ -1582,24 +1597,27 @@ class StateEngine(object):
                 extraction and embedding, becomes the effective input.
                 """
                 parameters = evaluate_parameters(input, context, state.get("Parameters"))
-
-                #print("parameters")
-                #print(parameters)
-                #print()
+                del context["Map"]  # Delete after parameters have been processed
 
                 event["data"] = parameters
 
                 # Update the context for the new Iterator StartAt state.
-                context["State"]["Name"] = iterator.get("StartAt")
-                context["State"]["EnteredTime"] = (
+                context_state["Name"] = iterator.get("StartAt")
+                context_state["EnteredTime"] = (
                     datetime.now(timezone.utc).astimezone().isoformat()
                 )
+                context_state["Branch"][-1] = {
+                    "Parent": current_state,
+                    "Input": data,     # Save the raw input to the Parallel state
+                    "Index": index,    # Index of the current branch
+                    "Length": length,  # Number of branches/Iterator instances
+                }
 
                 self.event_dispatcher.publish(event)
 
             self.event_dispatcher.acknowledge(id)
 
-        def asl_state_collect_results():
+        def asl_state_collect_results(ack):
             """
             Collect the results from the branches of Parallel and Map states.
             Wait until every branch terminates (reaches a terminal state) before
@@ -1608,15 +1626,26 @@ class StateEngine(object):
             # Get data object from event again to ensure we have result not input.
             data = event["data"]
 
-            state = parent
-            state_type = state["Type"]
-            current_state = parent_state
+            # Retrieve the index, input, length, etc. info for the current branch.
+            branch_info = context["State"]["Branch"][-1]
+            index = branch_info["Index"]
 
-            index = context[state_type]["Item"]["Index"]
+
+
+
+            #current_state = parent_state
+            current_state = branch_info["Parent"]  # This gives the correct parent
+
+            state = apply_jsonpath(ASL["States"], "$.." + current_state)
+            #state = parent
+            state_type = state["Type"]
 
             """
-            print()
+
             print("asl_state_collect_results")
+            print("parent_state")
+            #print(parent_state)
+            print(branch_info["Parent"])
             print(state_type)
             
             #print()
@@ -1627,10 +1656,11 @@ class StateEngine(object):
             #print()
             print("index = " + str(index))
             print("id = " + str(id))
+            print(ack)
             print()
+            
             """
 
-            #TODO Tidy up self.branch_results for current execution_arn when execution ends.
 
             execution_arn = context["Execution"]["Id"]
             # Initialise branch_results if necessary
@@ -1641,7 +1671,7 @@ class StateEngine(object):
                 if "Branches" in state:
                     length = len(state["Branches"])
                 else:
-                    length = context[state_type]["Item"]["Length"]
+                    length = branch_info["Length"]
                 #print("length")
                 #print(length)
 
@@ -1658,16 +1688,27 @@ class StateEngine(object):
             result = branch_results["results"]
             event_ids = branch_results["ids"]
             result[index] = data
-            event_ids[index] = id
+            event_ids[index] = id if ack else -1
 
             # print(result)
+
+
+            """
+
+            print("----------")
+            print(context["State"]["Branch"])
+            print("----------")
+
+            """
+
+
 
             # Return if we haven't yet received the results from all branches
             if None in result:
                 return
 
-            # Map state applies ResultPath to "raw input"
-            data = context[state_type]["Item"]["Input"]  # Get saved raw input
+            # Parallel and Map states apply ResultPath to "raw input"
+            data = branch_info["Input"]  # Get saved raw input
             output = apply_resultpath(
                 data, result, state.get("ResultPath", "$")
             )
@@ -1675,7 +1716,20 @@ class StateEngine(object):
                 output, state.get("OutputPath", "$")
             )
 
-            del context[state_type]
+
+
+
+            """
+            Remove last item from "Branch" list, then if it becomes empty delete
+            "Branch" from context as we've finished with it.
+            """
+            del context["State"]["Branch"][-1]
+
+            #print(context["State"]["Branch"])
+            if len(context["State"]["Branch"]) == 0:
+                #print('**** deleting context["State"]["Branch"] ****')
+                del context["State"]["Branch"]
+
             context["State"]["Name"] = current_state
 
             """
@@ -1686,14 +1740,18 @@ class StateEngine(object):
 
             # Acknowledge the events for each branch's terminal state
             for event_id in event_ids:
-                self.event_dispatcher.acknowledge(event_id)
+                if event_id != -1:
+                    self.event_dispatcher.acknowledge(event_id)
 
             """
             Need to do this *after* acknowledging the events as it deletes the
-            Map branch results for the current execution.
+            Parallel or Map branch results for the current execution.
             """
             if state.get("End"):
-                self.end_state_machine(state_type, event)
+                #self.end_state_machine(state_type, event)
+                handle_terminal_state(ack=False)
+
+
 
         """
         End of nested state handler functions.

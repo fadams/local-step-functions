@@ -105,7 +105,14 @@ def get_full_jsonpath(input, path):
     parents of matching nodes
     """
     result = jsonpath(input, path, result_type="PATH")
-    if result and len(result) == 1:
+    """
+    #if result and len(result) == 1:
+    TODO if len(result) > 1 then it means multiple states with the same name,
+    which is an invalid state machine. Need to work out the best place to check
+    for that situation, which is probably not here. For now always return the
+    first matching result.
+    """
+    if result:
         return result[0]
     else:
         return ""
