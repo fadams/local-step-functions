@@ -858,11 +858,9 @@ class StateEngine(object):
         # ----------------------------------------------------------------------
 
 
-        def handle_terminal_state(ack=True):
+        def handle_terminal_state(state_type, event, id=None):
             """
             This function handles the boilerplate needed for terminal states.
-            It should have the same state (id, state_type, event, etc.) available
-            to it as the calling function as it is wrapped in the same closure.
             """
             if "Branch" in context["State"]:
                 execution_arn = context["Execution"]["Id"]
@@ -871,10 +869,10 @@ class StateEngine(object):
                     state_type + "StateExited",
                     {"output": event["data"], "name": current_state},
                 )
-                asl_state_collect_results(ack)
+                asl_state_collect_results(state_type)
             else:
                 self.end_state_machine(state_type, event)
-                if ack:
+                if id != None:
                     self.event_dispatcher.acknowledge(id)
 
         """
@@ -926,7 +924,7 @@ class StateEngine(object):
                 )
 
                 if state.get("End"):
-                    handle_terminal_state()
+                    handle_terminal_state(state_type, event, id)
                 else:
                     self.change_state(state_type, state.get("Next"), event)
                     self.event_dispatcher.acknowledge(id)
@@ -975,7 +973,7 @@ class StateEngine(object):
                         )
 
                         if state.get("End"):
-                            handle_terminal_state()
+                            handle_terminal_state(state_type, event, id)
                         else:
                             self.change_state(state_type, state.get("Next"), event)
                             self.event_dispatcher.acknowledge(id)
@@ -1316,7 +1314,7 @@ class StateEngine(object):
             def on_timeout():
                 event["data"] = apply_jsonpath(input, state.get("OutputPath", "$"))
                 if state.get("End"):
-                    handle_terminal_state()
+                    handle_terminal_state(state_type, event, id)
                 else:
                     self.change_state(state_type, state.get("Next"), event)
                     self.event_dispatcher.acknowledge(id)
@@ -1410,7 +1408,7 @@ class StateEngine(object):
             """
             input = apply_jsonpath(data, state.get("InputPath", "$"))
             event["data"] = apply_jsonpath(input, state.get("OutputPath", "$"))
-            handle_terminal_state()
+            handle_terminal_state(state_type, event, id)
 
         def asl_state_Fail():
             """
@@ -1436,7 +1434,7 @@ class StateEngine(object):
 
             # Fail states don't allow InputPath, OutputPath or ResultPath
             event["data"] = error
-            handle_terminal_state()
+            handle_terminal_state(state_type, event, id)
 
         def asl_state_Parallel():
             """
@@ -1588,8 +1586,6 @@ class StateEngine(object):
                     },
                 }
 
-                #print(context)
-
                 """
                 https://states-language.net/spec.html#parameters
 
@@ -1617,7 +1613,7 @@ class StateEngine(object):
 
             self.event_dispatcher.acknowledge(id)
 
-        def asl_state_collect_results(ack):
+        def asl_state_collect_results(state_type):
             """
             Collect the results from the branches of Parallel and Map states.
             Wait until every branch terminates (reaches a terminal state) before
@@ -1630,22 +1626,20 @@ class StateEngine(object):
             branch_info = context["State"]["Branch"][-1]
             index = branch_info["Index"]
 
-
-
-
             #current_state = parent_state
             current_state = branch_info["Parent"]  # This gives the correct parent
 
             state = apply_jsonpath(ASL["States"], "$.." + current_state)
             #state = parent
+            previous_state_type = state_type
             state_type = state["Type"]
 
             """
-
             print("asl_state_collect_results")
             print("parent_state")
             #print(parent_state)
             print(branch_info["Parent"])
+            print(previous_state_type)
             print(state_type)
             
             #print()
@@ -1656,11 +1650,8 @@ class StateEngine(object):
             #print()
             print("index = " + str(index))
             print("id = " + str(id))
-            print(ack)
             print()
-            
             """
-
 
             execution_arn = context["Execution"]["Id"]
             # Initialise branch_results if necessary
@@ -1688,19 +1679,17 @@ class StateEngine(object):
             result = branch_results["results"]
             event_ids = branch_results["ids"]
             result[index] = data
-            event_ids[index] = id if ack else -1
+            if previous_state_type != "Parallel" and previous_state_type != "Map":
+                event_ids[index] = id
 
             # print(result)
 
 
             """
-
             print("----------")
             print(context["State"]["Branch"])
             print("----------")
-
             """
-
 
 
             # Return if we haven't yet received the results from all branches
@@ -1716,15 +1705,11 @@ class StateEngine(object):
                 output, state.get("OutputPath", "$")
             )
 
-
-
-
             """
-            Remove last item from "Branch" list, then if it becomes empty delete
-            "Branch" from context as we've finished with it.
+            Remove last item from the "Branch" list, then if it becomes empty
+            delete "Branch" from context as we've finished with it.
             """
             del context["State"]["Branch"][-1]
-
             #print(context["State"]["Branch"])
             if len(context["State"]["Branch"]) == 0:
                 #print('**** deleting context["State"]["Branch"] ****')
@@ -1740,7 +1725,7 @@ class StateEngine(object):
 
             # Acknowledge the events for each branch's terminal state
             for event_id in event_ids:
-                if event_id != -1:
+                if event_id:
                     self.event_dispatcher.acknowledge(event_id)
 
             """
@@ -1748,9 +1733,7 @@ class StateEngine(object):
             Parallel or Map branch results for the current execution.
             """
             if state.get("End"):
-                #self.end_state_machine(state_type, event)
-                handle_terminal_state(ack=False)
-
+                handle_terminal_state(state_type, event)
 
 
         """
