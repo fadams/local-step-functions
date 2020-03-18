@@ -138,6 +138,9 @@ class EventDispatcherStub(object):
     def publish(self, item):
         # Convert event back to JSON string for dispatching.
         self.dispatch(json.dumps(item))
+    
+    def broadcast(self, subject, message):
+        pass
 
 """
 This stubs out the real TaskDispatcher execute_task method which requires
