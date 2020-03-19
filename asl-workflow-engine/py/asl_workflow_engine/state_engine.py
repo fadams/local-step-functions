@@ -32,7 +32,7 @@ import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 
-import json, time, uuid, opentracing
+import operator, json, time, uuid, opentracing
 
 from datetime import datetime, timezone, timedelta
 from asl_workflow_engine.state_engine_paths import (
@@ -72,6 +72,31 @@ def parse_rfc3339_datetime(rfc3339):
     if offset[0] == "-":
         delta = -delta
     return raw_datetime.replace(tzinfo=timezone(delta))
+
+def find_state(current_state_machine, current_state):
+    """
+    Look-up the specified JSON state machine to find the state object with the
+    given name. If it can't be found by a simple look-up try to find it in
+    a nested (e.g. Parallel or Map) state machine as described below.
+    """
+    state = current_state_machine.get(current_state)
+    if state == None:
+        """
+        If the state can't be found in the parent state machine search for
+        it more deeply using recursive descent, as the specified state might
+        actually be in a Parallel branch or Map Iterator state machine.
+        Because JSONPath doesn't have a parent operator and we want to get
+        the parent States object too we get the full JSONPath string for
+        the query then use simple string splits to find the path of that.
+        """
+        path = get_full_jsonpath(current_state_machine, "$.." + current_state)
+        states_path = path.rpartition("['States']")[0]
+        if path and states_path:
+            branch = apply_jsonpath(current_state_machine, states_path)
+            current_state_machine = branch["States"]
+            state = current_state_machine.get(current_state)
+
+    return state, current_state_machine
 
 
 """
@@ -190,6 +215,14 @@ class StateEngine(object):
         self.task_dispatcher = TaskDispatcher(self, config)
         # self.event_dispatcher set by EventDispatcher
 
+    def log_and_drop(self, message, obj, id):
+        """
+        Boiler plate to deal with unrecoverable errors that should rarely occur.
+        """
+        self.logger.error(
+            ("StateEngine: " + message + ", dropping the message!").format(obj)
+        )
+        self.event_dispatcher.acknowledge(id)
 
     def broadcast_notification(self, execution_arn):
         """
@@ -524,35 +557,17 @@ class StateEngine(object):
         """
         context = event.get("context")
         if context == None:
-            self.logger.error(
-                "StateEngine: event {} has no $.context field, "
-                "dropping the message!".format(
-                    event
-                )
-            )
-            self.event_dispatcher.acknowledge(id)
+            self.log_and_drop("event {} has no $.context field", event, id)
             return
 
         state_machine = context.get("StateMachine")
         if state_machine == None:
-            self.logger.error(
-                "StateEngine: event {} has no $.context.StateMachine field, "
-                "dropping the message!".format(
-                    event
-                )
-            )
-            self.event_dispatcher.acknowledge(id)
+            self.log_and_drop("event {} has no $.context.StateMachine field", event, id)
             return
 
         state_machine_id = state_machine.get("Id")
         if not state_machine_id:
-            self.logger.error(
-                "StateEngine: event {} has no $.context.StateMachine.Id field, "
-                "dropping the message!".format(
-                    event
-                )
-            )
-            self.event_dispatcher.acknowledge(id)
+            self.log_and_drop("event {} has no $.context.StateMachine.Id field", event, id)
             return
 
         """
@@ -584,13 +599,7 @@ class StateEngine(object):
             scenario as we *could* simply add the State Machine and retry. OTOH
             if a State Machine is deleted executions should also be deleted.
             """
-            self.logger.error(
-                "StateEngine: State Machine {} does not exist, "
-                "dropping the message!".format(
-                    state_machine_id
-                )
-            )
-            self.event_dispatcher.acknowledge(id)
+            self.log_and_drop("State Machine {} does not exist", state_machine_id, id)
             return
 
         """
@@ -643,55 +652,19 @@ class StateEngine(object):
         That is to say a parent state machine cannot transition directly to
         a state within a Parallel branch or Map Iterator state machine nor
         can states within those state machines directly transition to states
-        outside of their own “States” field. We use current_state_machine to
+        outside of their own “States” field. TODO use current_state_machine to
         check that state transitions only occur within the correct "States".
-
-        The parent is None if state is from the main parent state machine or
-        is the Map or Parallel state that contains the nested state machine. 
-        The parent_state is the name of the parent state described above.
         """
-        parent_state = ""
-        parent = None
-        current_state_machine = ASL["States"]
-        state = current_state_machine.get(current_state)
-        if state == None:
-            """
-            If the state can't be found in the parent state machine search for
-            it more deeply using recursive descent as the specified state might
-            actually be in a Parallel branch or Map Iterator state machine.
-            Because JSONPath doesn't have a parent operator and we want to get
-            the parent States object and also the Map or Parallel state which
-            contains that States object we get the full JSONPath string for the
-            query then use simple string splits to find the paths of those.
-            """
-            path = get_full_jsonpath(current_state_machine, "$.." + current_state)
-            states_path = path.rpartition("['States']")[0]
-            parent_path = path.rpartition("['Iterator']")[0]
-            if not parent_path:
-                parent_path = path.rpartition("['Branches']")[0]
-
-            if path and states_path and parent_path:
-                parent = apply_jsonpath(current_state_machine, parent_path)
-                parent_state = parent_path.rpartition("['")[2].partition("']")[0]
-                branch = apply_jsonpath(current_state_machine, states_path)
-                current_state_machine = branch["States"]
-                state = current_state_machine.get(current_state)
-            else:
-                self.logger.error(
-                    "StateEngine: State {} does not exist, dropping the message!".format(
-                        current_state
-                    )
-                )
-                self.event_dispatcher.acknowledge(id)
-                return
+        state, current_state_machine = find_state(ASL["States"], current_state)
+        if state == None:  # state should be valid by this point
+            self.log_and_drop("State {} does not exist", current_state, id)
+            return
 
         # Determine the ASL state type of the current state.
         state_type = state["Type"]
 
         """
         print("state_machine_id = " + state_machine_id)
-        print("parent_state = " + parent_state)
-        print("parent = " + str(parent))
         print("current_state = " + current_state)
         print("state = " + str(state))
         print("data = " + str(data))
@@ -1088,6 +1061,24 @@ class StateEngine(object):
                         return not isinstance(x, bool) and 0 == x * 0
                     except:
                         return False
+
+                def next_if(variable, op, value, comp_type):
+                    # Boiler plate test
+                    if (
+                        isinstance(variable, comp_type)
+                        and isinstance(value, comp_type)
+                        and op(variable, value)
+                    ):
+                        return next
+
+                def next_if_numeric(variable, op, value):
+                    # Boiler plate test
+                    if (
+                        isnumber(variable)
+                        and isnumber(value)
+                        and op(variable, value)
+                    ):
+                        return next
     
                 def asl_choice_And():
                     if all(choose(ch) for ch in choice["And"]):
@@ -1103,92 +1094,52 @@ class StateEngine(object):
 
                 def asl_choice_BooleanEquals():
                     value = choice["BooleanEquals"]
-                    if (
-                        isinstance(variable, bool)
-                        and isinstance(value, bool)
-                        and variable == value
-                    ):
-                        return next
+                    return next_if(variable, operator.eq, value, bool)
 
                 def asl_choice_NumericEquals():
                     value = choice["NumericEquals"]
-                    if isnumber(variable) and isnumber(value) and variable == value:
-                        return next
+                    return next_if_numeric(variable, operator.eq, value)
 
                 def asl_choice_NumericGreaterThan():
                     value = choice["NumericGreaterThan"]
-                    if isnumber(variable) and isnumber(value) and variable > value:
-                        return next
+                    return next_if_numeric(variable, operator.gt, value)
 
                 def asl_choice_NumericGreaterThanEquals():
                     value = choice["NumericGreaterThanEquals"]
-                    if isnumber(variable) and isnumber(value) and variable >= value:
-                        return next
+                    return next_if_numeric(variable, operator.ge, value)
 
                 def asl_choice_NumericLessThan():
                     value = choice["NumericLessThan"]
-                    if isnumber(variable) and isnumber(value) and variable < value:
-                        return next
+                    return next_if_numeric(variable, operator.lt, value)
 
                 def asl_choice_NumericLessThanEquals():
                     value = choice["NumericLessThanEquals"]
-                    if isnumber(variable) and isnumber(value) and variable <= value:
-                        return next
+                    return next_if_numeric(variable, operator.le, value)
 
                 def asl_choice_StringEquals():
                     value = choice["StringEquals"]
-                    if (
-                        isinstance(variable, str)
-                        and isinstance(value, str)
-                        and variable == value
-                    ):
-                        return next
+                    return next_if(variable, operator.eq, value, str)
 
                 def asl_choice_CaseInsensitiveStringEquals():
                     # Not covered in ASL spec. but useful and trivial to handle.
                     value = choice["CaseInsensitiveStringEquals"]
-                    if (
-                        isinstance(variable, str)
-                        and isinstance(value, str)
-                        and variable.lower() == value.lower()
-                    ):
-                        return next
+                    return next_if(variable.lower(), operator.eq, value.lower(), str)
 
                 def asl_choice_StringGreaterThan():
                     value = choice["StringGreaterThan"]
-                    if (
-                        isinstance(variable, str)
-                        and isinstance(value, str)
-                        and variable > value
-                    ):
-                        return next
+                    return next_if(variable, operator.gt, value, str)
 
                 def asl_choice_StringGreaterThanEquals():
                     value = choice["StringGreaterThanEquals"]
-                    if (
-                        isinstance(variable, str)
-                        and isinstance(value, str)
-                        and variable >= value
-                    ):
-                        return next
+                    return next_if(variable, operator.ge, value, str)
 
                 def asl_choice_StringLessThan():
                     value = choice["StringLessThan"]
-                    if (
-                        isinstance(variable, str)
-                        and isinstance(value, str)
-                        and variable < value
-                    ):
-                        return next
+                    return next_if(variable, operator.lt, value, str)
 
                 def asl_choice_StringLessThanEquals():
                     value = choice["StringLessThanEquals"]
-                    if (
-                        isinstance(variable, str)
-                        and isinstance(value, str)
-                        and variable <= value
-                    ):
-                        return next
+                    return next_if(variable, operator.le, value, str)
 
                 """
                 The ASL spec. is a little vague on timestamps. The approach we
@@ -1623,35 +1574,18 @@ class StateEngine(object):
             data = event["data"]
 
             # Retrieve the index, input, length, etc. info for the current branch.
-            branch_info = context["State"]["Branch"][-1]
+            branch_info = context["State"]["Branch"][-1]  # Top of stack (last item)
             index = branch_info["Index"]
 
-            #current_state = parent_state
-            current_state = branch_info["Parent"]  # This gives the correct parent
+            current_state = branch_info["Parent"]  # Get parent info from "stack"
 
-            state = apply_jsonpath(ASL["States"], "$.." + current_state)
-            #state = parent
+            state, current_state_machine = find_state(ASL["States"], current_state)
+            if state == None:  # state should be valid by this point
+                self.log_and_drop("State {} does not exist", current_state, id)
+                return
+
             previous_state_type = state_type
             state_type = state["Type"]
-
-            """
-            print("asl_state_collect_results")
-            print("parent_state")
-            #print(parent_state)
-            print(branch_info["Parent"])
-            print(previous_state_type)
-            print(state_type)
-            
-            #print()
-            #print(event)
-            #print()
-            #print(state)
-            #print(data)
-            #print()
-            print("index = " + str(index))
-            print("id = " + str(id))
-            print()
-            """
 
             execution_arn = context["Execution"]["Id"]
             # Initialise branch_results if necessary
@@ -1659,9 +1593,9 @@ class StateEngine(object):
                 self.branch_results[execution_arn] = {}
             if not current_state in self.branch_results[execution_arn]:
                 length = 0
-                if "Branches" in state:
+                if "Branches" in state:  # Parallel
                     length = len(state["Branches"])
-                else:
+                else:  # Map
                     length = branch_info["Length"]
                 #print("length")
                 #print(length)
@@ -1673,7 +1607,7 @@ class StateEngine(object):
 
             """
             Record the event id so we can acknowledge the event when the
-            results from all branches have been returned.
+            results from all branches have eventually been returned.
             """
             branch_results = self.branch_results[execution_arn][current_state]
             result = branch_results["results"]
@@ -1710,9 +1644,7 @@ class StateEngine(object):
             delete "Branch" from context as we've finished with it.
             """
             del context["State"]["Branch"][-1]
-            #print(context["State"]["Branch"])
             if len(context["State"]["Branch"]) == 0:
-                #print('**** deleting context["State"]["Branch"] ****')
                 del context["State"]["Branch"]
 
             context["State"]["Name"] = current_state
