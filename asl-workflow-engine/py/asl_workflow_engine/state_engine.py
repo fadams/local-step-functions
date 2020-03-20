@@ -1079,115 +1079,85 @@ class StateEngine(object):
                         and op(variable, value)
                     ):
                         return next
+
+                def next_if_timestamp(variable, op, value):
+                    """
+                    Boiler plate test. The ASL spec. is a little vague on
+                    timestamps. The approach we take here is to parse the
+                    rfc3339 string into an epoch timestamp and perform the
+                    comparisons on those. The thinking with that is because
+                    different rfc3339 representations can resolve to the
+                    same actual time e.g. a representation in Zulu or local
+                    time plus offset can both refer to the same time.
+                    """
+                    variable = parse_rfc3339_datetime(variable).timestamp()
+                    value = parse_rfc3339_datetime(value).timestamp()
+                    if op(variable, value):
+                        return next
     
-                def asl_choice_And():
-                    if all(choose(ch) for ch in choice["And"]):
+                def asl_choice_And(value):
+                    if all(choose(ch) for ch in value):
                         return next
 
-                def asl_choice_Or():
-                    if any(choose(ch) for ch in choice["Or"]):
+                def asl_choice_Or(value):
+                    if any(choose(ch) for ch in value):
                         return next
 
-                def asl_choice_Not():
-                    if (not choose(choice["Not"])):
+                def asl_choice_Not(value):
+                    if (not choose(value)):
                         return next
 
-                def asl_choice_BooleanEquals():
-                    value = choice["BooleanEquals"]
+                def asl_choice_BooleanEquals(value):
                     return next_if(variable, operator.eq, value, bool)
 
-                def asl_choice_NumericEquals():
-                    value = choice["NumericEquals"]
+                def asl_choice_NumericEquals(value):
                     return next_if_numeric(variable, operator.eq, value)
 
-                def asl_choice_NumericGreaterThan():
-                    value = choice["NumericGreaterThan"]
+                def asl_choice_NumericGreaterThan(value):
                     return next_if_numeric(variable, operator.gt, value)
 
-                def asl_choice_NumericGreaterThanEquals():
-                    value = choice["NumericGreaterThanEquals"]
+                def asl_choice_NumericGreaterThanEquals(value):
                     return next_if_numeric(variable, operator.ge, value)
 
-                def asl_choice_NumericLessThan():
-                    value = choice["NumericLessThan"]
+                def asl_choice_NumericLessThan(value):
                     return next_if_numeric(variable, operator.lt, value)
 
-                def asl_choice_NumericLessThanEquals():
-                    value = choice["NumericLessThanEquals"]
+                def asl_choice_NumericLessThanEquals(value):
                     return next_if_numeric(variable, operator.le, value)
 
-                def asl_choice_StringEquals():
-                    value = choice["StringEquals"]
+                def asl_choice_StringEquals(value):
                     return next_if(variable, operator.eq, value, str)
 
-                def asl_choice_CaseInsensitiveStringEquals():
+                def asl_choice_CaseInsensitiveStringEquals(value):
                     # Not covered in ASL spec. but useful and trivial to handle.
-                    value = choice["CaseInsensitiveStringEquals"]
                     return next_if(variable.lower(), operator.eq, value.lower(), str)
 
-                def asl_choice_StringGreaterThan():
-                    value = choice["StringGreaterThan"]
+                def asl_choice_StringGreaterThan(value):
                     return next_if(variable, operator.gt, value, str)
 
-                def asl_choice_StringGreaterThanEquals():
-                    value = choice["StringGreaterThanEquals"]
+                def asl_choice_StringGreaterThanEquals(value):
                     return next_if(variable, operator.ge, value, str)
 
-                def asl_choice_StringLessThan():
-                    value = choice["StringLessThan"]
+                def asl_choice_StringLessThan(value):
                     return next_if(variable, operator.lt, value, str)
 
-                def asl_choice_StringLessThanEquals():
-                    value = choice["StringLessThanEquals"]
+                def asl_choice_StringLessThanEquals(value):
                     return next_if(variable, operator.le, value, str)
 
-                """
-                The ASL spec. is a little vague on timestamps. The approach we
-                take here is to parse the rfc3339 string into an epoch timestamp
-                and perform the comparisons on those. The thinking with that
-                is because different rfc3339 representations can resolve to the
-                same actual time e.g. a representation in Zulu or local time
-                plus offset can both refer to the same time.
-                """
-                def asl_choice_TimestampEquals():
-                    timestamp = parse_rfc3339_datetime(variable).timestamp()
-                    value = parse_rfc3339_datetime(
-                        choice["TimestampEquals"]
-                    ).timestamp()
-                    if timestamp == value:
-                        return next
+                def asl_choice_TimestampEquals(value):
+                    return next_if_timestamp(variable, operator.eq, value)
 
-                def asl_choice_TimestampGreaterThan():
-                    timestamp = parse_rfc3339_datetime(variable).timestamp()
-                    value = parse_rfc3339_datetime(
-                        choice["TimestampGreaterThan"]
-                    ).timestamp()
-                    if timestamp > value:
-                        return next
+                def asl_choice_TimestampGreaterThan(value):
+                    return next_if_timestamp(variable, operator.gt, value)
 
-                def asl_choice_TimestampGreaterThanEquals():
-                    timestamp = parse_rfc3339_datetime(variable).timestamp()
-                    value = parse_rfc3339_datetime(
-                        choice["TimestampGreaterThanEquals"]
-                    ).timestamp()
-                    if timestamp >= value:
-                        return next
+                def asl_choice_TimestampGreaterThanEquals(value):
+                    return next_if_timestamp(variable, operator.ge, value)
 
-                def asl_choice_TimestampLessThan():
-                    timestamp = parse_rfc3339_datetime(variable).timestamp()
-                    value = parse_rfc3339_datetime(
-                        choice["TimestampLessThan"]
-                    ).timestamp()
-                    if timestamp < value:
-                        return next
+                def asl_choice_TimestampLessThan(value):
+                    return next_if_timestamp(variable, operator.lt, value)
 
-                def asl_choice_TimestampLessThanEquals():
-                    timestamp = parse_rfc3339_datetime(variable).timestamp()
-                    value = parse_rfc3339_datetime(
-                        choice["TimestampLessThanEquals"]
-                    ).timestamp()
-                    if timestamp <= value:
-                        return next
+                def asl_choice_TimestampLessThanEquals(value):
+                    return next_if_timestamp(variable, operator.le, value)
 
                 for key in choice:
                     """
@@ -1195,7 +1165,9 @@ class StateEngine(object):
                     use that to dynamically invoke the appropriate choice handler.
                     """
                     try:
-                        next_state = locals().get("asl_choice_" + key, lambda: None)()
+                        next_state = locals().get(
+                            "asl_choice_" + key, lambda: None
+                        )(choice[key])
                     except Exception:
                         next_state = None
 
