@@ -1409,20 +1409,39 @@ class StateEngine(object):
 
             branches = state.get("Branches", [])
             for index, branch in enumerate(branches):
-                context_state["Name"] = branch.get("StartAt")
-                context_state["EnteredTime"] = (
-                    datetime.now(timezone.utc).astimezone().isoformat()
-                )
-                context_state["Branch"][-1] = {
+                event["data"] = parameters
+                branch_info = {
                     "Parent": current_state,
                     "Input": data,  # Save the raw input to the Parallel state
                     "Index": index, # Index of the current branch
                 }
 
-                event["data"] = parameters
+                context_state["Name"] = branch.get("StartAt")
+                context_state["EnteredTime"] = (
+                    datetime.now(timezone.utc).astimezone().isoformat()
+                )
+                context_state["Branch"][-1] = branch_info
+
                 self.event_dispatcher.publish(event)
 
             self.event_dispatcher.acknowledge(id)
+
+        def get_start_index(context):
+            """
+            Boilerplate to retrieve the "Start" index of the Map Iterator. This
+            field is used in the implementation of MaxConcurrency. The idea is
+            when we process the Map state we launch MaxConcurrency child state
+            machine executions and when those complete we re-enter the Map state
+            and process the next block of MaxConcurrency, and so on. The "Start"
+            field, if present, holds the index of the start of the next block
+            to be processed. The "Branch" metadata is a list so we can handle
+            the case of nested Map and Parallel states.
+            """
+            start = 0
+            context_state = context["State"]
+            if "Branch" in context_state and len(context_state["Branch"]):
+                start = context_state["Branch"][-1].get("Start", 0)
+            return start
 
         def asl_state_Map():
             """
@@ -1455,7 +1474,13 @@ class StateEngine(object):
             if not isinstance(items_path, list):
                 items_path = []
 
+            length = len(items_path)
+
             """
+            A Map State MUST contain an object field named “Iterator” which MUST
+            contain fields named “States” and “StartAt”, whose meanings are
+            exactly like those in the top level of a State Machine.
+
             The “Iterator” field’s value is an object that defines a state
             machine which will process each element of the array.
             """
@@ -1465,7 +1490,9 @@ class StateEngine(object):
             The “MaxConcurrency” field’s value is an integer that provides an
             upper bound on how many invocations of the Iterator may run in parallel.
             """
-            max_concurrency = state.get("MaxConcurrency", {})
+            max_concurrency = state.get("MaxConcurrency", 0)
+            if max_concurrency == 0:
+                max_concurrency = length
 
             """
             Save these values from the Map state. We want to use these values
@@ -1476,25 +1503,45 @@ class StateEngine(object):
             map_state_entered = context_state["EnteredTime"]
 
             """
-            A Map State MUST contain an object field named “Iterator” which MUST
-            contain fields named “States” and “StartAt”, whose meanings are
-            exactly like those in the top level of a State Machine.
-
             Iterate through the items_path and launch each item's State Machine.
             The index and value of each item is needed to evaluate the parameter,
             so we store it in the "Map" field of the context as described in the
             AWS documentation for the context object.
             https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
+
             Also, like the Parallel state, the index of each branch and the Map
             state's raw input is needed to create the final result, so we again
             add a "Branch" field to the "State" object in the context.
+
+            The start variable is used with MaxConcurrency. We collect results
+            for each "block" of MaxConcurrency results and when all have been
+            returned we publish a new event to re-enter the Map state, with a
+            start incremented by MaxConcurrency. We carry on collecting
+            blocks of MaxConcurrency and re-entering the Map state with updated
+            start until we have finished processing all items in items_path.
             """
             if not "Branch" in context_state:
                 context_state["Branch"] = []
-            context_state["Branch"].append({})
 
-            length = len(items_path)
-            for index, item in enumerate(items_path):
+            start = get_start_index(context)
+            if start == 0:
+                context_state["Branch"].append({})
+
+            end = min(start + max_concurrency, length)
+
+
+            #print("----------")
+            #print("asl_state_Map()")
+
+            """
+            Need to iterate through the items_path list between start and end
+            indices and also retrieve the current index. This is quite fiddly
+            in Python when compared to doing similar in lower level languages. 
+            https://stackoverflow.com/questions/34384523/how-can-loop-through-a-list-from-a-certain-index
+            """
+            for index, item in enumerate(items_path[start:end], start=start):
+                #print(index)
+
                 """
                 Ensure the context evaluated by the parameter evaluation is
                 that of the parent Map state not the new Iterator StartAt state.
@@ -1519,20 +1566,25 @@ class StateEngine(object):
                 del context["Map"]  # Delete after parameters have been processed
 
                 event["data"] = parameters
+                branch_info = {
+                    "Parent": current_state,
+                    "Input": data,     # Save the raw input to the Map state
+                    "Index": index,    # Index of the current branch
+                    "Length": length,  # Number of branches/Iterator instances
+                }
+                if start:
+                    branch_info["Start"] = start
 
-                # Update the context for the new Iterator StartAt state.
                 context_state["Name"] = iterator.get("StartAt")
                 context_state["EnteredTime"] = (
                     datetime.now(timezone.utc).astimezone().isoformat()
                 )
-                context_state["Branch"][-1] = {
-                    "Parent": current_state,
-                    "Input": data,     # Save the raw input to the Parallel state
-                    "Index": index,    # Index of the current branch
-                    "Length": length,  # Number of branches/Iterator instances
-                }
+                context_state["Branch"][-1] = branch_info
 
                 self.event_dispatcher.publish(event)
+
+
+            #print("----------")
 
             self.event_dispatcher.acknowledge(id)
 
@@ -1564,13 +1616,10 @@ class StateEngine(object):
             if not execution_arn in self.branch_results:
                 self.branch_results[execution_arn] = {}
             if not current_state in self.branch_results[execution_arn]:
-                length = 0
                 if "Branches" in state:  # Parallel
                     length = len(state["Branches"])
                 else:  # Map
                     length = branch_info["Length"]
-                #print("length")
-                #print(length)
 
                 self.branch_results[execution_arn][current_state] = {
                     "results": [None]*length,
@@ -1588,19 +1637,42 @@ class StateEngine(object):
             if previous_state_type != "Parallel" and previous_state_type != "Map":
                 event_ids[index] = id
 
-            # print(result)
-
+            #print("asl_state_collect_results")
+            #print(result)
+            
+            #print("----------")
+            #print(context["State"]["Branch"])
+            #print("----------")
 
             """
-            print("----------")
-            print(context["State"]["Branch"])
-            print("----------")
+            If we haven't yet received the results from all branches check if
+            MaxConcurrency has been set and if it has check if we've received
+            all of the results for the current block of MaxConcurrency. If we
+            haven't then simply return, but if we have then create and publish
+            an event to re-enter the Map state with an updated "Start" index
+            in order to process the next block of MaxConcurrency.
             """
-
-
-            # Return if we haven't yet received the results from all branches
             if None in result:
+                max_concurrency = state.get("MaxConcurrency", 0)
+                if max_concurrency:
+                    start = branch_info.get("Start", 0)
+                    end = min(start + max_concurrency, len(result))
+
+                    partial = result[start:end]
+                    if not None in partial:
+                        """
+                        If we've got all results for a batch of max_concurrency
+                        send an event to re-enter the Map state and trigger
+                        processing of the next batch.
+                        """
+                        event["data"] = branch_info["Input"]  # Get saved raw input
+                        context["State"]["Name"] = current_state
+                        context["State"]["Branch"][-1] = {"Start": end}
+
+                        self.event_dispatcher.publish(event)
+
                 return
+
 
             # Parallel and Map states apply ResultPath to "raw input"
             data = branch_info["Input"]  # Get saved raw input
@@ -1647,13 +1719,17 @@ class StateEngine(object):
 
 
         """
-        Update the execution history with StateEntered information. The test for
-        RetryCount is because when we trigger a retry we do so by publishing
+        Update the execution history with StateEntered information. The test
+        for RetryCount is because when we trigger a retry we do so by publishing
         an event to the message queue that triggers a transition back to the
-        state being retried, but as this represents a retry and not an actual
+        state being retried, but as this represents a *retry* and not an actual
         entry to the state we want to suppress the history update.
+        Similarly, the test for reentered_map is because if MaxConcurrency is
+        set we will re-enter the Map state, possibly several times, to process
+        the next batch of items so again we want to suppress the history update.
         """
-        if not context["State"].get("RetryCount"):
+        reentered_map = state_type == "Map" and get_start_index(context) != 0
+        if not context["State"].get("RetryCount") and not reentered_map:
             self.update_execution_history(
                 context["Execution"]["Id"],
                 state_type + "StateEntered",
