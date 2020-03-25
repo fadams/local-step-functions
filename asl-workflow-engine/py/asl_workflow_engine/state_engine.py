@@ -100,6 +100,8 @@ def find_state(current_state_machine, current_state):
 
 
 """
+NOTE!!! this train of thought is going to be replaced by a Redis backed dict
+
 TODO move ReplicatedDict to its own file and start to look at actual
 replication. Current train of thought is to use messaging fabric such that
 updates are published as messages and all servers in the cluster subscribe
@@ -1243,6 +1245,21 @@ class StateEngine(object):
                     self.event_dispatcher.acknowledge(id)
 
             """
+            Calculate the difference between supplied rfc3339 and current time.
+            """
+            def get_timeout_from_rfc3339_datetime(rfc3339):
+                try:
+                    target_timestamp = parse_rfc3339_datetime(rfc3339).timestamp()
+                    current_timestamp = time.time()
+                    return (target_timestamp - current_timestamp) * 1000
+                except ValueError as e:
+                    self.logger.warning(
+                        "timestamp {} failed to parse correctly, "
+                        "defaulting to zero delay".format(rfc3339)
+                    )
+                    return 0
+
+            """
             The time can be specified as a wait duration, specified in seconds,
             or an absolute expiry time, specified as an ISO-8601 extended offset
             date-time format string.
@@ -1282,30 +1299,10 @@ class StateEngine(object):
                 current_timestamp = time.time()
                 timeout = (state_timestamp + seconds - current_timestamp) * 1000
             elif timestamp:
-                try:
-                    target_timestamp = parse_rfc3339_datetime(timestamp).timestamp()
-                    current_timestamp = time.time()
-                    timeout = (target_timestamp - current_timestamp) * 1000
-                except ValueError as e:
-                    self.logger.warning(
-                        "timestamp {} failed to parse correctly, defaulting to zero delay".format(
-                            timestamp
-                        )
-                    )
-                    timeout = 0
+                timeout = get_timeout_from_rfc3339_datetime(timestamp)
             elif timestamp_path:
                 timestamp = apply_jsonpath(input, timestamp_path)
-                try:
-                    target_timestamp = parse_rfc3339_datetime(timestamp).timestamp()
-                    current_timestamp = time.time()
-                    timeout = (target_timestamp - current_timestamp) * 1000
-                except ValueError as e:
-                    self.logger.warning(
-                        "timestamp {} failed to parse correctly, defaulting to zero delay".format(
-                            timestamp
-                        )
-                    )
-                    timeout = 0
+                timeout = get_timeout_from_rfc3339_datetime(timestamp)
 
             """
             Schedule the timeout. This is slightly subtle, the idea is that

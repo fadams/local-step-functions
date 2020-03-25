@@ -170,10 +170,10 @@ class TestWaitState(unittest.TestCase):
     def test_seconds_path(self):
         self.event_dispatcher.dispatch('{"data": {"test": 2, "delay":15}, "context": ' + context + '}')
     
-    def test_timeout(self):
+    def test_timestamp(self):
         self.event_dispatcher.dispatch('{"data": {"test": 3}, "context": ' + context + '}')
     
-    def test_timeout_path(self):
+    def test_timestamp_path(self):
         delta = timedelta(seconds=10)
         time_now_plus_10s = (datetime.now(timezone.utc) + delta).astimezone().isoformat()
         self.event_dispatcher.dispatch('{"data": {"test": 4, "expiry":"' + time_now_plus_10s + '"}, "context": ' + context + '}')
