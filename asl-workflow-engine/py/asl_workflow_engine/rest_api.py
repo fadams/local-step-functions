@@ -133,6 +133,7 @@ class RestAPI(object):
 
         self.asl_cache = state_engine.asl_cache
         self.executions = state_engine.executions
+        self.execution_history = state_engine.execution_history
         self.event_dispatcher = event_dispatcher
 
     def create_app(self):
@@ -247,10 +248,14 @@ class RestAPI(object):
 
                 creation_date = time.time()
                 self.asl_cache[state_machine_arn] = {
-                    "name": name,
-                    "definition": definition,
                     "creationDate": creation_date,
+                    "definition": definition,
+                    "name": name,
                     "roleArn": role_arn,
+                    "stateMachineArn": state_machine_arn,
+                    "updateDate": creation_date,
+                    "status": "ACTIVE",
+                    "type": "STANDARD",
                 }
 
                 resp = {
@@ -267,17 +272,21 @@ class RestAPI(object):
                 # TODO handle nextToken stuff
                 next_token = ""
 
+                """
+                Populate response using list and dict comprehensions
+                https://www.pythonforbeginners.com/basics/list-comprehensions-in-python
+                https://stackoverflow.com/questions/5352546/extract-subset-of-key-value-pairs-from-python-dictionary-object
+                """
+                state_machines = [
+                    {
+                        k1: v[k1] for k1 in ("creationDate", "name",
+                            "stateMachineArn", "type")
+                    }
+                    for k, v in self.asl_cache.items()
+                ]
+
                 resp = {
-                    # Populate using list comprehensions
-                    # https://www.pythonforbeginners.com/basics/list-comprehensions-in-python
-                    "stateMachines": [
-                        {
-                            "creationDate": v["creationDate"],
-                            "name": v["name"],
-                            "stateMachineArn": k,
-                        }
-                        for k, v in self.asl_cache.items()
-                    ]
+                    "stateMachines": state_machines
                 }
                 if next_token:
                     resp["nextToken"] = next_token
@@ -304,8 +313,8 @@ class RestAPI(object):
                     return "InvalidArn", 400
 
                 # Look up stateMachineArn
-                match = self.asl_cache.get(state_machine_arn)
-                if not match:
+                state_machine = self.asl_cache.get(state_machine_arn)
+                if not state_machine:
                     self.logger.info(
                         "RestAPI DescribeStateMachine: State Machine {} does not exist".format(
                             state_machine_arn
@@ -313,16 +322,7 @@ class RestAPI(object):
                     )
                     return "StateMachineDoesNotExist", 400
 
-                resp = {
-                    "creationDate": match["creationDate"],
-                    "definition": match["definition"],
-                    "name": match["name"],
-                    "roleArn": match["roleArn"],
-                    "stateMachineArn": state_machine_arn,
-                    "status": "ACTIVE",
-                }
-
-                return jsonify(resp), 200
+                return jsonify(state_machine), 200
 
             def aws_api_DescribeStateMachineForExecution():
                 """
@@ -344,8 +344,8 @@ class RestAPI(object):
                     return "InvalidArn", 400
 
                 # Look up executionArn
-                match = self.executions.get(execution_arn)
-                if not match:
+                execution = self.executions.get(execution_arn)
+                if not execution:
                     self.logger.info(
                         "RestAPI DescribeStateMachineForExecution: Execution {} does not exist".format(
                             execution_arn
@@ -353,7 +353,7 @@ class RestAPI(object):
                     )
                     return "ExecutionDoesNotExist", 400
 
-                state_machine_arn = match.get("stateMachineArn")
+                state_machine_arn = execution.get("stateMachineArn")
 
                 if not valid_state_machine_arn(state_machine_arn):
                     self.logger.warning(
@@ -364,8 +364,8 @@ class RestAPI(object):
                     return "InvalidArn", 400
 
                 # Look up stateMachineArn
-                match = self.asl_cache.get(state_machine_arn)
-                if not match:
+                state_machine = self.asl_cache.get(state_machine_arn)
+                if not state_machine:
                     self.logger.info(
                         "RestAPI DescribeStateMachineForExecution: State Machine {} does not exist".format(
                             state_machine_arn
@@ -374,11 +374,8 @@ class RestAPI(object):
                     return "StateMachineDoesNotExist", 400
 
                 resp = {
-                    "definition": match["definition"],
-                    "name": match["name"],
-                    "roleArn": match["roleArn"],
-                    "stateMachineArn": state_machine_arn,
-                    "updateDate": match["creationDate"],
+                    k: state_machine[k] for k in ("definition", "name", "roleArn",
+                        "stateMachineArn", "updateDate")
                 }
 
                 return jsonify(resp), 200
@@ -403,8 +400,8 @@ class RestAPI(object):
                     return "InvalidArn", 400
 
                 # Look up stateMachineArn
-                match = self.asl_cache.get(state_machine_arn)
-                if not match:
+                state_machine = self.asl_cache.get(state_machine_arn)
+                if not state_machine:
                     self.logger.info(
                         "RestAPI UpdateStateMachine: State Machine {} does not exist".format(
                             state_machine_arn
@@ -421,7 +418,7 @@ class RestAPI(object):
                             )
                         )
                         return "InvalidArn", 400
-                    match["roleArn"] = role_arn
+                    state_machine["roleArn"] = role_arn
 
                 if params.get("definition"):
                     try:
@@ -434,7 +431,7 @@ class RestAPI(object):
                             )
                         )
                     # TODO ASL Validator??
-                    match["definition"] = definition
+                    state_machine["definition"] = definition
 
                 if not role_arn and not definition:
                     self.logger.warning(
@@ -443,9 +440,9 @@ class RestAPI(object):
                     return "MissingRequiredParameter", 400
 
                 update_date = time.time()
-                match["creationDate"] = update_date
+                state_machine["updateDate"] = update_date
 
-                self.asl_cache[state_machine_arn] = match
+                self.asl_cache[state_machine_arn] = state_machine
 
                 resp = {"updateDate": update_date}
 
@@ -476,8 +473,8 @@ class RestAPI(object):
                     return "InvalidArn", 400
 
                 # Look up stateMachineArn
-                match = self.asl_cache.get(state_machine_arn)
-                if not match:
+                state_machine = self.asl_cache.get(state_machine_arn)
+                if not state_machine:
                     self.logger.info(
                         "RestAPI DeleteStateMachine: State Machine {} does not exist".format(
                             state_machine_arn
@@ -535,8 +532,8 @@ class RestAPI(object):
                     return "InvalidExecutionInput", 400
 
                 # Look up stateMachineArn
-                match = self.asl_cache.get(state_machine_arn)
-                if not match:
+                state_machine = self.asl_cache.get(state_machine_arn)
+                if not state_machine:
                     self.logger.info(
                         "RestAPI StartExecution: State Machine {} does not exist".format(
                             state_machine_arn
@@ -575,13 +572,13 @@ class RestAPI(object):
                             "Id": execution_arn,
                             "Input": input,
                             "Name": name,
-                            "RoleArn": match.get("roleArn"),
+                            "RoleArn": state_machine.get("roleArn"),
                             "StartTime": start_time,
                         },
                         "State": {"EnteredTime": start_time, "Name": ""},  # Start state
                         "StateMachine": {
                             "Id": state_machine_arn,
-                            "Name": match.get("name"),
+                            "Name": state_machine.get("name"),
                         },
                     }
 
@@ -619,8 +616,8 @@ class RestAPI(object):
                     return "InvalidArn", 400
 
                 # Look up stateMachineArn
-                match = self.asl_cache.get(state_machine_arn)
-                if not match:
+                state_machine = self.asl_cache.get(state_machine_arn)
+                if not state_machine:
                     self.logger.info(
                         "RestAPI ListExecutions: State Machine {} does not exist".format(
                             state_machine_arn
@@ -646,22 +643,23 @@ class RestAPI(object):
                 # TODO handle nextToken stuff
                 next_token = ""
 
+                """
+                Populate response using list and dict comprehensions
+                https://www.pythonforbeginners.com/basics/list-comprehensions-in-python
+                https://stackoverflow.com/questions/5352546/extract-subset-of-key-value-pairs-from-python-dictionary-object
+                """
+                executions = [
+                    {
+                        k1: v[k1] for k1 in ("executionArn", "name", "startDate",       
+                            "stateMachineArn", "status", "stopDate")
+                    }
+                    for k, v in self.executions.items()
+                    if v["stateMachineArn"] == state_machine_arn
+                    and (status_filter == None or v["status"] == status_filter)
+                ]
+
                 resp = {
-                    # Populate using list comprehensions
-                    # https://www.pythonforbeginners.com/basics/list-comprehensions-in-python
-                    "executions": [
-                        {
-                            "executionArn": k,
-                            "name": v.get("name"),
-                            "startDate": v.get("startDate"),
-                            "stateMachineArn": v.get("stateMachineArn"),
-                            "status": v.get("status"),
-                            "stopDate": v.get("stopDate"),
-                        }
-                        for k, v in self.executions.items()
-                        if v["stateMachineArn"] == state_machine_arn
-                        and (status_filter == None or v["status"] == status_filter)
-                    ]
+                    "executions": executions
                 }
                 if next_token:
                     resp["nextToken"] = next_token
@@ -688,8 +686,8 @@ class RestAPI(object):
                     return "InvalidArn", 400
 
                 # Look up executionArn
-                match = self.executions.get(execution_arn)
-                if not match:
+                execution = self.executions.get(execution_arn)
+                if not execution:
                     self.logger.info(
                         "RestAPI DescribeExecution: Execution {} does not exist".format(
                             execution_arn
@@ -697,18 +695,7 @@ class RestAPI(object):
                     )
                     return "ExecutionDoesNotExist", 400
 
-                resp = {
-                    "executionArn": execution_arn,
-                    "input": match["input"],
-                    "name": match["name"],
-                    "output": match["output"],
-                    "startDate": match["startDate"],
-                    "stateMachineArn": match["stateMachineArn"],
-                    "status": match["status"],
-                    "stopDate": match["stopDate"],
-                }
-
-                return jsonify(resp), 200
+                return jsonify(execution), 200
 
             def aws_api_GetExecutionHistory():
                 """
@@ -731,9 +718,11 @@ class RestAPI(object):
                     )
                     return "InvalidArn", 400
 
+                reverse_order = params.get("reverseOrder", False)
+
                 # Look up executionArn
-                match = self.executions.get(execution_arn)
-                if not match:
+                history = self.execution_history.get(execution_arn)
+                if not history:
                     self.logger.info(
                         "RestAPI GetExecutionHistory: Execution {} does not exist".format(
                             execution_arn
@@ -741,10 +730,17 @@ class RestAPI(object):
                     )
                     return "ExecutionDoesNotExist", 400
 
+                """
+                Reverse via slicing: [start:stop:step] so step is -1
+                https://stackoverflow.com/questions/3940128/how-can-i-reverse-a-list-in-python
+                """
+                if reverse_order:
+                    history = history[::-1]
+
                 # TODO handle nextToken stuff
                 next_token = ""
 
-                resp = {"events": match["history"]}
+                resp = {"events": history}
                 if next_token:
                     resp["nextToken"] = next_token
 

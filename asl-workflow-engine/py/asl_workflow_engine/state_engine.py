@@ -202,10 +202,16 @@ class StateEngine(object):
         self.asl_cache = ReplicatedDict(config["state_engine"]["asl_cache"])
 
         """
-        Holds information about the State Machine executions, that is to say
-        each Step Function, so that we can do things like get execution history.
+        Holds information required by the DescribeExecution API call.
+        https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html
         """
         self.executions = {}
+
+        """
+        Holds information required by the GetExecutionHistory API call.
+        https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html
+        """
+        self.execution_history = {}
 
         """
         Holds the results of Parallel state Branches or Map state Iterations.
@@ -251,10 +257,9 @@ class StateEngine(object):
         "input", "output" and other relevant information and provides the same
         information as the DescribeExecution API.
         """
-        
         # Look up executionArn
-        match = self.executions.get(execution_arn)
-        if not match:
+        detail = self.executions.get(execution_arn)
+        if not detail:
             self.logger.info(
                 "StateEngine: broadcast_notification: Execution {} does not exist".format(
                     execution_arn
@@ -262,25 +267,15 @@ class StateEngine(object):
             )
             return
 
-        detail = {
-            "executionArn": execution_arn,
-            "input": match["input"],
-            "name": match["name"],
-            "output": match["output"],
-            "startDate": match["startDate"],
-            "stateMachineArn": match["stateMachineArn"],
-            "status": match["status"],
-            "stopDate": match["stopDate"],
-        }
-
         arn = parse_arn(execution_arn)
         region=arn.get("region", "local")
         account=arn["account"]
 
-        # https://docs.aws.amazon.com/step-functions/latest/dg/cw-events.html
-        # https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/CloudWatchEventsandEventPatterns.html
-
-        # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
+        """
+        https://docs.aws.amazon.com/step-functions/latest/dg/cw-events.html
+        https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/CloudWatchEventsandEventPatterns.html
+        https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
+        """
         event_time = datetime.now(timezone.utc).astimezone().isoformat()
         cw_event = {
             "version": "0",  # By default, this is set to 0 (zero) in all events.
@@ -362,16 +357,21 @@ class StateEngine(object):
         if context["State"].get("EnteredTime") == None:
             context["State"]["EnteredTime"] = start_time
             
+        """
+        Populate the metadata required by the DescribeExecution API call.
+        https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html
+        """
         self.executions[execution["Id"]] = {
+            "executionArn": execution["Id"],
             "input": data,
-            "output": None,
             "name": execution["Name"],
+            "output": None,
             "startDate": time.time(),
-            "stopDate": None,
             "stateMachineArn": state_machine_id,
             "status": "RUNNING",
-            "history": [],
+            "stopDate": None,
         }
+        self.execution_history[execution["Id"]] = []
         self.update_execution_history(
             execution["Id"],
             "ExecutionStarted",
@@ -423,7 +423,7 @@ class StateEngine(object):
             child_of=span_context("text_map", context.get("Tracer", {}), self.logger),
             tags={
                 "component": "state_engine",
-                "execution_arn": context["Execution"]["Id"]
+                "execution_arn": execution_arn
             }
         ) as scope:
             if isinstance(data, dict) and data.get("Error"):
@@ -479,17 +479,22 @@ class StateEngine(object):
             name = split[2]
 
             self.executions[execution_arn] = {
+                "executionArn": execution_arn,
                 "input": None,
-                "output": None,
                 "name": name,
+                "output": None,
                 "startDate": time.time(),
-                "stopDate": None,
                 "stateMachineArn": state_machine_arn,
                 "status": "RUNNING",
-                "history": []
+                "stopDate": None,
             }
+            self.execution_history[execution_arn] = []
 
-        history = self.executions[execution_arn]["history"]
+        history = self.execution_history[execution_arn]
+        """
+        Events are numbered sequentially, starting at one.
+        https://docs.aws.amazon.com/step-functions/latest/apireference/API_HistoryEvent.html
+        """
         id = len(history) + 1
         if "StateEntered" in update_type:
             details_type = "stateEnteredEventDetails"
@@ -584,11 +589,16 @@ class StateEngine(object):
         """
         if "Definition" in state_machine:
             arn = parse_arn(state_machine_id)
+            creation_date = time.time()
             self.asl_cache[state_machine_id] = {
-                "name": arn["resource"],
+                "creationDate": creation_date,
                 "definition": state_machine["Definition"],
-                "creationDate": time.time(),
+                "name": arn["resource"],
                 "roleArn": "arn:aws:iam:::role/dummy-role/dummy",
+                "stateMachineArn": state_machine_id,
+                "updateDate": creation_date,
+                "status": "ACTIVE",
+                "type": "STANDARD",
             }
             del state_machine["Definition"]
 
