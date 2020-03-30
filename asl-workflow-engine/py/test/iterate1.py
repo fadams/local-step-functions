@@ -24,9 +24,9 @@ This test illustrates the case of passing an array of data to a Step Function
 and iterating through the array, triggering execution of a child Step Function
 for each item in the array.
 
-Note that this use case is possibly one that would fit better into the new ASL
-Map state, however that has not yet been implemented in this ASL engine, but
-also the Map state provides most benefit when calling out to Tasks that might
+Note that this use case is one that would fit better into the new ASL Map state
+
+The Map state provides most benefit when calling out to Tasks that might
 take some time as iterating rather than running in parallel clearly results
 in cumulative time. Map states also excel where one wishes to "join" the results
 and rejoin the original state machine. When one just wishes to trigger a child

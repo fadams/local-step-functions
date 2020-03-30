@@ -1527,18 +1527,14 @@ class StateEngine(object):
             blocks of MaxConcurrency and re-entering the Map state with updated
             start until we have finished processing all items in items_path.
             """
-            if not "Branch" in context_state:
+            if length and not "Branch" in context_state:
                 context_state["Branch"] = []
 
             start = get_start_index(context)
-            if start == 0:
+            if length and start == 0:
                 context_state["Branch"].append({})
 
             end = min(start + max_concurrency, length)
-
-
-            #print("----------")
-            #print("asl_state_Map()")
 
             """
             Need to iterate through the items_path list between start and end
@@ -1547,30 +1543,37 @@ class StateEngine(object):
             https://stackoverflow.com/questions/34384523/how-can-loop-through-a-list-from-a-certain-index
             """
             for index, item in enumerate(items_path[start:end], start=start):
-                #print(index)
-
                 """
                 Ensure the context evaluated by the parameter evaluation is
                 that of the parent Map state not the new Iterator StartAt state.
                 """
                 context_state["Name"] = map_state_name
                 context_state["EnteredTime"] = map_state_entered
-                # Store the index and value in the context as described above.
-                context["Map"] = {
-                    "Item": {
-                        "Index": index,
-                        "Value": item,
-                    },
-                }
 
-                """
-                https://states-language.net/spec.html#parameters
+                params = state.get("Parameters")
+                if params:
+                    # Store the index and value in the context as described above.
+                    context["Map"] = {
+                        "Item": {
+                            "Index": index,
+                            "Value": item,
+                        },
+                    }
 
-                If the “Parameters” field is provided, its value, after the
-                extraction and embedding, becomes the effective input.
-                """
-                parameters = evaluate_parameters(input, context, state.get("Parameters"))
-                del context["Map"]  # Delete after parameters have been processed
+                    """
+                    https://states-language.net/spec.html#parameters
+
+                    If the “Parameters” field is provided, its value, after the
+                    extraction and embedding, becomes the effective input.
+                    """
+                    parameters = evaluate_parameters(input, context, params)
+                    del context["Map"]  # Delete after parameters have been processed
+                else:
+                    """
+                    If no parameters are supplied the effective input to the
+                    iteration is the current item i.e $$.Map.Item.Value
+                    """
+                    parameters = item
 
                 event["data"] = parameters
                 branch_info = {
@@ -1590,10 +1593,29 @@ class StateEngine(object):
 
                 self.event_dispatcher.publish(event)
 
+            """
+            It's not clear what the correct course of action is when the
+            effective input is empty, as none of the documentation covers this.
+            Most likely the result is just an empty array, need to check though.
+            """
+            if length:
+                self.event_dispatcher.acknowledge(id)
+            else:
+                # Parallel and Map states apply ResultPath to "raw input"
+                result = []
+                output = apply_resultpath(
+                    data, result, state.get("ResultPath", "$")
+                )
+                event["data"] = apply_jsonpath(
+                    output, state.get("OutputPath", "$")
+                )
 
-            #print("----------")
+                if state.get("End"):
+                    handle_terminal_state(state_type, event, id)
+                else:
+                    self.change_state(state_type, state.get("Next"), event)
+                    self.event_dispatcher.acknowledge(id)
 
-            self.event_dispatcher.acknowledge(id)
 
         def asl_state_collect_results(state_type):
             """
