@@ -6,7 +6,7 @@ This alternative Dockerfile takes a slightly simpler approach, simply ADDing the
 ```
 FROM tomcat:9.0-slim
 
-ENV DRAW_VERSION v10.7.5
+ENV DRAW_VERSION v12.9.5
 ADD https://github.com/jgraph/drawio/releases/download/${DRAW_VERSION}/draw.war /usr/local/tomcat/webapps/ROOT.war
 
 RUN rm -rf /usr/local/tomcat/webapps/ROOT && rm -rf /var/lib/apt/lists/*
@@ -28,6 +28,6 @@ We're using the Step Functions Plugin found at https://github.com/sakazuki/step-
 
 1. Select Menu [Extras]-[Plugins]
 2. Click [Add]
-3. Input https://cdn.jsdelivr.net/gh/sakazuki/step-functions-draw.io@0.5.0/dist/aws-step-functions.js
+3. https://cdn.jsdelivr.net/gh/sakazuki/step-functions-draw.io@0.6.2/dist/aws-step-functions.js
 4. [Apply]
 5. Reload the page

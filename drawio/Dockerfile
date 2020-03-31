@@ -26,7 +26,7 @@
 
 FROM tomcat:9.0-slim
 
-ENV DRAW_VERSION v10.7.5
+ENV DRAW_VERSION v12.9.5
 ADD https://github.com/jgraph/drawio/releases/download/${DRAW_VERSION}/draw.war /usr/local/tomcat/webapps/ROOT.war
 
 RUN rm -rf /usr/local/tomcat/webapps/ROOT && rm -rf /var/lib/apt/lists/*
@@ -45,4 +45,4 @@ CMD ["catalina.sh", "run"]
 # http://localhost:8888
 #
 # step functions plugin at:
-# https://cdn.jsdelivr.net/gh/sakazuki/step-functions-draw.io@0.3.0/aws-step-functions.js
+# https://cdn.jsdelivr.net/gh/sakazuki/step-functions-draw.io@0.6.2/dist/aws-step-functions.js
