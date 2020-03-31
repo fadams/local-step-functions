@@ -98,6 +98,16 @@ def find_state(current_state_machine, current_state):
 
     return state, current_state_machine
 
+def merge_result(data, result, state, output_path=None):
+    """
+    Boiler plate to apply both ResultPath and OutputPath (or supplied output_path)
+    """
+    output = apply_resultpath(
+        data, result, state.get("ResultPath", "$")
+    )
+    output_path = output_path if output_path else state.get("OutputPath", "$")
+    return apply_jsonpath(output, output_path)
+
 
 """
 NOTE!!! this train of thought is going to be replaced by a Redis backed dict
@@ -813,16 +823,12 @@ class StateEngine(object):
                         A Catcher MAY have an “ResultPath” field, which works
                         exactly like a state’s top-level “ResultPath”, and
                         may be used to inject the Error Output into the
-                        state’s original input to create the input for the
+                        state’s original raw input to create the input for the
                         Catcher’s “Next” state. The default value, if the
                         “ResultPath” field is not provided, is “$”, meaning
                         that the output consists entirely of the Error Output. 
                         """
-                        # Catcher applies ResultPath to "raw input"
-                        output = apply_resultpath(
-                            data, result, catcher.get("ResultPath", "$")
-                        )
-                        event["data"] = apply_jsonpath(output, "$")
+                        event["data"] = merge_result(data, result, catcher, "$")
 
                         self.change_state(state_type, catcher.get("Next"), event)
                         break
@@ -901,12 +907,7 @@ class StateEngine(object):
 
             try:
                 # Pass state applies ResultPath to "raw input"
-                output = apply_resultpath(
-                    data, result, state.get("ResultPath", "$")
-                )
-                event["data"] = apply_jsonpath(
-                    output, state.get("OutputPath", "$")
-                )
+                event["data"] = merge_result(data, result, state)
 
                 if state.get("End"):
                     handle_terminal_state(state_type, event, id)
@@ -950,12 +951,7 @@ class StateEngine(object):
                 else:  # No error
                     try:
                         # Task state applies ResultPath to "raw input"
-                        output = apply_resultpath(
-                            data, result, state.get("ResultPath", "$")
-                        )
-                        event["data"] = apply_jsonpath(
-                            output, state.get("OutputPath", "$")
-                        )
+                        event["data"] = merge_result(data, result, state)
 
                         if state.get("End"):
                             handle_terminal_state(state_type, event, id)
@@ -1355,15 +1351,13 @@ class StateEngine(object):
             operational, or diagnostic purposes. A Fail State MUST have a string
             field named “Cause”, used to provide a human-readable message.
 
-            The spec. doesn't specify what happens if those fields are not set.
+            Fail states don't allow InputPath, OutputPath or ResultPath
             """
-            error = {
+            event["data"] = {
                 "Error": state.get("Error", "Unspecified"),
                 "Cause": state.get("Cause", "Unspecified"),
             }
 
-            # Fail states don't allow InputPath, OutputPath or ResultPath
-            event["data"] = error
             handle_terminal_state(state_type, event, id)
 
         def asl_state_Parallel():
@@ -1603,12 +1597,7 @@ class StateEngine(object):
             else:
                 # Parallel and Map states apply ResultPath to "raw input"
                 result = []
-                output = apply_resultpath(
-                    data, result, state.get("ResultPath", "$")
-                )
-                event["data"] = apply_jsonpath(
-                    output, state.get("OutputPath", "$")
-                )
+                event["data"] = merge_result(data, result, state)
 
                 if state.get("End"):
                     handle_terminal_state(state_type, event, id)
@@ -1705,12 +1694,7 @@ class StateEngine(object):
 
             # Parallel and Map states apply ResultPath to "raw input"
             data = branch_info["Input"]  # Get saved raw input
-            output = apply_resultpath(
-                data, result, state.get("ResultPath", "$")
-            )
-            event["data"] = apply_jsonpath(
-                output, state.get("OutputPath", "$")
-            )
+            event["data"] = merge_result(data, result, state)
 
             """
             Remove last item from the "Branch" list, then if it becomes empty
