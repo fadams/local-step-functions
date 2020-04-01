@@ -21,16 +21,39 @@
 # our needs, especially when there are packaged releases of the war file at
 # https://github.com/jgraph/drawio/releases.
 #
-# This Dockerfile takes a slightly simpler approach, simply ADDing the draw.war
-# as ROOT.war into a tomcat container.
 
 FROM tomcat:9.0-slim
 
 ENV DRAW_VERSION v12.9.5
-ADD https://github.com/jgraph/drawio/releases/download/${DRAW_VERSION}/draw.war /usr/local/tomcat/webapps/ROOT.war
+ENV STEP_FUNCTIONS_PLUGIN_VERSION 0.6.2
 
-RUN rm -rf /usr/local/tomcat/webapps/ROOT && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive \
+    apt-get install -y --no-install-recommends \
+    curl && \
+    # Change permission so Tomcat can start as non-root user
+    chmod 777 /usr/local/tomcat/conf && \
+    # Install draw.io
+    cd /usr/local/tomcat/webapps/ROOT && rm -rf * && \
+    curl -O -sSL https://github.com/jgraph/drawio/releases/download/${DRAW_VERSION}/draw.war && \
+    jar xvf draw.war && rm draw.war && \
+    # Install the step-functions-draw.io plugin
+    cd plugins && \
+    curl -O -sSL https://cdn.jsdelivr.net/gh/sakazuki/step-functions-draw.io@${STEP_FUNCTIONS_PLUGIN_VERSION}/dist/aws-step-functions.js && \
+    # Hack/patch the draw.io App.pluginRegistry in
+    # /js/app.min.js to add the aws-step-functions plugin to
+    # the registry, so that it can be run with &p=sfn as per 
+    # https://desk.draw.io/support/solutions/articles/16000056430-what-plugins-are-available-
+    # The patch method is described in this article.
+    # https://groups.google.com/forum/#!topic/drawio/ZFwk6hWGs74
+    sed -i 's/"\/plugins\/tags.js"/"\/plugins\/tags.js",sfn:"\/plugins\/aws-step-functions.js"/g' /usr/local/tomcat/webapps/ROOT/js/app.min.js && \
+    sed -i 's/var mxIsElectron/var plugins = "\?p=sfn";\n\t\tif (window.location.search !== plugins) {window.location.replace("index.html"+plugins);}\n\t\tvar mxIsElectron/g' /usr/local/tomcat/webapps/ROOT/index.html && \
+    # Tidy up
+    apt-get clean && \
+    apt-get purge -y curl && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
 
+USER 1001
 CMD ["catalina.sh", "run"]
 
 #-------------------------------------------------------------------------------
@@ -46,3 +69,4 @@ CMD ["catalina.sh", "run"]
 #
 # step functions plugin at:
 # https://cdn.jsdelivr.net/gh/sakazuki/step-functions-draw.io@0.6.2/dist/aws-step-functions.js
+
