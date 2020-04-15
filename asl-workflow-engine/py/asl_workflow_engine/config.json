@@ -29,5 +29,11 @@
             },
             "logging": false
         }
+    },
+    "metrics": {
+        "implementation": "Prometheus",
+        "config": {
+            "port": 9091
+        }
     }
 }

@@ -33,6 +33,7 @@ assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 import json, os
 import threading  # Run REST API in its own thread
 from asl_workflow_engine.logger import init_logging
+from asl_workflow_engine.metrics import init_metrics
 from asl_workflow_engine.open_tracing_factory import create_tracer
 from asl_workflow_engine.state_engine import StateEngine
 from asl_workflow_engine.event_dispatcher import EventDispatcher
@@ -70,6 +71,7 @@ class WorkflowEngine(object):
         config["state_engine"] = config.get("state_engine", {})
         config["rest_api"] = config.get("rest_api", {})
         config["tracer"] = config.get("tracer", {})
+        config["metrics"] = config.get("metrics", {})
 
         """
         Override config values if a field is set as an environment variable.
@@ -110,6 +112,8 @@ class WorkflowEngine(object):
         # Initialise opentracing.tracer before creating the StateEngine,
         # EventDispatcher and RestAPIinstances.
         create_tracer("asl_workflow_engine", config["tracer"])
+
+        init_metrics("asl_workflow_engine", config["metrics"])
 
         state_engine = StateEngine(config)
         self.event_dispatcher = EventDispatcher(state_engine, config)

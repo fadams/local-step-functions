@@ -21,7 +21,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="asl_workflow_engine",
-    version="0.0.1",
+    version="0.0.5",
     description="A workflow engine based on Amazon States Language",
     long_description="A workflow engine based on Amazon States Language intended to provide the features of AWS Step Functions in an engine that can be deployed to a range of different hosting environments",
     packages=find_packages(),
@@ -30,5 +30,6 @@ setup(
                       "jsonpath",
                       "flask",
                       "opentracing>=2.2",
+                      "prometheus_client==0.7.1",
                       "jaeger_client"]
 )
