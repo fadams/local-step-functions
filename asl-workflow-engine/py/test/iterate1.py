@@ -118,23 +118,22 @@ if __name__ == '__main__':
     iterate1_state_machine_arn = "arn:aws:states:local:0123456789:stateMachine:iterate1_state_machine"
     child_state_machine_arn = "arn:aws:states:local:0123456789:stateMachine:child_state_machine"
 
-    # Create state machines using a dummy roleArn. If it already exists an
-    # exception will be thrown, we ignore that but raise other exceptions.
-    try:
-        response = sfn.create_state_machine(
-            name="iterate1_state_machine", definition=iterate1_ASL,
-            roleArn="arn:aws:iam::0123456789:role/service-role/MyRole"
-        )
+    def create_state_machines():
+        # Create state machines using a dummy roleArn. If it already exists an
+        # exception will be thrown, we ignore that but raise other exceptions.
+        try:
+            response = sfn.create_state_machine(
+                name="iterate1_state_machine", definition=iterate1_ASL,
+                roleArn="arn:aws:iam::0123456789:role/service-role/MyRole"
+            )
 
-        response = sfn.create_state_machine(
-            name="child_state_machine", definition=child_ASL,
-            roleArn="arn:aws:iam::0123456789:role/service-role/MyRole"
-        )
-    except ClientError as e:
-        #print(e.response)
-        message = e.response["Error"]["Message"]
-        #code = e.response["Error"]["Code"]
-        if message == "StateMachineAlreadyExists": # Do update instead of create
+            response = sfn.create_state_machine(
+                name="child_state_machine", definition=child_ASL,
+                roleArn="arn:aws:iam::0123456789:role/service-role/MyRole"
+            )
+        except sfn.exceptions.StateMachineAlreadyExists as e:
+            #print(e.response)
+
             response = sfn.update_state_machine(
                 stateMachineArn=iterate1_state_machine_arn,
                 definition=iterate1_ASL
@@ -144,12 +143,15 @@ if __name__ == '__main__':
                 stateMachineArn=child_state_machine_arn,
                 definition=child_ASL
             )
-        else: raise
+        except ClientError as e:
+            logger.error(e)
 
+
+    create_state_machines()
 
     # Loop through items invoking a new state machine execution for each item
-    try:
-        for item in items:
+    for item in items:
+        try:
             response = sfn.start_execution(
                 stateMachineArn=iterate1_state_machine_arn,
                 #name=EXECUTION_NAME, # If not specified a UUID is assigned
@@ -184,8 +186,17 @@ if __name__ == '__main__':
             )
             #print(executions)
 
-    except ClientError as e:
-        logger.error(e.response)
+        except sfn.exceptions.StateMachineDoesNotExist as e:
+            logger.info(e)
+
+            create_state_machines()
+            response = sfn.start_execution(
+                stateMachineArn=iterate1_state_machine_arn,
+                #name=EXECUTION_NAME, # If not specified a UUID is assigned
+                input=item
+            )
+        except ClientError as e:
+            logger.error(e)
 
     time.sleep(1)  # Give OpenTracing a chance to flush buffer before exiting
 

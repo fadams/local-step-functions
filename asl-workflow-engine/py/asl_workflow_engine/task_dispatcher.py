@@ -423,7 +423,7 @@ class TaskDispatcher(object):
             )
 
             # Look up stateMachineArn
-            match = self.state_engine.asl_cache.get(state_machine_arn)
+            match = self.state_engine.asl_store.get(state_machine_arn)
             if not match:
                 message = "TaskDispatcher asl_service_states_startExecution: " \
                           "State Machine {} does not exist".format(

@@ -209,7 +209,7 @@ class StateEngine(object):
         This behaves like a dict semantically, but replicates the contents
         across all instances in the cluster so that we can horizontally scale.
         """
-        self.asl_cache = ReplicatedDict(config["state_engine"]["asl_cache"])
+        self.asl_store = ReplicatedDict(config["state_engine"]["asl_cache"])
 
         """
         Holds information required by the DescribeExecution API call.
@@ -344,10 +344,10 @@ class StateEngine(object):
         if not execution.get("RoleArn"):
             """
             The default dummy ARN case shouldn't generally occur unless
-            the asl_cache "database" has been manually edited because when
+            the asl_store "database" has been manually edited because when
             it is updated via the API the roleArn field gets populated.
             """
-            asl_item = self.asl_cache.get(state_machine_id, {})
+            asl_item = self.asl_store.get(state_machine_id, {})
             execution["RoleArn"] = asl_item.get(
                 "roleArn", "arn:aws:iam:::role/dummy-role/dummy"
             )
@@ -600,7 +600,7 @@ class StateEngine(object):
         if "Definition" in state_machine:
             arn = parse_arn(state_machine_id)
             creation_date = time.time()
-            self.asl_cache[state_machine_id] = {
+            self.asl_store[state_machine_id] = {
                 "creationDate": creation_date,
                 "definition": state_machine["Definition"],
                 "name": arn["resource"],
@@ -613,7 +613,7 @@ class StateEngine(object):
             del state_machine["Definition"]
 
 
-        asl_item = self.asl_cache.get(state_machine_id, {})
+        asl_item = self.asl_store.get(state_machine_id, {})
         ASL = asl_item.get("definition")
         if not ASL:
             """

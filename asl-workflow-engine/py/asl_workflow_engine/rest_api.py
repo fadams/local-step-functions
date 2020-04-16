@@ -118,6 +118,18 @@ def valid_execution_arn(arn):
         and re.search(r"^arn:aws:states:.+:[0-9]+:execution:.+$", arn)
     )
 
+def aws_error(code, message=None):
+    """
+    Boiler plate to return errors in the correct form for the SDKs to throw
+    the expected exceptions. The format doesn't seem to be documented anywhere
+    so this was grokked by looking at the botocore source code in
+    https://github.com/boto/botocore/blob/develop/botocore/parsers.py
+    BaseJSONParser._do_error_parse(self, response, shape)
+    """
+    return jsonify({
+        "__type": code,
+        "message": message if message else code,
+    })
 
 class RestAPI(object):
     def __init__(self, state_engine, event_dispatcher, config):
@@ -131,7 +143,7 @@ class RestAPI(object):
             self.port = config.get("port", 4584)
             self.region = config.get("region", "local")
 
-        self.asl_cache = state_engine.asl_cache
+        self.asl_store = state_engine.asl_store
         self.executions = state_engine.executions
         self.execution_history = state_engine.execution_history
         self.event_dispatcher = event_dispatcher
@@ -195,7 +207,7 @@ class RestAPI(object):
                     self.logger.warning(
                         "RestAPI CreateStateMachine: {} is an invalid name".format(name)
                     )
-                    return "InvalidName", 400
+                    return aws_error("InvalidName"), 400
 
                 role_arn = params.get("roleArn")
                 if not valid_role_arn(role_arn):
@@ -204,7 +216,7 @@ class RestAPI(object):
                             role_arn
                         )
                     )
-                    return "InvalidArn", 400
+                    return aws_error("InvalidArn"), 400
 
                 # Form stateMachineArn from roleArn and name
                 arn = parse_arn(role_arn)
@@ -217,7 +229,7 @@ class RestAPI(object):
                 )
 
                 # Look up stateMachineArn
-                match = self.asl_cache.get(state_machine_arn)
+                match = self.asl_store.get(state_machine_arn)
                 if match:
                     # Info seems more appropriate than error here as creation is
                     # an idempotent action.
@@ -226,7 +238,7 @@ class RestAPI(object):
                             state_machine_arn
                         )
                     )
-                    return "StateMachineAlreadyExists", 400
+                    return aws_error("StateMachineAlreadyExists"), 400
 
                 try:
                     definition = json.loads(params.get("definition", ""))
@@ -242,12 +254,12 @@ class RestAPI(object):
                     self.logger.warning(
                         "RestAPI CreateStateMachine: name, roleArn and definition must be specified"
                     )
-                    return "MissingRequiredParameter", 400
+                    return aws_error("MissingRequiredParameter"), 400
 
                 # TODO ASL Validator??
 
                 creation_date = time.time()
-                self.asl_cache[state_machine_arn] = {
+                self.asl_store[state_machine_arn] = {
                     "creationDate": creation_date,
                     "definition": definition,
                     "name": name,
@@ -282,7 +294,7 @@ class RestAPI(object):
                         k1: v[k1] for k1 in ("creationDate", "name",
                             "stateMachineArn", "type")
                     }
-                    for k, v in self.asl_cache.items()
+                    for k, v in self.asl_store.items()
                 ]
 
                 resp = {
@@ -302,7 +314,7 @@ class RestAPI(object):
                     self.logger.warning(
                         "RestAPI DescribeStateMachine: stateMachineArn must be specified"
                     )
-                    return "MissingRequiredParameter", 400
+                    return aws_error("MissingRequiredParameter"), 400
 
                 if not valid_state_machine_arn(state_machine_arn):
                     self.logger.warning(
@@ -310,17 +322,17 @@ class RestAPI(object):
                             state_machine_arn
                         )
                     )
-                    return "InvalidArn", 400
+                    return aws_error("InvalidArn"), 400
 
                 # Look up stateMachineArn
-                state_machine = self.asl_cache.get(state_machine_arn)
+                state_machine = self.asl_store.get(state_machine_arn)
                 if not state_machine:
                     self.logger.info(
                         "RestAPI DescribeStateMachine: State Machine {} does not exist".format(
                             state_machine_arn
                         )
                     )
-                    return "StateMachineDoesNotExist", 400
+                    return aws_error("StateMachineDoesNotExist"), 400
 
                 return jsonify(state_machine), 200
 
@@ -333,7 +345,7 @@ class RestAPI(object):
                     self.logger.warning(
                         "RestAPI DescribeStateMachineForExecution: executionArn must be specified"
                     )
-                    return "MissingRequiredParameter", 400
+                    return aws_error("MissingRequiredParameter"), 400
 
                 if not valid_execution_arn(execution_arn):
                     self.logger.warning(
@@ -341,7 +353,7 @@ class RestAPI(object):
                             execution_arn
                         )
                     )
-                    return "InvalidArn", 400
+                    return aws_error("InvalidArn"), 400
 
                 # Look up executionArn
                 execution = self.executions.get(execution_arn)
@@ -351,7 +363,7 @@ class RestAPI(object):
                             execution_arn
                         )
                     )
-                    return "ExecutionDoesNotExist", 400
+                    return aws_error("ExecutionDoesNotExist"), 400
 
                 state_machine_arn = execution.get("stateMachineArn")
 
@@ -361,17 +373,17 @@ class RestAPI(object):
                             state_machine_arn
                         )
                     )
-                    return "InvalidArn", 400
+                    return aws_error("InvalidArn"), 400
 
                 # Look up stateMachineArn
-                state_machine = self.asl_cache.get(state_machine_arn)
+                state_machine = self.asl_store.get(state_machine_arn)
                 if not state_machine:
                     self.logger.info(
                         "RestAPI DescribeStateMachineForExecution: State Machine {} does not exist".format(
                             state_machine_arn
                         )
                     )
-                    return "StateMachineDoesNotExist", 400
+                    return aws_error("StateMachineDoesNotExist"), 400
 
                 resp = {
                     k: state_machine[k] for k in ("definition", "name", "roleArn",
@@ -389,7 +401,7 @@ class RestAPI(object):
                     self.logger.warning(
                         "RestAPI UpdateStateMachine: stateMachineArn must be specified"
                     )
-                    return "MissingRequiredParameter", 400
+                    return aws_error("MissingRequiredParameter"), 400
 
                 if not valid_state_machine_arn(state_machine_arn):
                     self.logger.warning(
@@ -397,17 +409,17 @@ class RestAPI(object):
                             state_machine_arn
                         )
                     )
-                    return "InvalidArn", 400
+                    return aws_error("InvalidArn"), 400
 
                 # Look up stateMachineArn
-                state_machine = self.asl_cache.get(state_machine_arn)
+                state_machine = self.asl_store.get(state_machine_arn)
                 if not state_machine:
                     self.logger.info(
                         "RestAPI UpdateStateMachine: State Machine {} does not exist".format(
                             state_machine_arn
                         )
                     )
-                    return "StateMachineDoesNotExist", 400
+                    return aws_error("StateMachineDoesNotExist"), 400
 
                 role_arn = params.get("roleArn")
                 if role_arn:
@@ -417,7 +429,7 @@ class RestAPI(object):
                                 role_arn
                             )
                         )
-                        return "InvalidArn", 400
+                        return aws_error("InvalidArn"), 400
                     state_machine["roleArn"] = role_arn
 
                 if params.get("definition"):
@@ -437,12 +449,12 @@ class RestAPI(object):
                     self.logger.warning(
                         "RestAPI UpdateStateMachine: either roleArn or definition must be specified"
                     )
-                    return "MissingRequiredParameter", 400
+                    return aws_error("MissingRequiredParameter"), 400
 
                 update_date = time.time()
                 state_machine["updateDate"] = update_date
 
-                self.asl_cache[state_machine_arn] = state_machine
+                self.asl_store[state_machine_arn] = state_machine
 
                 resp = {"updateDate": update_date}
 
@@ -462,7 +474,7 @@ class RestAPI(object):
                     self.logger.warning(
                         "RestAPI DeleteStateMachine: stateMachineArn must be specified"
                     )
-                    return "MissingRequiredParameter", 400
+                    return aws_error("MissingRequiredParameter"), 400
 
                 if not valid_state_machine_arn(state_machine_arn):
                     self.logger.warning(
@@ -470,19 +482,19 @@ class RestAPI(object):
                             state_machine_arn
                         )
                     )
-                    return "InvalidArn", 400
+                    return aws_error("InvalidArn"), 400
 
                 # Look up stateMachineArn
-                state_machine = self.asl_cache.get(state_machine_arn)
+                state_machine = self.asl_store.get(state_machine_arn)
                 if not state_machine:
                     self.logger.info(
                         "RestAPI DeleteStateMachine: State Machine {} does not exist".format(
                             state_machine_arn
                         )
                     )
-                    return "StateMachineDoesNotExist", 400
+                    return aws_error("StateMachineDoesNotExist"), 400
 
-                del self.asl_cache[state_machine_arn]
+                del self.asl_store[state_machine_arn]
 
                 return "", 200
 
@@ -496,7 +508,7 @@ class RestAPI(object):
                     self.logger.warning(
                         "RestAPI StartExecution: stateMachineArn must be specified"
                     )
-                    return "MissingRequiredParameter", 400
+                    return aws_error("MissingRequiredParameter"), 400
 
                 if not valid_state_machine_arn(state_machine_arn):
                     self.logger.warning(
@@ -504,7 +516,7 @@ class RestAPI(object):
                             state_machine_arn
                         )
                     )
-                    return "InvalidArn", 400
+                    return aws_error("InvalidArn"), 400
 
                 """
                 If name isn't provided create one from a UUID. TODO names should
@@ -518,7 +530,7 @@ class RestAPI(object):
                     self.logger.warning(
                         "RestAPI StartExecution: {} is an invalid name".format(name)
                     )
-                    return "InvalidName", 400
+                    return aws_error("InvalidName"), 400
 
                 input = params.get("input", {})
                 try:
@@ -529,17 +541,17 @@ class RestAPI(object):
                             input
                         )
                     )
-                    return "InvalidExecutionInput", 400
+                    return aws_error("InvalidExecutionInput"), 400
 
                 # Look up stateMachineArn
-                state_machine = self.asl_cache.get(state_machine_arn)
+                state_machine = self.asl_store.get(state_machine_arn)
                 if not state_machine:
                     self.logger.info(
                         "RestAPI StartExecution: State Machine {} does not exist".format(
                             state_machine_arn
                         )
                     )
-                    return "StateMachineDoesNotExist", 400
+                    return aws_error("StateMachineDoesNotExist"), 400
 
 
                 # Form executionArn from stateMachineArn and name
@@ -605,7 +617,7 @@ class RestAPI(object):
                     self.logger.warning(
                         "RestAPI ListExecutions: stateMachineArn must be specified"
                     )
-                    return "MissingRequiredParameter", 400
+                    return aws_error("MissingRequiredParameter"), 400
 
                 if not valid_state_machine_arn(state_machine_arn):
                     self.logger.warning(
@@ -613,17 +625,17 @@ class RestAPI(object):
                             state_machine_arn
                         )
                     )
-                    return "InvalidArn", 400
+                    return aws_error("InvalidArn"), 400
 
                 # Look up stateMachineArn
-                state_machine = self.asl_cache.get(state_machine_arn)
+                state_machine = self.asl_store.get(state_machine_arn)
                 if not state_machine:
                     self.logger.info(
                         "RestAPI ListExecutions: State Machine {} does not exist".format(
                             state_machine_arn
                         )
                     )
-                    return "StateMachineDoesNotExist", 400
+                    return aws_error("StateMachineDoesNotExist"), 400
 
                 status_filter = params.get("statusFilter")
                 if status_filter and status_filter not in {
@@ -633,12 +645,7 @@ class RestAPI(object):
                     "TIMED_OUT",
                     "ABORTED",
                 }:
-                    self.logger.warning(
-                        "RestAPI ListExecutions: {} is an invalid Status Filter Value".format(
-                            status_filter
-                        )
-                    )
-                    return "InvalidstatusFilterValue", 400
+                    status_filter = None
 
                 # TODO handle nextToken stuff
                 next_token = ""
@@ -675,7 +682,7 @@ class RestAPI(object):
                     self.logger.warning(
                         "RestAPI DescribeExecution: executionArn must be specified"
                     )
-                    return "MissingRequiredParameter", 400
+                    return aws_error("MissingRequiredParameter"), 400
 
                 if not valid_execution_arn(execution_arn):
                     self.logger.warning(
@@ -683,7 +690,7 @@ class RestAPI(object):
                             execution_arn
                         )
                     )
-                    return "InvalidArn", 400
+                    return aws_error("InvalidArn"), 400
 
                 # Look up executionArn
                 execution = self.executions.get(execution_arn)
@@ -693,7 +700,7 @@ class RestAPI(object):
                             execution_arn
                         )
                     )
-                    return "ExecutionDoesNotExist", 400
+                    return aws_error("ExecutionDoesNotExist"), 400
 
                 return jsonify(execution), 200
 
@@ -708,7 +715,7 @@ class RestAPI(object):
                     self.logger.warning(
                         "RestAPI GetExecutionHistory: executionArn must be specified"
                     )
-                    return "MissingRequiredParameter", 400
+                    return aws_error("MissingRequiredParameter"), 400
 
                 if not valid_execution_arn(execution_arn):
                     self.logger.warning(
@@ -716,7 +723,7 @@ class RestAPI(object):
                             execution_arn
                         )
                     )
-                    return "InvalidArn", 400
+                    return aws_error("InvalidArn"), 400
 
                 reverse_order = params.get("reverseOrder", False)
 
@@ -728,7 +735,7 @@ class RestAPI(object):
                             execution_arn
                         )
                     )
-                    return "ExecutionDoesNotExist", 400
+                    return aws_error("ExecutionDoesNotExist"), 400
 
                 """
                 Reverse via slicing: [start:stop:step] so step is -1
