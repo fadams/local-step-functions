@@ -102,7 +102,7 @@ class WorkflowEngine(object):
         )
 
         se = config["state_engine"]
-        se["asl_cache"] = os.environ.get("STATE_ENGINE_ASL_CACHE", se.get("asl_cache"))
+        se["store_url"] = os.environ.get("STATE_ENGINE_STORE_URL", se.get("store_url"))
 
         ra = config["rest_api"]
         ra["host"] = os.environ.get("REST_API_HOST", ra.get("host"))

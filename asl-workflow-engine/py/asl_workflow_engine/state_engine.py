@@ -205,11 +205,11 @@ class StateEngine(object):
         self.logger.info("Creating StateEngine")
 
         """
-        Holds a cache of ASL objects keyed by the ARN of the ASL State Machine.
-        This behaves like a dict semantically, but replicates the contents
-        across all instances in the cluster so that we can horizontally scale.
+        Holds ASL objects keyed by the ARN of the ASL State Machine.
+        The format of the ASL objects is the same as DescribeStateMachine.
+        https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeStateMachine.html
         """
-        self.asl_store = ReplicatedDict(config["state_engine"]["asl_cache"])
+        self.asl_store = ReplicatedDict(config["state_engine"]["store_url"])
 
         """
         Holds information required by the DescribeExecution API call.

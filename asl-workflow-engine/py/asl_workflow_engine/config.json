@@ -12,7 +12,8 @@
         "topic": "{\"node\": {\"x-declare\": {\"exchange\": \"asl_workflow_engine\", \"exchange-type\": \"topic\", \"durable\": true}}}"
     },
     "state_engine": {
-        "asl_cache": "ASL.json"
+        "comment": "The store_url is either a simple JSON file, e.g. ASL_store.json or a Redis URL, e.g. redis://localhost:6379",
+        "store_url": "ASL_store.json"
     },
     "rest_api": {
         "host": "0.0.0.0",
