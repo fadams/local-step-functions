@@ -44,6 +44,11 @@ from asl_workflow_engine.state_engine_paths import (
 
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.open_tracing_factory import span_context, inject_span
+from asl_workflow_engine.store import (
+    create_ASL_store,
+    create_executions_store,
+    create_history_store,
+)
 from asl_workflow_engine.task_dispatcher import TaskDispatcher
 
 from asl_workflow_engine.asl_exceptions import *
@@ -109,94 +114,6 @@ def merge_result(data, result, state, output_path=None):
     return apply_jsonpath(output, output_path)
 
 
-"""
-NOTE!!! this train of thought is going to be replaced by a Redis backed dict
-
-TODO move ReplicatedDict to its own file and start to look at actual
-replication. Current train of thought is to use messaging fabric such that
-updates are published as messages and all servers in the cluster subscribe
-to updates. The exact mechanism needs some thought. Also some use cases
-such as state machines write infrequently but read often so replication on
-update is likely best in that case, however other use cases such as getting
-execution history might read infrequently, but execution updates happen every
-state change so in those cases it may be better to have each node in the
-cluster maintain their own "chunk" and only achieve consistency on read.
-Lost to think about to do a nice implementation, but not urgent yet - just
-things to bear in mind so other decisions don't make clustering harder.
-"""
-import collections
-
-"""
-This class implements dict semantics, but uses a messaging fabric to replicate
-CRUD operations across instances and stores to a "transaction log" on the
-master instance in order to persist any required changes.
-
-https://stackoverflow.com/questions/3387691/how-to-perfectly-override-a-dict
-
-TODO focussing on storage ATM need to look at replication stuff soon.
-"""
-class ReplicatedDict(collections.MutableMapping):
-    def __init__(self, transaction_log_name, *args, **kwargs):
-        self.logger = init_logging(log_name="asl_workflow_engine")
-        self.logger.info("Creating ReplicatedDict")
-
-        self.transaction_log = transaction_log_name
-        # print("self.transaction_log = " + self.transaction_log)
-
-        try:
-            with open(self.transaction_log, "r") as fp:
-                self.store = json.load(fp)
-            self.logger.info(
-                "ReplicatedDict loading: {}".format(self.transaction_log)
-            )
-        except IOError as e:
-            self.store = {}
-        except ValueError as e:
-            self.logger.warning(
-                "ReplicatedDict {} does not contain valid JSON".format(
-                    self.transaction_log
-                )
-            )
-            self.store = {}
-
-        # self.store = dict()
-        # self.update(dict(*args, **kwargs))  # use the free update to set keys
-
-    def __str__(self):
-        return str(self.store)
-
-    def __getitem__(self, key):
-        return self.store[key]
-
-    def __setitem__(self, key, value):
-        self.store[key] = value
-        try:
-            with open(self.transaction_log, "w") as fp:
-                json.dump(self.store, fp)
-            self.logger.info("Updating ReplicatedDict: {}".format(self.transaction_log))
-        except IOError as e:
-            raise
-
-    def __delitem__(self, key):
-        del self.store[key]
-        try:
-            with open(self.transaction_log, "w") as fp:
-                json.dump(self.store, fp)
-            self.logger.info("Updating ReplicatedDict: {}".format(self.transaction_log))
-        except IOError as e:
-            raise
-
-    def __iter__(self):
-        return iter(self.store)
-
-    def __len__(self):
-        return len(self.store)
-
-
-
-
-
-
 class StateEngine(object):
     def __init__(self, config):
         """
@@ -204,24 +121,29 @@ class StateEngine(object):
         self.logger = init_logging(log_name="asl_workflow_engine")
         self.logger.info("Creating StateEngine")
 
+        store_url = config["state_engine"]["store_url"]
+
         """
-        Holds ASL objects keyed by the ARN of the ASL State Machine.
+        The ASL store is semantically a dict of dict. The outer dict holds
+        ASL objects (also dicts) keyed by the ARN of the ASL State Machine.
         The format of the ASL objects is the same as DescribeStateMachine.
         https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeStateMachine.html
         """
-        self.asl_store = ReplicatedDict(config["state_engine"]["store_url"])
+        self.asl_store = create_ASL_store(store_url)
 
         """
         Holds information required by the DescribeExecution API call.
+        The executions store is semantically a dict of dict.
         https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html
         """
-        self.executions = {}
+        self.executions = create_executions_store(store_url)
 
         """
         Holds information required by the GetExecutionHistory API call.
+        The executions store is semantically a dict of list of immutable dicts.
         https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html
         """
-        self.execution_history = {}
+        self.execution_history = create_history_store(store_url)
 
         """
         Holds the results of Parallel state Branches or Map state Iterations.

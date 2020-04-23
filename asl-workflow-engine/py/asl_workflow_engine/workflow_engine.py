@@ -132,6 +132,7 @@ if __name__ == "__main__":
             "host": workflow_engine.rest_api.host,
             "port": workflow_engine.rest_api.port,
         },
+        daemon=True,
     ).start()
     workflow_engine.start()
 

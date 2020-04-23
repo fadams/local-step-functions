@@ -80,7 +80,7 @@ class EventDispatcher(object):
             globals()["Message"] = messaging.Message
         except ImportError as e:
             self.logger.error(e)
-            exit()
+            sys.exit(1)
 
     
     def heartbeat(self):
@@ -182,8 +182,10 @@ class EventDispatcher(object):
             connection.start()  # Blocks until event loop exits.
         except ConnectionError as e:
             self.logger.error(e)
+            sys.exit(1)
         except SessionError as e:
             self.logger.error(e)
+            sys.exit(1)
 
         connection.close()
 

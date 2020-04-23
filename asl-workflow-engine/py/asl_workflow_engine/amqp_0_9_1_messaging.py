@@ -70,7 +70,7 @@ class Connection(object):
         try:
             self.connection = pika.BlockingConnection(self.parameters)
         except pika.exceptions.AMQPConnectionError as e:
-            raise ConnectionError(e)
+            raise ConnectionError(repr(e))
 
     def is_open(self):
         """
@@ -153,7 +153,7 @@ class Connection(object):
             try:
                 self._session.channel.start_consuming()
             except pika.exceptions.ConnectionClosedByBroker as e:
-                raise ConnectionError(e)
+                raise ConnectionError(repr(e))
 
 # ------------------------------------------------------------------------------
 
