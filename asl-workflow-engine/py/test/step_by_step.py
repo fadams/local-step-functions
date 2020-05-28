@@ -211,18 +211,32 @@ if __name__ == '__main__':
             Get ARN of the execution just invoked on the caller_state_machine.
             Note that it's more awkward trying to get the execution ARN of
             the execution that this invokes on the callee because we let it use
-            a system assigned ARN, but hey illustrating this stuff is kind of
+            a system assigned ARN, but hey! illustrating this stuff is kind of
             the point of this example.
+
+            Note too that, as a distributed and clustered service, the call to      
+            sfn.get_execution_history() can fail even when called immediately
+            after sfn.start_execution(). Here we simply wrap in a loop and if an  
+            ExecutionDoesNotExist exception occurs we briefly sleep then retry.
+            If polling in this way is undesireable then using notification
+            events (or on real AWS StepFunctions using CloudWatch events) may
+            be preferable, albeit at the cost of additional complexity.
             """
             execution_arn = response["executionArn"]
-            history = sfn.get_execution_history(
-                executionArn=execution_arn
-            )
-            #print("Execution history for Launcher state machine execution:")
-            #print(execution_arn)
-            #print()
-            #print(history)
-            #print()
+            while True:
+                try:
+                    history = sfn.get_execution_history(
+                        executionArn=execution_arn
+                    )
+                    break
+                except sfn.exceptions.ExecutionDoesNotExist as e:
+                    time.sleep(0.1)  # Sleep for 100ms then retry
+
+            print("Execution history for Launcher state machine execution:")
+            print(execution_arn)
+            print()
+            print(history)
+            print()
 
             """
             List all executions for the callee state machine. Do NOT

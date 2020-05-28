@@ -146,6 +146,16 @@ class StateEngine(object):
         self.execution_history = create_history_store(store_url)
 
         """
+        The execution_ttl is the time to live, in seconds, for the execution
+        metadata used by DescribeExecution (executions) and GetExecutionHistory
+        (execution_history). The initial default is one day 60x60x24 = 86400.
+        Whether to raise or lower this value will depend on the available memory
+        of the Redis server. The execution_ttl is only honoured by the Redis
+        store and is ignored by the simple store.
+        """
+        self.execution_ttl = config["state_engine"]["execution_ttl"]
+
+        """
         Holds the results of Parallel state Branches or Map state Iterations.
         It holds objects keyed by the execution ARN and each object is another
         dict which contains arrays keyed by the Parallel or Map state name.
@@ -164,7 +174,7 @@ class StateEngine(object):
         )
         self.event_dispatcher.acknowledge(id)
 
-    def broadcast_notification(self, execution_arn):
+    def broadcast_notification(self, execution_arn, execution_detail):
         """
         Broadcasts notification of execution status changes to a topic.
 
@@ -179,7 +189,7 @@ class StateEngine(object):
         asl_workflow_engine/arn:aws:states:local:0123456789:stateMachine:simple_state_machine.SUCCEEDED
 
         Consumers may subscribe to specific events using the full subject or
-        groups of event using wildcards, for example the subscription:
+        groups of events using wildcards, for example the subscription:
         asl_workflow_engine/arn:aws:states:local:0123456789:stateMachine:simple_state_machine.*
         Subscribes to all notification events published for a given state machine.
 
@@ -189,15 +199,6 @@ class StateEngine(object):
         "input", "output" and other relevant information and provides the same
         information as the DescribeExecution API.
         """
-        # Look up executionArn
-        detail = self.executions.get(execution_arn)
-        if not detail:
-            self.logger.info(
-                "StateEngine: broadcast_notification: Execution {} does not exist".format(
-                    execution_arn
-                )
-            )
-            return
 
         arn = parse_arn(execution_arn)
         region=arn.get("region", "local")
@@ -208,6 +209,9 @@ class StateEngine(object):
         https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/CloudWatchEventsandEventPatterns.html
         https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
         """
+        if not isinstance(execution_detail , dict):  # May be (non JSON) RedisDict
+            execution_detail = dict(execution_detail)
+
         event_time = datetime.now(timezone.utc).astimezone().isoformat()
         cw_event = {
             "version": "0",  # By default, this is set to 0 (zero) in all events.
@@ -218,10 +222,10 @@ class StateEngine(object):
             "time": event_time,  # Seems to be in rfc-3339 format in examples.
             "region": region,  # Identifies the AWS region where the event originated.
             "resources": [execution_arn],
-            "detail": detail,
+            "detail": execution_detail,
         }
 
-        subject = detail["stateMachineArn"] + "." + detail["status"]
+        subject = execution_detail["stateMachineArn"] + "." + execution_detail["status"]
         self.event_dispatcher.broadcast(subject, cw_event)
 
     def start_state_machine(self, start_state, event):
@@ -259,6 +263,9 @@ class StateEngine(object):
                 resource=arn["resource"] + ":" + execution["Name"],
             )
             execution["Id"] = execution_arn
+
+        execution_arn = execution["Id"]  # The previous block ensures this is set.
+
         # execution["Input"] holds the initial Step Function input
         if execution.get("Input") == None:
             execution["Input"] = data
@@ -269,7 +276,7 @@ class StateEngine(object):
             the asl_store "database" has been manually edited because when
             it is updated via the API the roleArn field gets populated.
             """
-            asl_item = self.asl_store.get(state_machine_id, {})
+            asl_item = self.asl_store.get_cached_view(state_machine_id, {})
             execution["RoleArn"] = asl_item.get(
                 "roleArn", "arn:aws:iam:::role/dummy-role/dummy"
             )
@@ -293,8 +300,8 @@ class StateEngine(object):
         Populate the metadata required by the DescribeExecution API call.
         https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html
         """
-        self.executions[execution["Id"]] = {
-            "executionArn": execution["Id"],
+        execution_detail = {
+            "executionArn": execution_arn,
             "input": data,
             "name": execution["Name"],
             "output": None,
@@ -303,13 +310,17 @@ class StateEngine(object):
             "status": "RUNNING",
             "stopDate": None,
         }
-        self.execution_history[execution["Id"]] = []
+        self.executions[execution_arn] = execution_detail
+        self.executions.set_ttl(execution_arn, self.execution_ttl)
+
+        # Don't set the execution_history ttl here, wait until first append.
+        self.execution_history[execution_arn] = []
         self.update_execution_history(
-            execution["Id"],
+            execution_arn,
             "ExecutionStarted",
             {"input": data, "roleArn": execution["RoleArn"]},
         )
-        self.broadcast_notification(execution["Id"])
+        self.broadcast_notification(execution_arn, execution_detail)
 
     def change_state(self, state_type, next_state, event):
         """
@@ -348,7 +359,8 @@ class StateEngine(object):
             {"output": data, "name": state["Name"]},
         )
         update_type = "ExecutionSucceeded"
-        self.executions[execution_arn]["stopDate"] = time.time()
+        execution_detail = self.executions[execution_arn]
+        execution_detail["stopDate"] = time.time()
 
         with opentracing.tracer.start_active_span(
             operation_name="StartExecution:ExecutionEnding",
@@ -367,19 +379,19 @@ class StateEngine(object):
                 )
                 update_type = "ExecutionFailed"
                 opentracing.tracer.active_span.set_tag("status", "FAILED")
-                self.executions[execution_arn]["status"] = "FAILED"
-                self.executions[execution_arn]["output"] = None
+                execution_detail["status"] = "FAILED"
+                execution_detail["output"] = None
             else:
                 opentracing.tracer.active_span.set_tag("status", "SUCCEEDED")
-                self.executions[execution_arn]["status"] = "SUCCEEDED"
-                self.executions[execution_arn]["output"] = data
+                execution_detail["status"] = "SUCCEEDED"
+                execution_detail["output"] = data
         
         # Tidy up self.branch_results for current execution_arn.
         if execution_arn in self.branch_results:
             del self.branch_results[execution_arn]
 
         self.update_execution_history(execution_arn, update_type, {"output": data})
-        self.broadcast_notification(execution_arn)
+        self.broadcast_notification(execution_arn, execution_detail)
 
     def update_execution_history(self, execution_arn, update_type, details):
         """
@@ -444,6 +456,13 @@ class StateEngine(object):
                 "previousEventId": id - 1,
             }
         )
+
+        if id == 1:
+            """
+            Defer setting execution_history ttl to here, as we now have an item
+            in the execution_history store to associate the ttl with.
+            """
+            self.execution_history.set_ttl(execution_arn, self.execution_ttl)
 
     def notify(self, event, id):
         """
@@ -535,7 +554,7 @@ class StateEngine(object):
             del state_machine["Definition"]
 
 
-        asl_item = self.asl_store.get(state_machine_id, {})
+        asl_item = self.asl_store.get_cached_view(state_machine_id, {})
         ASL = asl_item.get("definition")
         if not ASL:
             """

@@ -228,7 +228,10 @@ class RestAPI(object):
                     resource=name,
                 )
 
-                # Look up stateMachineArn
+                """
+                Look up stateMachineArn. Use get() not get_cached_view() here as
+                calls to CreateStateMachine might reasonably *expect* no match.
+                """
                 match = self.asl_store.get(state_machine_arn)
                 if match:
                     # Info seems more appropriate than error here as creation is
@@ -324,8 +327,12 @@ class RestAPI(object):
                     )
                     return aws_error("InvalidArn"), 400
 
-                # Look up stateMachineArn
-                state_machine = self.asl_store.get(state_machine_arn)
+                """
+                Look up stateMachineArn. Using get_cached_view() here means that
+                the state_machine is JSON serialisable, as the cached view is a
+                simple dict rather than say a RedisDict.
+                """
+                state_machine = self.asl_store.get_cached_view(state_machine_arn)
                 if not state_machine:
                     self.logger.info(
                         "RestAPI DescribeStateMachine: State Machine {} does not exist".format(
@@ -376,7 +383,7 @@ class RestAPI(object):
                     return aws_error("InvalidArn"), 400
 
                 # Look up stateMachineArn
-                state_machine = self.asl_store.get(state_machine_arn)
+                state_machine = self.asl_store.get_cached_view(state_machine_arn)
                 if not state_machine:
                     self.logger.info(
                         "RestAPI DescribeStateMachineForExecution: State Machine {} does not exist".format(
@@ -411,7 +418,10 @@ class RestAPI(object):
                     )
                     return aws_error("InvalidArn"), 400
 
-                # Look up stateMachineArn
+                """
+                Look up stateMachineArn. Use get() rather than get_cached_view()
+                as we are going to be updating the retrieved State Machine.
+                """
                 state_machine = self.asl_store.get(state_machine_arn)
                 if not state_machine:
                     self.logger.info(
@@ -465,9 +475,7 @@ class RestAPI(object):
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_DeleteStateMachine.html
                 TODO This should really mark the state machine for deletion and
                 "The state machine itself is deleted after all executions are 
-                completed or deleted.". Not sure how best to implement this in
-                a clustered environment without being over chatty, as the start
-                and end states could be run on different instances
+                completed or deleted."
                 """
                 state_machine_arn = params.get("stateMachineArn")
                 if not state_machine_arn:
@@ -485,7 +493,7 @@ class RestAPI(object):
                     return aws_error("InvalidArn"), 400
 
                 # Look up stateMachineArn
-                state_machine = self.asl_store.get(state_machine_arn)
+                state_machine = self.asl_store.get_cached_view(state_machine_arn)
                 if not state_machine:
                     self.logger.info(
                         "RestAPI DeleteStateMachine: State Machine {} does not exist".format(
@@ -544,7 +552,7 @@ class RestAPI(object):
                     return aws_error("InvalidExecutionInput"), 400
 
                 # Look up stateMachineArn
-                state_machine = self.asl_store.get(state_machine_arn)
+                state_machine = self.asl_store.get_cached_view(state_machine_arn)
                 if not state_machine:
                     self.logger.info(
                         "RestAPI StartExecution: State Machine {} does not exist".format(
@@ -628,7 +636,7 @@ class RestAPI(object):
                     return aws_error("InvalidArn"), 400
 
                 # Look up stateMachineArn
-                state_machine = self.asl_store.get(state_machine_arn)
+                state_machine = self.asl_store.get_cached_view(state_machine_arn)
                 if not state_machine:
                     self.logger.info(
                         "RestAPI ListExecutions: State Machine {} does not exist".format(
@@ -647,14 +655,26 @@ class RestAPI(object):
                 }:
                     status_filter = None
 
-                # TODO handle nextToken stuff
-                next_token = ""
-
                 """
                 Populate response using list and dict comprehensions
                 https://www.pythonforbeginners.com/basics/list-comprehensions-in-python
                 https://stackoverflow.com/questions/5352546/extract-subset-of-key-value-pairs-from-python-dictionary-object
+
+                TODO handle nextToken stuff.
+                Note that ListExecutions is potentially a very expensive call as
+                there might well be a large number of executions for any given
+                State Machine and moreover the execution details are stored as
+                Redis hashes that are themselves keyed by the execution ARN. In
+                other words it is not *natively* a list and under the covers
+                listing the executions is implemented by a redis.scan. One
+                option for improving things might be to use the next_token to
+                wrap a scan cursor. That approach should works as the maxResults
+                in the API call is only a hint and the actual number of results
+                returned per call might be fewer than the specified maximum, so
+                that fits somewhat to the constraints of Redis scan cursors.
                 """
+                next_token = ""
+
                 executions = [
                     {
                         k1: v[k1] for k1 in ("executionArn", "name", "startDate",       
@@ -702,6 +722,8 @@ class RestAPI(object):
                     )
                     return aws_error("ExecutionDoesNotExist"), 400
 
+                if not isinstance(execution , dict):  # May be (non JSON) RedisDict
+                    execution = dict(execution)
                 return jsonify(execution), 200
 
             def aws_api_GetExecutionHistory():
@@ -740,11 +762,22 @@ class RestAPI(object):
                 """
                 Reverse via slicing: [start:stop:step] so step is -1
                 https://stackoverflow.com/questions/3940128/how-can-i-reverse-a-list-in-python
+
+                TODO handle nextToken stuff.
+
+                Note that GetExecutionHistory is potentially an expensive call
+                if the history is large. The store self.execution_history has
+                list semantics, but is backed by an external (e.g. Redis) store.
+                Under the covers it will do a redis.lrange, so the next_token
+                behaviour when implemented should "slice" the appropriate range.
+                Note that doing this for GetExecutionHistory should be easier
+                than for ListExecutions - see comment in ListExecutions for why.
                 """
                 if reverse_order:
                     history = history[::-1]
+                else:
+                    history = history[:]
 
-                # TODO handle nextToken stuff
                 next_token = ""
 
                 resp = {"events": history}

@@ -423,8 +423,8 @@ class TaskDispatcher(object):
             )
 
             # Look up stateMachineArn
-            match = self.state_engine.asl_store.get(state_machine_arn)
-            if not match:
+            state_machine = self.state_engine.asl_store.get_cached_view(state_machine_arn)
+            if not state_machine:
                 message = "TaskDispatcher asl_service_states_startExecution: " \
                           "State Machine {} does not exist".format(
                     state_machine_arn
@@ -458,7 +458,7 @@ class TaskDispatcher(object):
                         "Id": execution_arn,
                         "Input": parameters.get("Input", {}),
                         "Name": execution_name,
-                        "RoleArn": match.get("roleArn"),
+                        "RoleArn": state_machine.get("roleArn"),
                         "StartTime": start_time,
                     },
                     "State": {"EnteredTime": start_time, "Name": ""},  # Start state
