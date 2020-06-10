@@ -10,10 +10,15 @@ WORKDIR /usr/src
 # This is however apparently "normal" (though other Linux distros don't do this)
 # https://github.com/gliderlabs/docker-alpine/issues/30
 RUN apk update && apk upgrade && \
-    apk add ca-certificates && update-ca-certificates && \
+    apk add \
+      ca-certificates \
+      gcc \
+      g++ && \
+    update-ca-certificates && \
     mv asl_workflow_engine/config.json . && pip install -e . && \
     # Remove packages only needed during installation from runtime container
     pip uninstall -y setuptools wheel pip && \
+    apk del gcc g++ && \
     rm -rf /var/cache/apk/*
 
 CMD ["python", "asl_workflow_engine/workflow_engine.py"]

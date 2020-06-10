@@ -157,8 +157,12 @@ class TestWaitState(unittest.TestCase):
     def setUp(self):
         # Initialise logger
         logger = init_logging(log_name="test_wait_state")
-        config = {"state_engine": {"store_url": "ASL_store.json", 
-                                   "execution_ttl": 86400}}
+        config = {
+            "state_engine": {
+                "store_url": "ASL_store.json", 
+                "execution_ttl": 500
+            }
+        }
 
         state_engine = StateEngine(config)
         # Stub out the real TaskDispatcher execute_task

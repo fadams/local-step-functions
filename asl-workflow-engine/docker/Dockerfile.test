@@ -11,14 +11,14 @@ WORKDIR /usr/src
 # https://github.com/gliderlabs/docker-alpine/issues/30
 RUN apk update && apk upgrade && \
     apk add ca-certificates && update-ca-certificates && \
-    mv asl_workflow_engine/config.json . && pip install -e .
-
-RUN apk add --no-cache --update \
+    apk add --no-cache --update \
     gcc \
+    g++ \
     musl-dev \
     python3-dev \
     libffi-dev \
-    openssl-dev
+    openssl-dev && \
+    mv asl_workflow_engine/config.json . && pip install -e .
 
 RUN pip install pytest
 
