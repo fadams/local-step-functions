@@ -235,7 +235,8 @@ class TestSimpleStateMachine(unittest.TestCase):
     def setUp(self):
         # Initialise logger
         logger = init_logging(log_name="test_simple_state_machine")
-        config = {"state_engine": {"store_url": "ASL_store.json"}}
+        config = {"state_engine": {"store_url": "ASL_store.json", 
+                                   "execution_ttl": 86400}}
 
         state_engine = StateEngine(config)
         # Stub out the real TaskDispatcher execute_task
