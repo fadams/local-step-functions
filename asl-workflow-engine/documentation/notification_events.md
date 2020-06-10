@@ -1,7 +1,7 @@
 # Notification Events
-With AWS Step Functions it is possible to configure Step Functions to emit [CloudWatch Events](https://docs.aws.amazon.com/step-functions/latest/dg/cw-events.html) when an execution status changes. This enables you to monitor your workflows without having to constantly poll using the [DescribeExecution](https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html) API.
+With *real* AWS Step Functions it is possible to configure Step Functions to emit [CloudWatch Events](https://docs.aws.amazon.com/step-functions/latest/dg/cw-events.html) (recently renamed [EventBridge](https://docs.aws.amazon.com/eventbridge/latest/userguide/what-is-amazon-eventbridge.html) by Amazon) when an execution status changes. This enables you to monitor your workflows without having to constantly poll using the [DescribeExecution](https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html) API.
 
-Obviously with a local on premises ASL implementation the CloudWatch service is not readily available, however we can provide similar behaviour.
+Obviously with a local on premises ASL implementation the CloudWatch/EventBridge service is not readily available, however we can provide similar behaviour.
 
 With this implementation we make use of the messaging fabric used for the event queue (currently RabbitMQ) where the CloudWatch-like notification events are published to a topic of the form:
 ```
@@ -68,5 +68,7 @@ and
 The most relevant sections of the AWS CloudWatch documentation for Step Functions may be found at the following links:
 
 https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/WhatIsCloudWatchEvents.html
+
 https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/CloudWatchEventsandEventPatterns.html
+
 https://docs.aws.amazon.com/step-functions/latest/dg/cw-events.html

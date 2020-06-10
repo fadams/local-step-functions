@@ -1,5 +1,5 @@
 # Initial Design Choices
-ASL is essentially a Finite State Machine and a common approach for triggering FSMs is the [Event-driven Finite State Machine](https://en.wikipedia.org/wiki/Event-driven_finite-state_machine). ASL implementations can push [data](https://states-language.net/spec.html#data) between states in the form of JSON objects, so we need some way to facilitate this in the form of a queue of JSON objects. There are obviously many possible queue implementations and ideally we should abstract the detail, but initially we shall be using AMQP 0.9.1 via RabbitMQ and the Pika 1.0.1 client.
+ASL is essentially a Finite State Machine and a common approach for triggering FSMs is the [Event-driven Finite State Machine](https://en.wikipedia.org/wiki/Event-driven_finite-state_machine). ASL implementations can push [data](https://states-language.net/spec.html#data) between states in the form of JSON objects, so we need some way to facilitate this in the form of a queue of JSON objects. There are obviously many possible queue implementations and ideally we should abstract the detail, but initially we shall be using AMQP 0.9.1 provided by RabbitMQ and the Pika 1.0.1 client.
 
 In order to maximise the possibilities for horizontally scaling, in an ideal world we would want to keep the main state machine engine, slightly ironically, as stateless as possible. The approach taken for this is to pass the **current state name** in the application context, along with the application data to be delivered to the next state on the event queue.
 
@@ -47,9 +47,9 @@ The [Paths](https://states-language.net/spec.html#paths) section of the ASL spec
 
 The `$$.State.Name` (i.e. the **current state**) field must contain either a state name valid in the ASL state machine being referred to in ASL, or null, or an empty string or be undefined. In the case of null or empty string or undefined it shall be assumed that the state transition will be to the ASL [StartAt](https://states-language.net/spec.html#toplevelfields) state.
 
-The (otional) `$$.StateMachine.Definition` field contains a complete ASL state machine definition as defined in the [Amazon States Language Specification](https://states-language.net/spec.html). Note that the `$$.StateMachine.Definition` path is an optional extension and is not found in the context object of the *official* Amazon AWS Step Functions implementation.
+The (otional) `$$.StateMachine.Definition` field contains a complete ASL state machine definition as defined in the [Amazon States Language Specification](https://states-language.net/spec.html). Note that the `$$.StateMachine.Definition` path is an optional extension provided by this implementation and is not found in the context object of the *official* Amazon AWS Step Functions implementation.
 
-**Important Note** passing the Definition by value was used during the initial development of the ASL Workflow Engine whilst the REST API did not exist. Using the API and SDKs is now the preferred approach and support for passing State Machine Definition by value in the context might well be deprecated.
+**Important Note** passing the Definition by value as described in the previous paragraph was used during the initial development of the ASL Workflow Engine whilst the REST API did not exist. Using the REST API and SDKs is now the preferred approach and support for passing the State Machine Definition by value in the context might well be deprecated.
 
 The `$$.StateMachine.Id` field contains a unique reference to an ASL state machine.
 

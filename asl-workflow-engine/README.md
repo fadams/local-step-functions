@@ -1,35 +1,36 @@
 # asl-workflow-engine
-This project is a workflow engine written in Python 3 based on the [Amazon States Language](https://states-language.net/spec.html) (ASL). The intention is to incrementally provide the features of AWS Step Functions in an engine that can be deployed to [a range of different hosting environments](docker).
+This project is a workflow engine written in Python 3 based on the [Amazon States Language](https://states-language.net/spec.html) (ASL). The intention is to incrementally provide the features of [AWS Step Functions](https://docs.aws.amazon.com/step-functions/) in an engine that may be deployed to [a range of different hosting environments](docker).
 
-The initial goal is primarily learning about ASL and the focus will be on enabling relatively simple "straight line" state transitions (i.e. currently [Parallel](https://states-language.net/spec.html#parallel-state) states are not supported, though [Choice](https://states-language.net/spec.html#choice-state) states are) and [Task](https://states-language.net/spec.html#task-state) state resources shall initially concentrate on integrations with [Oracle Fn Project](https://github.com/fnproject), [OpenFaaS](https://github.com/openfaas/faas) and [AMQP](https://www.amqp.org/) based RPC Message invocations (as described here: https://www.rabbitmq.com/tutorials/tutorial-six-python.html).
-
-**Warning** this project is still a work-in-progress although most of the basics are now in place. The main gaps are currently lack of support for the Parallel and Map states and Activities. Clustering/scaling is also yet ro be implemented.
+As the project has evolved most of the features of ASL, including [Parallel](https://states-language.net/spec.html#parallel-state) and [Map](https://states-language.net/spec.html#map-state) states, are now supported. [Task](https://states-language.net/spec.html#task-state) state resources are currently limited to [AMQP](https://www.amqp.org/) based RPC Message invocations (as described here: https://www.rabbitmq.com/tutorials/tutorial-six-python.html), though the aim is to add integrations to Open Source FaaS implementations like the [Oracle Fn Project](https://github.com/fnproject) and [OpenFaaS](https://github.com/openfaas/faas) as well as AWS Lambda.
 
 ### Initial Design Choices
-The [Initial Design Choices](initial_design_choices.md) document describes why certain choices, like the use of a messaging fabric for the event queue, were made.
+The ASL Workflow Engine is event driven and makes use of an AMQP messaging fabric for its event queue. The [Initial Design Choices](documentation/initial_design_choices.md) page provides the background to this and several other design choices.
 
-This document is a good first port of call to understand some of the nuances in the implementation covering the structure of the JSON objects on the event queue and the ASL context objects used by Step Functions internally.
+This document is a good first port of call to understand some of the nuances in the implementation, covering the structure of the JSON objects on the event queue and the ASL context objects used by Step Functions internally.
+
+### Configuration
+Many aspects of the ASL Workflow Engine are configurable and are described in detail on the [Configuration](documentation/configuration.md) page.
 
 ### Notification Events
-With AWS Step Functions it is possible to configure Step Functions to emit [CloudWatch Events](https://docs.aws.amazon.com/step-functions/latest/dg/cw-events.html) when an execution status changes.
+With *real* AWS Step Functions it is possible to configure Step Functions to emit [CloudWatch Events](https://docs.aws.amazon.com/step-functions/latest/dg/cw-events.html) (recently renamed [EventBridge](https://docs.aws.amazon.com/eventbridge/latest/userguide/what-is-amazon-eventbridge.html) by Amazon) when an execution status changes.
 
-Obviously with a local on premises ASL implementation the CloudWatch service is not available, however we can provide similar behaviour. The [Notification Events](notification_events.md) document describes how CloudWatch style events are emitted by the ASL Workflow Engine.
+Obviously with a local on premises ASL implementation the AWS CloudWatch Events/EventBridge service is not available, however we can provide similar behaviour. The [Notification Events](documentation/notification_events.md) page describes how CloudWatch style events are emitted by the ASL Workflow Engine. These events follow the same schema as real Step Function CloudWatch/EventBridge events and may be used in a similar way.
 
 ### Clustering and Scaling
-**TODO**
+The [Clustering and Scaling](documentation/clustering_and_scaling.md) page describes how the ASL Workflow Engine may be scaled and the various design choices that were made to enable this.
 
 ### Service Integrations
 The ASL Workflow Engine integrates with a number of services so that you can call API actions, and coordinate executions directly from the Amazon States Language in Step Functions.
 
 With ASL you call and pass parameters to the API of those services from a [Task](https://states-language.net/spec.html#task-state) state in the Amazon States Language.
 
-See the ASL Workflow Engine [Service Integrations](service_integrations.md) page for details of the Service Integrations currently implemented.
+The [Service Integrations](documentation/service_integrations.md) page provides details of the Service Integrations currently implemented and how to use them.
 
 ### REST API
 The ASL Workflow Engine implements a REST API that is (currently) a subset of the AWS Step Functions API as described in the AWS documentation:
 https://docs.aws.amazon.com/step-functions/latest/apireference/API_Operations.html. The intention is that over time the complete API will be implemented.
 
-By implementing the AWS REST API semantics it becomes possible to use Amazon's CLI and SDKs so applications can use this ASL Workflow Engine as an alternative to Amazon's for scenarios such as hybrid cloud workloads.
+By implementing the AWS REST API semantics it becomes possible to use Amazon's CLI and SDKs like [boto3](https://github.com/boto/boto3), so applications can use this ASL Workflow Engine as an alternative to Amazon's for scenarios such as hybrid cloud workloads.
 
 The Actions from the official AWS API currently implemented by the ASL Workflow Engine are:
 
