@@ -105,7 +105,7 @@ class WorkflowEngine(object):
         se["store_url"] = os.environ.get("STATE_ENGINE_STORE_URL",
                                          se.get("store_url"))
         se["execution_ttl"] = os.environ.get("STATE_ENGINE_EXECUTION_TTL",
-                                             se.get("execution_ttl"))
+                                             se.get("execution_ttl", 86400))
 
         ra = config["rest_api"]
         ra["host"] = os.environ.get("REST_API_HOST", ra.get("host"))
