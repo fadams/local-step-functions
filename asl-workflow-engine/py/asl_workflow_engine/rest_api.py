@@ -608,9 +608,15 @@ class RestAPI(object):
                     threadsafe=True is important here as the RestAPI runs in a
                     different thread to the main event_dispatcher loop.
                     """
-                    self.event_dispatcher.publish(
-                        event, threadsafe=True, start_execution=True
-                    )
+                    try:
+                        self.event_dispatcher.publish(
+                            event, threadsafe=True, start_execution=True
+                        )
+                    except:
+                        message = ("RestAPI StartExecution: Internal messaging "
+                                  "error, start message could not be published.")
+                        self.logger.error(message)
+                        return aws_error("InternalError", message), 500
 
                     resp = {"executionArn": execution_arn, "startDate": time.time()}
 
