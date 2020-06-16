@@ -14,10 +14,15 @@ WORKDIR /usr/src
 # This is however apparently "normal" (though other Linux distros don't do this)
 # https://github.com/gliderlabs/docker-alpine/issues/30
 RUN apk update && apk upgrade && \
-    apk add ca-certificates && update-ca-certificates && \
+    apk add \
+      ca-certificates \
+      gcc \
+      g++ && \
+    update-ca-certificates && \
     mv asl_workflow_engine/config.json . && pip install -e . && \
     # Remove packages only needed during installation from runtime container
     pip uninstall -y setuptools wheel pip && \
+    apk del gcc g++ && \
     rm -rf /var/cache/apk/*
 
 CMD ["python", "asl_workflow_engine/workflow_engine.py"]
@@ -39,3 +44,4 @@ docker run --rm -it \
     -v $PWD/ASL_store.json:/usr/src/ASL_store.json \
     asl-workflow-engine
 ```
+This example launch script makes use of the USE_STRUCTURED_LOGGING and EVENT_QUEUE_CONNECTION_URL environment variables. The configuration environment variables are described in detail in the [Configuration](../documentation/configuration.md) section of the documentation.
