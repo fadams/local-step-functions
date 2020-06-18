@@ -244,6 +244,7 @@ class RedisStore(MutableMapping):
             "Creating {} {}: {}".format(key, self.__class__.__name__, url)
         )
 
+        self.redis = None  # In case get_connection() fails, which will __del__ on exit.
         self.redis = RedisStore.get_connection(url, self.logger)
 
         # Get Redis version as an int, so 6.0.0 would be 600 to aid version tests.
@@ -499,7 +500,7 @@ class RedisStore(MutableMapping):
         Tidy up resources. This will also be called by the destructor, so it
         shouldn't be necessary to call this explicitly.
         """
-        if self.tracker_id is not None:
+        if self.redis is not None and self.tracker_id is not None:
             self.redis.execute_command("CLIENT", "TRACKING", "OFF")
 
             try: # If subscribing is implemented using pubsub.run_in_thread()
