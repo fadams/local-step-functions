@@ -340,8 +340,18 @@ class RestAPI(object):
                         )
                     )
                     return aws_error("StateMachineDoesNotExist"), 400
+                
+                """
+                In the API the "definition" field is actually a string not a
+                JSON object, hence the json.dumps() here. We do the conversion
+                here rather than storing it as a string because the State Engine
+                uses the deserialised definition as a key part of its core
+                state transition behaviour.
+                """
+                resp = state_machine.copy()
+                resp["definition"] = json.dumps(state_machine["definition"])
 
-                return jsonify(state_machine), 200
+                return jsonify(resp), 200
 
             def aws_api_DescribeStateMachineForExecution():
                 """
@@ -392,10 +402,15 @@ class RestAPI(object):
                     )
                     return aws_error("StateMachineDoesNotExist"), 400
 
+                """
+                As with DescribeStateMachine the "definition" field is actually
+                a string not a JSON object, hence the json.dumps() here.
+                """
                 resp = {
                     k: state_machine[k] for k in ("definition", "name", "roleArn",
                         "stateMachineArn", "updateDate")
                 }
+                resp["definition"] = json.dumps(state_machine["definition"])
 
                 return jsonify(resp), 200
 

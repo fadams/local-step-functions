@@ -266,7 +266,11 @@ class StateEngine(object):
 
         execution_arn = execution["Id"]  # The previous block ensures this is set.
 
-        # execution["Input"] holds the initial Step Function input
+        """
+        execution["Input"] holds the initial Step Function input. As this is
+        part of the Context Object the "Input" field here is a JSON object.
+        https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
+        """
         if execution.get("Input") == None:
             execution["Input"] = data
 
@@ -299,10 +303,16 @@ class StateEngine(object):
         """
         Populate the metadata required by the DescribeExecution API call.
         https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html
+        Note that the "input" and "output" fields of the execution detail and
+        history are actually strings not JSON objects, hence the json.dumps().
+        It actually took a while to note that subtlety, especially as the AWS
+        CLI describe-execution call doesn't actually complain and displayed the
+        JSON object that was originally being send before json.dumps() was added.
         """
+        input_as_string = json.dumps(data)
         execution_detail = {
             "executionArn": execution_arn,
-            "input": data,
+            "input": input_as_string,
             "name": execution["Name"],
             "output": None,
             "startDate": time.time(),
@@ -318,7 +328,7 @@ class StateEngine(object):
         self.update_execution_history(
             execution_arn,
             "ExecutionStarted",
-            {"input": data, "roleArn": execution["RoleArn"]},
+            {"input": input_as_string, "roleArn": execution["RoleArn"]},
         )
         self.broadcast_notification(execution_arn, execution_detail)
 
@@ -332,7 +342,7 @@ class StateEngine(object):
         self.update_execution_history(
             context["Execution"]["Id"],
             state_type + "StateExited",
-            {"output": data, "name": state["Name"]},
+            {"output": json.dumps(data), "name": state["Name"]},
         )
         # Update the state with the next state's name and erase any retry info.
         state["Name"] = next_state
@@ -350,15 +360,21 @@ class StateEngine(object):
         End the state machine execution and update execution metadata.
         """
         data = event["data"]
+        """
+        Note that the "output" field of the execution detail and history is a
+        string not a JSON object, hence the json.dumps().
+        https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html
+        https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html
+        """
+        output_as_string = json.dumps(data)
         context = event["context"]
         state = context["State"]
         execution_arn = context["Execution"]["Id"]
         self.update_execution_history(
             execution_arn,
             state_type + "StateExited",
-            {"output": data, "name": state["Name"]},
+            {"output": output_as_string, "name": state["Name"]},
         )
-        update_type = "ExecutionSucceeded"
         execution_detail = self.executions[execution_arn]
         execution_detail["stopDate"] = time.time()
 
@@ -377,26 +393,39 @@ class StateEngine(object):
                         "message": "ExecutionFailed",
                     }
                 )
-                update_type = "ExecutionFailed"
                 opentracing.tracer.active_span.set_tag("status", "FAILED")
                 execution_detail["status"] = "FAILED"
+                """
+                As per the DescribeExecution API, "output" is set only if the
+                execution succeeds. If the execution fails, this field is null. 
+                https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html
+                """
                 execution_detail["output"] = None
+                self.update_execution_history(
+                    execution_arn,
+                    "ExecutionFailed",
+                    {"cause": data.get("Cause"), "error": data.get("Error")}
+                )
             else:
                 opentracing.tracer.active_span.set_tag("status", "SUCCEEDED")
                 execution_detail["status"] = "SUCCEEDED"
-                execution_detail["output"] = data
+                execution_detail["output"] = output_as_string
+                self.update_execution_history(
+                    execution_arn,
+                    "ExecutionSucceeded",
+                    {"output": output_as_string}
+                )
         
         # Tidy up self.branch_results for current execution_arn.
         if execution_arn in self.branch_results:
             del self.branch_results[execution_arn]
 
-        self.update_execution_history(execution_arn, update_type, {"output": data})
         self.broadcast_notification(execution_arn, execution_detail)
 
     def update_execution_history(self, execution_arn, update_type, details):
         """
-        Store the execution information in a way that will be accessible to the
-        REST API.
+        Store the execution history information in a way that will be accessible
+        to the REST API.
         """
         # TODO logging the details object is likely to be expensive and in any
         # case the idea is to get execution history via the REST API
@@ -799,7 +828,7 @@ class StateEngine(object):
                 self.update_execution_history(
                     execution_arn,
                     state_type + "StateExited",
-                    {"output": event["data"], "name": current_state},
+                    {"output": json.dumps(event["data"]), "name": current_state},
                 )
                 asl_state_collect_results(state_type)
             else:
@@ -1687,7 +1716,7 @@ class StateEngine(object):
             self.update_execution_history(
                 context["Execution"]["Id"],
                 state_type + "StateEntered",
-                {"input": data, "name": current_state},
+                {"input": json.dumps(data), "name": current_state},
             )
 
         """
