@@ -21,7 +21,7 @@ import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 
-import json, os, time, uuid, opentracing
+import json, os, time, uuid, opentracing, urllib
 from datetime import datetime, timezone
 
 from asl_workflow_engine.logger import init_logging
@@ -44,9 +44,23 @@ class TaskDispatcher(object):
         Get the messaging peer.address, e.g. the Broker address for use
         by OpenTracing later.
         """
-        peer_address = config.get("event_queue", {}).get("connection_url",
+        
+        peer_address_string = config.get("event_queue", {}).get("connection_url",
                                                          "amqp://localhost:5672")
-        self.peer_address = peer_address.split("?")[0]
+        try:
+            parsed_peer_address = urllib.parse.urlparse(peer_address_string)
+        except Exception as e:
+            self.logger.error(
+                "Invalid peer address found: {}".format(peer_address_string),
+                exc_info=e
+            )
+            raise e        
+        
+        self.peer_address = parsed_peer_address.hostname
+        if parsed_peer_address.port:
+            self.peer_address = self.peer_address + ":" + str(parsed_peer_address.port)
+        if parsed_peer_address.scheme:
+            self.peer_address = parsed_peer_address.scheme + "://" + self.peer_address
 
         self.state_engine = state_engine
 
@@ -88,22 +102,16 @@ class TaskDispatcher(object):
         improved as we add code to handle Task state "rainy day" scenarios such
         as Timeouts etc. so park for now, but something to be aware of.
         """
-        with opentracing.tracer.start_active_span(
-            operation_name="Task",
-            child_of=span_context("text_map", message.properties, self.logger),
-            tags={
-                "component": "task_dispatcher",
-                "message_bus.destination": self.reply_to.name,
-                "span.kind": "consumer",
-                "peer.address": self.peer_address
-            }
-        ) as scope:
-            correlation_id = message.correlation_id
-            request = self.pending_requests.get(correlation_id)
-            if request:
-                try:
-                    del self.pending_requests[correlation_id]
-                    callback, timeout_id, carrier = request
+        correlation_id = message.correlation_id
+        request = self.pending_requests.get(correlation_id)
+        if request:
+            try:
+                del self.pending_requests[correlation_id]
+                callback, timeout_id, rpcmessage_task_span = request
+                with opentracing.tracer.scope_manager.activate(
+                    span=rpcmessage_task_span,
+                    finish_on_close=True
+                ) as scope:
                     # Cancel the timeout previously set for this request.
                     self.state_engine.event_dispatcher.clear_timeout(timeout_id)
                     if callable(callback):
@@ -119,12 +127,30 @@ class TaskDispatcher(object):
                             )
 
                         callback(result)
-                except ValueError as e:
-                    self.logger.error(
-                        "Response {} does not contain valid JSON".format(message.body)
-                    )
-            else:
+            except ValueError as e:
+                self.logger.error(
+                    "Response {} does not contain valid JSON".format(message.body)
+                )
+        else:
+            with opentracing.tracer.start_active_span(
+                operation_name="Task",
+                child_of=span_context("text_map", message.properties, self.logger),
+                tags={
+                    "component": "task_dispatcher",
+                    "message_bus.destination": self.reply_to.name,
+                    "span.kind": "consumer",
+                    "peer.address": self.peer_address
+                }
+            ) as scope:
                 self.logger.info("Response {} has no matching requestor".format(message))
+                scope.span.set_tag("error", True)
+                scope.span.log_kv(
+                    {
+                        "event": "No matching requestor",
+                        "message": "Response has no matching requestor",
+                    }
+                )
+
 
         message.acknowledge()
 
@@ -195,15 +221,27 @@ class TaskDispatcher(object):
             """
             A wrapper for for use when returning errors to the calling Task.
             The wrapper is mainly to provide OpenTracing boilerplate.
+            The carrier should be provided in the case where we don't have the
+            original span relating to the request. In that case we create a new
+            span to represent this error from the information provided in
+            carrier, which should be an OpenTracing Carrier. If we do have the
+            original span then carrier should be None, and the span should be 
+            managed in the code calling this function.
             We pass in the callback to be used by this function as it may be
             called from something asynchronous like a timeout, where the
             callback may have been stored in pending_requests rather than using
             the callback wrapped in the closure of execute_task.
             """
-            with opentracing.tracer.start_active_span(
-                operation_name="Task",
-                child_of=span_context("text_map", carrier, self.logger),
-            ) as scope:
+            scope = None
+            if carrier:
+                scope = opentracing.tracer.start_active_span(
+                    operation_name="Task",
+                    child_of=span_context("text_map", carrier, self.logger),
+                )
+            else:
+                scope = opentracing.tracer.scope_manager.active
+            
+            with scope:
                 opentracing.tracer.active_span.set_tag("error", True)
                 opentracing.tracer.active_span.log_kv(
                     {
@@ -278,13 +316,17 @@ class TaskDispatcher(object):
                 request = self.pending_requests.get(correlation_id)
                 if request:
                     del self.pending_requests[correlation_id]
-                    callback, timeout_id, carrier = request
+                    callback, timeout_id, task_span = request
                     error = {
                         "errorType": "States.Timeout",
                         "errorMessage": "State or Execution ran for longer " \
                             "than the specified TimeoutSeconds value",
                     }
-                    error_callback(carrier, error, callback)
+                    with opentracing.tracer.scope_manager.activate(
+                        span=task_span,
+                        finish_on_close=True
+                    ) as scope:
+                        error_callback(None, error, callback)
 
             """
             Start an OpenTracing trace for the rpcmessage request.
@@ -301,12 +343,12 @@ class TaskDispatcher(object):
                     "span.kind": "producer",
                     "peer.address": self.peer_address,
                     "execution_arn": context["Execution"]["Id"]
-                }
+                },
+                finish_on_close=False
             ) as scope:
                 """
-                We also pass tracer carrier to pending_requests so we can use
-                it in case of a timeout. For a normal response we use the
-                tracer from the response message instead.
+                We also pass the span to pending_requests so we can use
+                it when receiving a response, and in case of a timeout.
                 """
                 carrier = inject_span("text_map", scope.span, self.logger)
                 message = Message(
@@ -327,11 +369,10 @@ class TaskDispatcher(object):
                 If the response occurs before the timeout expires the timeout
                 should be cancelled, so we store the timeout_id as well as the
                 required callback in the dict keyed by correlation_id.
-                As mentioned above we also store the serialised OpenTracing
-                span context so that if a timeout occurs we can use the request
-                span as the parent context.
+                As mentioned above we also store the OpenTracing span so that if a 
+                timeout occurs we can raise an error on the request span.
                 """
-                self.pending_requests[correlation_id] = (callback, timeout_id, carrier)
+                self.pending_requests[correlation_id] = (callback, timeout_id, scope.span)
                 self.producer.send(message)
 
         # def asl_service_openfaas():  # TODO
