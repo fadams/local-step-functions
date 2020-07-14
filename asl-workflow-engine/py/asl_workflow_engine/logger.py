@@ -56,6 +56,19 @@ def init_logging(log_name, log_level=logging.INFO):
     if logger.hasHandlers():
         return logger
 
+    # If the LOG_LEVEL environment variable is set use it to set the log level.
+    log_levels = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARN": logging.WARN,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+    }
+
+    configured_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    if configured_level in log_levels:
+        log_level = log_levels.get(configured_level, logging.INFO)
+
     # Select automation friendly structured logging or more "human readable"
     # logging based on the value of the USE_STRUCTURED_LOGGING environment var.
     if os.environ.get("USE_STRUCTURED_LOGGING", "false").lower() == "true":
@@ -97,5 +110,6 @@ def init_logging(log_name, log_level=logging.INFO):
 
     logger.addHandler(handler)
     logger.setLevel(log_level)
+    logger.debug("DEBUG enabled")
 
     return logger

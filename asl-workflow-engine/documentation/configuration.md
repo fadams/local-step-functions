@@ -88,4 +88,6 @@ In addition to the main configuration options there are a few low-level options 
 
 **USE_STRUCTURED_LOGGING** specifies whether to use more human readable traditional logging of more machine readable structured logging. This defaults to false and thus presents traditional logs, but for production environments it is recommended that this be set to true.
 
+**LOG_LEVEL** specifies the log level to use from the usual choices of: **DEBUG**, **INFO**, **WARN**, **ERROR**, **CRITICAL**. The default level is **INFO**.
+
 **DISABLE_EXECUTIONS_STORE** and **DISABLE_HISTORY_STORE** are intended to be used when the Redis store is enabled to selectively disable storing either the execution metadata used by DescribeExecution or the execution history used by GetExecutionHistory. They are only really intended to be used during performance testing to gauge the impact that observability might have of execution throughput.

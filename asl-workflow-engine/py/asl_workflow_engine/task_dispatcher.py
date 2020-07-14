@@ -21,13 +21,18 @@ import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 
-import json, os, time, uuid, opentracing, urllib
+import os, time, uuid, opentracing, urllib.parse
 from datetime import datetime, timezone
 
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.open_tracing_factory import span_context, inject_span
 from asl_workflow_engine.messaging_exceptions import *
 from asl_workflow_engine.arn import *
+
+try:  # Attempt to use ujson if available https://pypi.org/project/ujson/
+    import ujson as json
+except:  # Fall back to standard library json
+    import json
 
 class TaskDispatcher(object):
     def __init__(self, state_engine, config):
@@ -39,6 +44,7 @@ class TaskDispatcher(object):
         """
         self.logger = init_logging(log_name="asl_workflow_engine")
         self.logger.info("Creating TaskDispatcher")
+        self.logger.info("Using {} JSON parser".format(json.__name__))
 
         """
         Get the messaging peer.address, e.g. the Broker address for use

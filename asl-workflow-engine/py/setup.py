@@ -21,12 +21,13 @@ from setuptools import setup, find_packages
 
 setup(
     name="asl_workflow_engine",
-    version="1.2.0",
+    version="1.3.0",
     description="A workflow engine based on the Amazon States Language (ASL).",
     long_description="A workflow engine based on the Amazon States Language (ASL). It is intended to provide the features and API of AWS Step Functions in an engine that can be deployed to a range of different hosting environments.",
     packages=find_packages(),
     install_requires=["pika",
                       "structlog",
+                      "ujson",
                       "jsonpath",
                       "flask",
                       "redis",

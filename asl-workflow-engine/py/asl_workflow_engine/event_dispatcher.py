@@ -21,9 +21,14 @@ import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 
-import json, importlib
+import importlib
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.messaging_exceptions import *
+
+try:  # Attempt to use ujson if available https://pypi.org/project/ujson/
+    import ujson as json
+except:  # Fall back to standard library json
+    import json
 
 class EventDispatcher(object):
     def __init__(self, state_engine, config):
@@ -35,6 +40,8 @@ class EventDispatcher(object):
         """
         self.logger = init_logging(log_name="asl_workflow_engine")
         self.logger.info("Creating EventDispatcher")
+        self.logger.info("Using {} JSON parser".format(json.__name__))
+
         self.queue_config = config["event_queue"]  # TODO Handle missing config
         self.notifier_config = config["notifier"]  # TODO Handle missing config
         # TODO validate that config contains the keys we need.

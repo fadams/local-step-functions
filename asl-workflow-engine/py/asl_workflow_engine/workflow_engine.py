@@ -18,6 +18,10 @@
 #
 # Run with:
 # PYTHONPATH=.. python3 workflow_engine.py
+# PYTHONPATH=.. LOG_LEVEL=DEBUG python3 workflow_engine.py
+#
+# Run with cProfile enabled:
+# PYTHONPATH=.. python3 -m cProfile -s tottime workflow_engine.py > prof-tottime.txt
 #
 """
 This is the main application entry point to the ASL Workflow Engine.

@@ -175,7 +175,7 @@ def inject_span(format, span, logger):
     """
     carrier = {}
     opentracing.tracer.inject(span, format, carrier)
-    logger.info("Tracing active span: carrier {}".format(carrier))
+    logger.debug("Tracing active span: carrier {}".format(carrier))
 
     return carrier
 

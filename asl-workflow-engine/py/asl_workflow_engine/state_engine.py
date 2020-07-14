@@ -32,7 +32,7 @@ import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 
-import operator, json, time, uuid, opentracing
+import operator, time, uuid, opentracing
 
 from datetime import datetime, timezone, timedelta
 from asl_workflow_engine.state_engine_paths import (
@@ -54,6 +54,10 @@ from asl_workflow_engine.task_dispatcher import TaskDispatcher
 from asl_workflow_engine.asl_exceptions import *
 from asl_workflow_engine.arn import *
 
+try:  # Attempt to use ujson if available https://pypi.org/project/ujson/
+    import ujson as json
+except:  # Fall back to standard library json
+    import json
 
 def parse_rfc3339_datetime(rfc3339):
     """
@@ -120,9 +124,10 @@ class StateEngine(object):
         """
         self.logger = init_logging(log_name="asl_workflow_engine")
         self.logger.info("Creating StateEngine")
+        self.logger.info("Using {} JSON parser".format(json.__name__))
 
         store_url = config["state_engine"]["store_url"]
-
+        
         """
         The ASL store is semantically a dict of dict. The outer dict holds
         ASL objects (also dicts) keyed by the ARN of the ASL State Machine.
@@ -426,12 +431,12 @@ class StateEngine(object):
         """
         Store the execution history information in a way that will be accessible
         to the REST API.
+
+        Only do DEBUG logging, as the details object is likely to be expensive
+        and in any case the idea is to get execution history via the REST API
+        https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html
         """
-        # TODO logging the details object is likely to be expensive and in any
-        # case the idea is to get execution history via the REST API
-        # https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html
-        # Probably need to be more selective about what is logged here.
-        self.logger.info("{} {} {}".format(execution_arn, update_type, details))
+        self.logger.debug("{} {} {}".format(execution_arn, update_type, details))
 
         """
         self.executions.get(execution_arn) == None should only really happen if

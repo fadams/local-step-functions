@@ -33,9 +33,7 @@ and “Parameters”: Pass State, Task State, and Parallel State.
 import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
-
 import re
-import json
 
 """
 ASL paths use JSONPath

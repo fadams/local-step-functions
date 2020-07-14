@@ -118,6 +118,7 @@ if __name__ == '__main__':
         "arn:aws:states:local:0123456789:stateMachine:caller_state_machine.*",
         "arn:aws:states:local:0123456789:stateMachine:parallel1.*",
         "arn:aws:states:local:0123456789:stateMachine:map1.*",
+        "arn:aws:states:local:0123456789:stateMachine:iterate2_state_machine.*",
     ]
     NotificationHandler(state_machines)
 
