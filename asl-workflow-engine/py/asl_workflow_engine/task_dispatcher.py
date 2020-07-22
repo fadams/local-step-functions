@@ -34,6 +34,9 @@ try:  # Attempt to use ujson if available https://pypi.org/project/ujson/
 except:  # Fall back to standard library json
     import json
 
+
+MAX_DATA_LENGTH = 32768  # Max length of the input or output JSON string.
+
 class TaskDispatcher(object):
     def __init__(self, state_engine, config):
         """
@@ -43,8 +46,7 @@ class TaskDispatcher(object):
         :type config: dict
         """
         self.logger = init_logging(log_name="asl_workflow_engine")
-        self.logger.info("Creating TaskDispatcher")
-        self.logger.info("Using {} JSON parser".format(json.__name__))
+        self.logger.info("Creating TaskDispatcher, using {} JSON parser".format(json.__name__))
 
         """
         Get the messaging peer.address, e.g. the Broker address for use
@@ -121,7 +123,17 @@ class TaskDispatcher(object):
                     # Cancel the timeout previously set for this request.
                     self.state_engine.event_dispatcher.clear_timeout(timeout_id)
                     if callable(callback):
-                        result = json.loads(message.body.decode("utf8"))
+                        message_body = message.body
+                        """
+                        First check if the response has exceeded the 32768
+                        character quota described in Stepfunction Quotas page.
+                        https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
+                        We do the test here as we have the raw JSON string handy.
+                        """
+                        if len(message_body) > MAX_DATA_LENGTH:
+                            result = {"errorType": "States.DataLimitExceeded"}
+                        else:
+                            result = json.loads(message_body.decode("utf8"))
                         error_type = result.get("errorType")
                         if error_type:
                             opentracing.tracer.active_span.set_tag("error", True)

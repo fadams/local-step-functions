@@ -39,8 +39,7 @@ class EventDispatcher(object):
         :type config: dict
         """
         self.logger = init_logging(log_name="asl_workflow_engine")
-        self.logger.info("Creating EventDispatcher")
-        self.logger.info("Using {} JSON parser".format(json.__name__))
+        self.logger.info("Creating EventDispatcher, using {} JSON parser".format(json.__name__))
 
         self.queue_config = config["event_queue"]  # TODO Handle missing config
         self.notifier_config = config["notifier"]  # TODO Handle missing config

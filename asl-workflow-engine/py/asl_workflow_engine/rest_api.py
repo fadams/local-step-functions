@@ -78,13 +78,20 @@ import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 
-import re, json, time, uuid, logging, opentracing
+import re, time, uuid, logging, opentracing
 from datetime import datetime, timezone
 from flask import Flask, escape, request, jsonify, abort
 
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.open_tracing_factory import span_context, inject_span
 from asl_workflow_engine.arn import *
+from asl_workflow_engine.state_engine import MAX_DATA_LENGTH, MAX_STATE_MACHINE_LENGTH
+
+try:  # Attempt to use ujson if available https://pypi.org/project/ujson/
+    import ujson as json
+except:  # Fall back to standard library json
+    import json
+
 
 def valid_name(name):
     return (
@@ -136,7 +143,8 @@ class RestAPI(object):
         """
         """
         self.logger = init_logging(log_name="asl_workflow_engine")
-        self.logger.info("Creating RestAPI")
+        self.logger.info("Creating RestAPI, using {} JSON parser".format(json.__name__))
+
         config = config.get("rest_api")
         if config:
             self.host = config.get("host", "0.0.0.0")
@@ -243,8 +251,20 @@ class RestAPI(object):
                     )
                     return aws_error("StateMachineAlreadyExists"), 400
 
+                definition = params.get("definition", "")
+                """
+                First check if the definition length has exceeded the 1048576
+                character limit described in the CreateStateMachine API page.
+                https://docs.aws.amazon.com/step-functions/latest/apireference/API_CreateStateMachine.html
+                """
+                if len(definition) == 0 or len(definition) > MAX_STATE_MACHINE_LENGTH:
+                    self.logger.error(
+                        "RestAPI CreateStateMachine: Invalid definition size for State Machine '{}'.".format(name)
+                    )
+                    return aws_error("InvalidDefinition"), 400
+
                 try:
-                    definition = json.loads(params.get("definition", ""))
+                    definition = json.loads(definition)
                 except ValueError as e:
                     definition = None
                     self.logger.error(
@@ -252,6 +272,7 @@ class RestAPI(object):
                             params.get("definition")
                         )
                     )
+                    return aws_error("InvalidDefinition"), 400
 
                 if not (name and role_arn and definition):
                     self.logger.warning(
@@ -457,9 +478,21 @@ class RestAPI(object):
                         return aws_error("InvalidArn"), 400
                     state_machine["roleArn"] = role_arn
 
-                if params.get("definition"):
+                definition = params.get("definition", "")
+                if definition:
+                    """
+                    First check if the definition length has exceeded the 1048576
+                    character limit described in the UpdateStateMachine API page.
+                    https://docs.aws.amazon.com/step-functions/latest/apireference/API_UpdateStateMachine.html
+                    """
+                    if len(definition) == 0 or len(definition) > MAX_STATE_MACHINE_LENGTH:
+                        self.logger.error(
+                            "RestAPI CreateStateMachine: Invalid definition size for State Machine '{}'.".format(name)
+                        )
+                        return aws_error("InvalidDefinition"), 400
+
                     try:
-                        definition = json.loads(params.get("definition", ""))
+                        definition = json.loads(definition)
                     except ValueError as e:
                         definition = None
                         self.logger.error(
@@ -467,6 +500,8 @@ class RestAPI(object):
                                 params.get("definition")
                             )
                         )
+                        return aws_error("InvalidDefinition"), 400
+
                     # TODO ASL Validator??
                     state_machine["definition"] = definition
 
@@ -555,9 +590,24 @@ class RestAPI(object):
                     )
                     return aws_error("InvalidName"), 400
 
-                input = params.get("input", {})
+                input = params.get("input", "{}")
+                """
+                First check if the input length has exceeded the 32768 character
+                quota described in Stepfunction Quotas page.
+                https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
+                """
+                if len(input) > MAX_DATA_LENGTH:
+                    self.logger.error(
+                        "RestAPI StartExecution: input size for execution '{}' exceeds "
+                        "the maximum number of characters service limit.".format(name)
+                    )
+                    return aws_error("InvalidExecutionInput"), 400
+
                 try:
                     input = json.loads(input)
+                except TypeError as e:
+                    self.logger.error("RestAPI StartExecution: Invalid input, {}".format(e))
+                    return aws_error("InvalidExecutionInput"), 400
                 except ValueError as e:
                     self.logger.error(
                         "RestAPI StartExecution: input {} does not contain valid JSON".format(

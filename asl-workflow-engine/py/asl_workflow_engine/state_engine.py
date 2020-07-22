@@ -59,6 +59,16 @@ try:  # Attempt to use ujson if available https://pypi.org/project/ujson/
 except:  # Fall back to standard library json
     import json
 
+"""
+Stepfunction quota/size limits
+https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
+https://docs.aws.amazon.com/step-functions/latest/apireference/API_StartExecution.html
+https://docs.aws.amazon.com/step-functions/latest/apireference/API_CreateStateMachine.html
+"""
+MAX_EXECUTION_HISTORY_LENGTH = 25000
+MAX_DATA_LENGTH = 32768  # Max length of the input or output JSON string.
+MAX_STATE_MACHINE_LENGTH = 1048576  # Max length of the State Machine definition.
+
 def parse_rfc3339_datetime(rfc3339):
     """
     Parse an RFC3339 (https://www.ietf.org/rfc/rfc3339.txt) format string into
@@ -123,8 +133,7 @@ class StateEngine(object):
         """
         """
         self.logger = init_logging(log_name="asl_workflow_engine")
-        self.logger.info("Creating StateEngine")
-        self.logger.info("Using {} JSON parser".format(json.__name__))
+        self.logger.info("Creating StateEngine, using {} JSON parser".format(json.__name__))
 
         store_url = config["state_engine"]["store_url"]
         
@@ -249,14 +258,14 @@ class StateEngine(object):
 
         context["State"]["Name"] = start_state
 
-        if context.get("Execution") == None:
+        if "Execution" not in context:
             context["Execution"] = {}
         execution = context["Execution"]
 
-        if not execution.get("Name"):
+        if "Name" not in execution:
             execution["Name"] = str(uuid.uuid4())
 
-        if not execution.get("Id"):
+        if "Id" not in execution:
             # Create Id
             # Form executionArn from stateMachineArn and uuid
             arn = parse_arn(state_machine_id)
@@ -276,10 +285,10 @@ class StateEngine(object):
         part of the Context Object the "Input" field here is a JSON object.
         https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
         """
-        if execution.get("Input") == None:
+        if "Input" not in execution:
             execution["Input"] = data
 
-        if not execution.get("RoleArn"):
+        if "RoleArn" not in execution:
             """
             The default dummy ARN case shouldn't generally occur unless
             the asl_store "database" has been manually edited because when
@@ -292,7 +301,7 @@ class StateEngine(object):
 
         # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
         start_time = datetime.now(timezone.utc).astimezone().isoformat()
-        if execution.get("StartTime") == None:
+        if "StartTime" not in execution:
             execution["StartTime"] = start_time
 
         """
@@ -302,14 +311,14 @@ class StateEngine(object):
         occur the EnteredTime will reflect the time the state was entered
         not the time the redelivery occurred.
         """
-        if context["State"].get("EnteredTime") == None:
+        if "EnteredTime" not in context["State"]:
             context["State"]["EnteredTime"] = start_time
             
         """
         Populate the metadata required by the DescribeExecution API call.
         https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html
         Note that the "input" and "output" fields of the execution detail and
-        history are actually strings not JSON objects, hence the json.dumps().
+        history are actually JSON strings not JSON objects.
         It actually took a while to note that subtlety, especially as the AWS
         CLI describe-execution call doesn't actually complain and displayed the
         JSON object that was originally being send before json.dumps() was added.
@@ -342,12 +351,38 @@ class StateEngine(object):
         Set event's new current state in $$.State.Name to Next state.
         """
         data = event["data"]
+        """
+        Note that the "output" field of the execution detail and history is a
+        JSON string not a JSON object, hence the json.dumps().
+        https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html
+        https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html
+        """
+        output_as_string = json.dumps(data)
         context = event["context"]
         state = context["State"]
+
+        """
+        First check if the State's aggregate output has exceeded the 32768
+        character quota described in Stepfunction Quotas page.
+        https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
+        If so then we fail the execution.
+        """
+        if len(output_as_string) > MAX_DATA_LENGTH:
+            error_message = ("The state/task '{}' returned a result with a size "
+                             "exceeding the maximum number of characters "
+                             "service limit.").format(state["Name"])
+            event["data"] = {
+                "Error": "States.DataLimitExceeded",
+                "Cause": error_message,
+            }
+            self.logger.warning("States.DataLimitExceeded: {}".format(error_message))
+            self.end_state_machine(state_type, event)
+            return
+
         self.update_execution_history(
             context["Execution"]["Id"],
             state_type + "StateExited",
-            {"output": json.dumps(data), "name": state["Name"]},
+            {"output": output_as_string, "name": state["Name"]},
         )
         # Update the state with the next state's name and erase any retry info.
         state["Name"] = next_state
@@ -367,7 +402,7 @@ class StateEngine(object):
         data = event["data"]
         """
         Note that the "output" field of the execution detail and history is a
-        string not a JSON object, hence the json.dumps().
+        JSON string not a JSON object, hence the json.dumps().
         https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html
         https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html
         """
@@ -919,7 +954,14 @@ class StateEngine(object):
                 """
                 error_type = result.get("errorType")
                 if error_type:
-                    error_message = result.get("errorMessage", "")
+                    if error_type == "States.DataLimitExceeded":
+                        error_message = ("The state/task '{}' returned a result "
+                                         "with a size exceeding the maximum "
+                                         "number of characters service limit.").format(
+                                            state.get("Resource")
+                                         )
+                    else:
+                        error_message = result.get("errorMessage", "")
                     self.logger.warning("{}: {}".format(error_type, error_message))
                     handle_error(error_type, error_message)
                     self.event_dispatcher.acknowledge(id)
@@ -1716,13 +1758,41 @@ class StateEngine(object):
         set we will re-enter the Map state, possibly several times, to process
         the next batch of items so again we want to suppress the history update.
         """
+        execution_arn = context["Execution"]["Id"]
         reentered_map = state_type == "Map" and get_start_index(context) != 0
         if not context["State"].get("RetryCount") and not reentered_map:
             self.update_execution_history(
-                context["Execution"]["Id"],
+                execution_arn,
                 state_type + "StateEntered",
                 {"input": json.dumps(data), "name": current_state},
             )
+
+        """
+        We check the execution history hasn't exceeded the 25000 event limit in
+        https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
+        here rather than in update_execution_history, because here we can more
+        cleanly call handle_error() and fail the execution in a way that is
+        consistent with other failures. Note that this approach may result in
+        the stored history being a few events more than the actual limit. Doing
+        the test here also means that ExecutionSucceeded/ExecutionFailed events
+        won't cause the execution history limit to be exceeded, as failing the
+        execution on those events doesn't seem particularly sensible.
+        The error code of States.ExecutionHistoryLimitExceeded is chosen to
+        mirror the code States.DataLimitExceeded used when the input or output
+        size has exceeded their limit, however the actual error code used for
+        this failure unfortunately doesn't seem to be documented anywhere.
+        """
+        execution_history_length = len(self.execution_history[execution_arn])
+        #print(execution_history_length)
+        if execution_history_length > MAX_EXECUTION_HISTORY_LENGTH:
+            message = ("Execution '{}' has a history of {} events and has "
+                       "exceeded the maximum execution history size.").format(
+                        execution_arn, execution_history_length
+                      )
+            self.logger.info(message)
+            handle_error("States.ExecutionHistoryLimitExceeded", message)
+            self.event_dispatcher.acknowledge(id)
+            return
 
         """
         Use the ASL state type of the current state to dynamically invoke the
