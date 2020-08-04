@@ -242,7 +242,7 @@ class StateEngine(object):
         subject = execution_detail["stateMachineArn"] + "." + execution_detail["status"]
         self.event_dispatcher.broadcast(subject, cw_event)
 
-    def start_state_machine(self, start_state, event):
+    def start_state_machine(self, state_machine_type, start_state, event):
         """
         Initialise the state machine execution's state, in particular this will
         set any context metadata that hasn't previously been set elsewhere.
@@ -334,19 +334,32 @@ class StateEngine(object):
             "status": "RUNNING",
             "stopDate": None,
         }
-        self.executions[execution_arn] = execution_detail
-        self.executions.set_ttl(execution_arn, self.execution_ttl)
 
-        # Don't set the execution_history ttl here, wait until first append.
-        self.execution_history[execution_arn] = []
+        """
+        Only store execution metadata/history for "STANDARD" not "EXPRESS"
+        State Machine workflows.
+        """
+        if state_machine_type == "STANDARD":
+            self.executions[execution_arn] = execution_detail
+            self.executions.set_ttl(execution_arn, self.execution_ttl)
+
+            # Don't set the execution_history ttl here, wait until first append.
+            self.execution_history[execution_arn] = []
+
+        """
+        Still call this for "EXPRESS" State Machine workflows. Initially it will
+        return immediately for "EXPRESS" workflows, but we may do extra logging.
+        """
         self.update_execution_history(
+            state_machine_type,
             execution_arn,
             "ExecutionStarted",
             {"input": input_as_string, "roleArn": execution["RoleArn"]},
         )
+
         self.broadcast_notification(execution_arn, execution_detail)
 
-    def change_state(self, state_type, next_state, event):
+    def change_state(self, state_machine_type, state_type, next_state, event):
         """
         Set event's new current state in $$.State.Name to Next state.
         """
@@ -376,10 +389,11 @@ class StateEngine(object):
                 "Cause": error_message,
             }
             self.logger.warning("States.DataLimitExceeded: {}".format(error_message))
-            self.end_state_machine(state_type, event)
+            self.end_state_machine(state_machine_type, state_type, event)
             return
 
         self.update_execution_history(
+            state_machine_type,
             context["Execution"]["Id"],
             state_type + "StateExited",
             {"output": output_as_string, "name": state["Name"]},
@@ -395,7 +409,7 @@ class StateEngine(object):
         state["EnteredTime"] = datetime.now(timezone.utc).astimezone().isoformat()
         self.event_dispatcher.publish(event)
 
-    def end_state_machine(self, state_type, event):
+    def end_state_machine(self, state_machine_type, state_type, event):
         """
         End the state machine execution and update execution metadata.
         """
@@ -411,11 +425,42 @@ class StateEngine(object):
         state = context["State"]
         execution_arn = context["Execution"]["Id"]
         self.update_execution_history(
+            state_machine_type,
             execution_arn,
             state_type + "StateExited",
             {"output": output_as_string, "name": state["Name"]},
         )
-        execution_detail = self.executions[execution_arn]
+
+        if state_machine_type == "STANDARD":
+            execution_detail = self.executions[execution_arn]
+        else:
+            """
+            For "EXPRESS" workflows we don't store the execution metadata in
+            self.executions, however the missing information for the current
+            execution is actually available in the execution context or can
+            be derived from the execution ARN.
+            """
+            # Derive missing fields from execution_arn
+            split = execution_arn.rpartition(':')
+            arn = parse_arn(split[0])
+            arn["resource_type"] = "stateMachine"
+            state_machine_arn = create_arn(arn)
+            name = split[2]
+
+            execution = context["Execution"]
+            start_date = parse_rfc3339_datetime(execution["StartTime"]).timestamp()
+
+            execution_detail = {
+                "executionArn": execution_arn,
+                "input": json.dumps(execution["Input"]),
+                "name": name,
+                "output": None,
+                "startDate": start_date,
+                "stateMachineArn": state_machine_arn,
+                "status": "RUNNING",
+                "stopDate": None,
+            }
+
         execution_detail["stopDate"] = time.time()
 
         with opentracing.tracer.start_active_span(
@@ -442,6 +487,7 @@ class StateEngine(object):
                 """
                 execution_detail["output"] = None
                 self.update_execution_history(
+                    state_machine_type,
                     execution_arn,
                     "ExecutionFailed",
                     {"cause": data.get("Cause"), "error": data.get("Error")}
@@ -451,6 +497,7 @@ class StateEngine(object):
                 execution_detail["status"] = "SUCCEEDED"
                 execution_detail["output"] = output_as_string
                 self.update_execution_history(
+                    state_machine_type,
                     execution_arn,
                     "ExecutionSucceeded",
                     {"output": output_as_string}
@@ -462,7 +509,21 @@ class StateEngine(object):
 
         self.broadcast_notification(execution_arn, execution_detail)
 
-    def update_execution_history(self, execution_arn, update_type, details):
+    def update_execution_history(
+            self, state_machine_type, execution_arn, update_type, details
+        ):
+
+        """
+        TODO For "EXPRESS" State Machines we might actually want to log with a
+        higher level than debug. "STANDARD" State Machines store execution
+        history and other execution metadata but "EXPRESS" State Machines don't.
+        However Express Workflows send execution history to CloudWatch Logs.
+        https://aws.amazon.com/blogs/compute/new-express-workflows-for-aws-step-functions/
+        """
+        if state_machine_type == "EXPRESS":
+            self.logger.debug("{} {} {}".format(execution_arn, update_type, details))
+            return
+
         """
         Store the execution history information in a way that will be accessible
         to the REST API.
@@ -488,7 +549,9 @@ class StateEngine(object):
 
             # Derive missing fields from execution_arn
             split = execution_arn.rpartition(':')
-            state_machine_arn = split[0]
+            arn = parse_arn(split[0])
+            arn["resource_type"] = "stateMachine"
+            state_machine_arn = create_arn(arn)
             name = split[2]
 
             self.executions[execution_arn] = {
@@ -635,6 +698,13 @@ class StateEngine(object):
             return
 
         """
+        Record if the State Machine for this execution is "STANDARD" or "EXPRESS".
+        If "EXPRESS" certain features, like recording execution descriptions and
+        history, will be disabled as per the Stepfunction API.
+        """
+        state_machine_type = asl_item.get("type")
+
+        """
         https://states-language.net/spec.html#data
         https://docs.aws.amazon.com/step-functions/latest/dg/concepts-state-machine-data.html
 
@@ -666,7 +736,7 @@ class StateEngine(object):
             If so initialise unset context fields and start OpenTracing span.
             """
             current_state = ASL["StartAt"]
-            self.start_state_machine(current_state, event)
+            self.start_state_machine(state_machine_type, current_state, event)
 
             with opentracing.tracer.start_active_span(
                 operation_name="StartExecution:ExecutionStarting",
@@ -840,7 +910,12 @@ class StateEngine(object):
                         """
                         event["data"] = merge_result(data, result, catcher, "$")
 
-                        self.change_state(state_type, catcher.get("Next"), event)
+                        self.change_state(
+                            state_machine_type,
+                            state_type,
+                            catcher.get("Next"),
+                            event
+                        )
                         break
 
             """
@@ -854,7 +929,7 @@ class StateEngine(object):
                     result["Cause"] = error_message
 
                 event["data"] = result
-                self.end_state_machine(state_type, event)
+                self.end_state_machine(state_machine_type, state_type, event)
 
         # ----------------------------------------------------------------------
 
@@ -866,13 +941,14 @@ class StateEngine(object):
             if "Branch" in context["State"]:
                 execution_arn = context["Execution"]["Id"]
                 self.update_execution_history(
+                    state_machine_type,
                     execution_arn,
                     state_type + "StateExited",
                     {"output": json.dumps(event["data"]), "name": current_state},
                 )
                 asl_state_collect_results(state_type)
             else:
-                self.end_state_machine(state_type, event)
+                self.end_state_machine(state_machine_type, state_type, event)
                 if id != None:
                     self.event_dispatcher.acknowledge(id)
 
@@ -922,7 +998,12 @@ class StateEngine(object):
                 if state.get("End"):
                     handle_terminal_state(state_type, event, id)
                 else:
-                    self.change_state(state_type, state.get("Next"), event)
+                    self.change_state(
+                        state_machine_type,
+                        state_type,
+                        state.get("Next"),
+                        event
+                    )
                     self.event_dispatcher.acknowledge(id)
             except ResultPathMatchFailure as e:
                 handle_error("States.ResultPathMatchFailure", str(e))
@@ -973,7 +1054,12 @@ class StateEngine(object):
                         if state.get("End"):
                             handle_terminal_state(state_type, event, id)
                         else:
-                            self.change_state(state_type, state.get("Next"), event)
+                            self.change_state(
+                                state_machine_type,
+                                state_type,
+                                state.get("Next"),
+                                event
+                            )
                             self.event_dispatcher.acknowledge(id)
                     except ResultPathMatchFailure as e:
                         handle_error("States.ResultPathMatchFailure", str(e))
@@ -1232,7 +1318,12 @@ class StateEngine(object):
             transition was specified. 
             """
             if next_state:
-                self.change_state(state_type, next_state, event)
+                self.change_state(
+                    state_machine_type,
+                    state_type,
+                    next_state,
+                    event
+                )
             else:
                 message = "Choice state {} failed to find a match for the condition field extracted from its input".format(current_state)
                 self.logger.warning("States.NoChoiceMatched {}".format(message))
@@ -1264,7 +1355,12 @@ class StateEngine(object):
                 if state.get("End"):
                     handle_terminal_state(state_type, event, id)
                 else:
-                    self.change_state(state_type, state.get("Next"), event)
+                    self.change_state(
+                        state_machine_type,
+                        state_type,
+                        state.get("Next"),
+                        event
+                    )
                     self.event_dispatcher.acknowledge(id)
 
             """
@@ -1619,7 +1715,12 @@ class StateEngine(object):
                 if state.get("End"):
                     handle_terminal_state(state_type, event, id)
                 else:
-                    self.change_state(state_type, state.get("Next"), event)
+                    self.change_state(
+                        state_machine_type,
+                        state_type,
+                        state.get("Next"),
+                        event
+                    )
                     self.event_dispatcher.acknowledge(id)
 
 
@@ -1727,7 +1828,12 @@ class StateEngine(object):
             Publish any new state change before acknowledging the events.
             """
             if not state.get("End"):
-                self.change_state(state_type, state.get("Next"), event)
+                self.change_state(
+                    state_machine_type,
+                    state_type,
+                    state.get("Next"),
+                    event
+                )
 
             # Acknowledge the events for each branch's terminal state
             for event_id in event_ids:
@@ -1762,6 +1868,7 @@ class StateEngine(object):
         reentered_map = state_type == "Map" and get_start_index(context) != 0
         if not context["State"].get("RetryCount") and not reentered_map:
             self.update_execution_history(
+                state_machine_type,
                 execution_arn,
                 state_type + "StateEntered",
                 {"input": json.dumps(data), "name": current_state},
@@ -1782,17 +1889,18 @@ class StateEngine(object):
         size has exceeded their limit, however the actual error code used for
         this failure unfortunately doesn't seem to be documented anywhere.
         """
-        execution_history_length = len(self.execution_history[execution_arn])
-        #print(execution_history_length)
-        if execution_history_length > MAX_EXECUTION_HISTORY_LENGTH:
-            message = ("Execution '{}' has a history of {} events and has "
-                       "exceeded the maximum execution history size.").format(
-                        execution_arn, execution_history_length
-                      )
-            self.logger.info(message)
-            handle_error("States.ExecutionHistoryLimitExceeded", message)
-            self.event_dispatcher.acknowledge(id)
-            return
+        if state_machine_type == "STANDARD":
+            execution_history_length = len(self.execution_history[execution_arn])
+            #print(execution_history_length)
+            if execution_history_length > MAX_EXECUTION_HISTORY_LENGTH:
+                message = ("Execution '{}' has a history of {} events and has "
+                           "exceeded the maximum execution history size.").format(
+                            execution_arn, execution_history_length
+                          )
+                self.logger.info(message)
+                handle_error("States.ExecutionHistoryLimitExceeded", message)
+                self.event_dispatcher.acknowledge(id)
+                return
 
         """
         Use the ASL state type of the current state to dynamically invoke the

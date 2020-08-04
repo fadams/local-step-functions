@@ -236,6 +236,15 @@ class RestAPI(object):
                     resource=name,
                 )
 
+                # Get State Machine type (STANDARD or EXPRESS) if supplied
+                type = params.get("type", "STANDARD")
+                if type not in {"STANDARD", "EXPRESS"}:
+                    self.logger.error(
+                        "RestAPI CreateStateMachine: State Machine type {} "
+                        "is not supported".format(type)
+                    )
+                    return aws_error("StateMachineTypeNotSupported"), 400
+
                 """
                 Look up stateMachineArn. Use get() not get_cached_view() here as
                 calls to CreateStateMachine might reasonably *expect* no match.
@@ -291,7 +300,7 @@ class RestAPI(object):
                     "stateMachineArn": state_machine_arn,
                     "updateDate": creation_date,
                     "status": "ACTIVE",
-                    "type": "STANDARD",
+                    "type": type,
                 }
 
                 resp = {
