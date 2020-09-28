@@ -601,7 +601,7 @@ class RestAPI(object):
 
                 input = params.get("input", "{}")
                 """
-                First check if the input length has exceeded the 32768 character
+                First check if the input length has exceeded the 262144 character
                 quota described in Stepfunction Quotas page.
                 https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
                 """

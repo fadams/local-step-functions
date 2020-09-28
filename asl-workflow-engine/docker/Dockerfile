@@ -19,7 +19,10 @@ RUN apk update && apk upgrade && \
     # Remove packages only needed during installation from runtime container
     pip uninstall -y setuptools wheel pip && \
     apk del gcc g++ && \
-    rm -rf /var/cache/apk/*
+    rm -rf /var/cache/apk/* && \
+    adduser -S -u 55674 asluser root
+
+USER asluser
 
 CMD ["python", "asl_workflow_engine/workflow_engine.py"]
 

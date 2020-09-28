@@ -39,7 +39,7 @@ from asl_workflow_engine.state_engine_paths import (
     apply_jsonpath,
     get_full_jsonpath,
     apply_resultpath,
-    evaluate_parameters,
+    evaluate_payload_template,
 )
 
 from asl_workflow_engine.logger import init_logging
@@ -66,7 +66,7 @@ https://docs.aws.amazon.com/step-functions/latest/apireference/API_StartExecutio
 https://docs.aws.amazon.com/step-functions/latest/apireference/API_CreateStateMachine.html
 """
 MAX_EXECUTION_HISTORY_LENGTH = 25000
-MAX_DATA_LENGTH = 32768  # Max length of the input or output JSON string.
+MAX_DATA_LENGTH = 262144  # Max length of the input or output JSON string.
 MAX_STATE_MACHINE_LENGTH = 1048576  # Max length of the State Machine definition.
 
 def parse_rfc3339_datetime(rfc3339):
@@ -375,7 +375,7 @@ class StateEngine(object):
         state = context["State"]
 
         """
-        First check if the State's aggregate output has exceeded the 32768
+        First check if the State's aggregate output has exceeded the 262144
         character quota described in Stepfunction Quotas page.
         https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
         If so then we fail the execution.
@@ -971,12 +971,12 @@ class StateEngine(object):
             input = apply_jsonpath(data, state.get("InputPath", "$"))
 
             """
-            https://states-language.net/spec.html#parameters
+            https://states-language.net/spec.html#using-paths
 
             If the “Parameters” field is provided, its value, after the
             extraction and embedding, becomes the effective input.
             """
-            parameters = evaluate_parameters(input, context, state.get("Parameters"))
+            parameters = evaluate_payload_template(input, context, state.get("Parameters"))
 
             """
             A Pass State MAY have a field named “Result”. If present, its value
@@ -1048,6 +1048,17 @@ class StateEngine(object):
                     self.event_dispatcher.acknowledge(id)
                 else:  # No error
                     try:
+                        """
+                        https://states-language.net/spec.html#using-paths
+
+                        The value of "ResultSelector" MUST be a Payload Template,
+                        whose input is the result, and whose payload replaces
+                        and becomes the effective result.
+                        """
+                        result = evaluate_payload_template(
+                            result, context, state.get("ResultSelector")
+                        )
+
                         # Task state applies ResultPath to "raw input"
                         event["data"] = merge_result(data, result, state)
 
@@ -1080,12 +1091,12 @@ class StateEngine(object):
             resource_arn = state.get("Resource")
 
             """
-            https://states-language.net/spec.html#parameters
+            https://states-language.net/spec.html#using-paths
 
             If the “Parameters” field is provided, its value, after the
             extraction and embedding, becomes the effective input.
             """
-            parameters = evaluate_parameters(input, context, state.get("Parameters"))
+            parameters = evaluate_payload_template(input, context, state.get("Parameters"))
 
             """
             Tasks can optionally specify timeouts. Timeouts (the “TimeoutSeconds”
@@ -1492,12 +1503,12 @@ class StateEngine(object):
             input = apply_jsonpath(data, state.get("InputPath", "$"))
 
             """
-            https://states-language.net/spec.html#parameters
+            https://states-language.net/spec.html#using-paths
 
             If the “Parameters” field is provided, its value, after the
             extraction and embedding, becomes the effective input.
             """
-            parameters = evaluate_parameters(input, context, state.get("Parameters"))
+            parameters = evaluate_payload_template(input, context, state.get("Parameters"))
 
             """
             A Parallel State MUST contain a field named “Branches” which is an
@@ -1668,12 +1679,12 @@ class StateEngine(object):
                     }
 
                     """
-                    https://states-language.net/spec.html#parameters
+                    https://states-language.net/spec.html#using-paths
 
                     If the “Parameters” field is provided, its value, after the
                     extraction and embedding, becomes the effective input.
                     """
-                    parameters = evaluate_parameters(input, context, params)
+                    parameters = evaluate_payload_template(input, context, params)
                     del context["Map"]  # Delete after parameters have been processed
                 else:
                     """
@@ -1708,8 +1719,18 @@ class StateEngine(object):
             if length:
                 self.event_dispatcher.acknowledge(id)
             else:
+                """
+                https://states-language.net/spec.html#using-paths
+
+                The value of "ResultSelector" MUST be a Payload Template, whose
+                input is the result, and whose payload replaces and becomes the
+                effective result.
+                """
+                result = evaluate_payload_template(
+                    [], context, state.get("ResultSelector")
+                )
+
                 # Parallel and Map states apply ResultPath to "raw input"
-                result = []
                 event["data"] = merge_result(data, result, state)
 
                 if state.get("End"):
@@ -1809,11 +1830,6 @@ class StateEngine(object):
 
                 return
 
-
-            # Parallel and Map states apply ResultPath to "raw input"
-            data = branch_info["Input"]  # Get saved raw input
-            event["data"] = merge_result(data, result, state)
-
             """
             Remove last item from the "Branch" list, then if it becomes empty
             delete "Branch" from context as we've finished with it.
@@ -1823,6 +1839,22 @@ class StateEngine(object):
                 del context["State"]["Branch"]
 
             context["State"]["Name"] = current_state
+
+            # Parallel and Map states apply ResultPath to "raw input"
+            data = branch_info["Input"]  # Get saved raw input
+
+            """
+            https://states-language.net/spec.html#using-paths
+
+            The value of "ResultSelector" MUST be a Payload Template, whose
+            input is the result, and whose payload replaces and becomes the
+            effective result.
+            """
+            result = evaluate_payload_template(
+                result, context, state.get("ResultSelector")
+            )
+
+            event["data"] = merge_result(data, result, state)
 
             """
             Publish any new state change before acknowledging the events.

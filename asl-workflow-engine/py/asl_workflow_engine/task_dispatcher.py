@@ -34,8 +34,8 @@ try:  # Attempt to use ujson if available https://pypi.org/project/ujson/
 except:  # Fall back to standard library json
     import json
 
-
-MAX_DATA_LENGTH = 32768  # Max length of the input or output JSON string.
+# https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
+MAX_DATA_LENGTH = 262144  # Max length of the input or output JSON string.
 
 class TaskDispatcher(object):
     def __init__(self, state_engine, config):
@@ -125,7 +125,7 @@ class TaskDispatcher(object):
                     if callable(callback):
                         message_body = message.body
                         """
-                        First check if the response has exceeded the 32768
+                        First check if the response has exceeded the 262144
                         character quota described in Stepfunction Quotas page.
                         https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
                         We do the test here as we have the raw JSON string handy.

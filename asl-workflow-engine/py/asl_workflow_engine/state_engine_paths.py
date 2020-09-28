@@ -96,6 +96,26 @@ def apply_jsonpath(input, path="$", return_false_on_failed_match=False):
             return result[0]
     return result
 
+def apply_path(input, context, path="$", return_false_on_failed_match=False):
+    """
+    https://states-language.net/spec.html#path
+
+    A Path is a string, beginning with "$", used to identify components with a
+    JSON text. The syntax is that of JSONPath.
+
+    When a Path begins with "$$", two dollar signs, this signals that it is
+    intended to identify content within the Context Object. The first dollar
+    sign is stripped, and the remaining text, which begins with a dollar sign,
+    is interpreted as the JSONPath applying to the Context Object.
+    """
+    if not path.startswith("$"):
+        raise ParameterPathFailure("{} must be a JSONPath".format(path))
+    if path.startswith("$$"):  # Use Context object, not input
+        path = path[1:]  # Strip leading "$" from context path
+        return apply_jsonpath(context, path, return_false_on_failed_match)
+    else:
+        return apply_jsonpath(input, path, return_false_on_failed_match)
+
 def get_full_jsonpath(input, path):
     """
     Given an input and a JSONPath query path return the full JSONPath path of
@@ -166,25 +186,47 @@ def apply_resultpath(input, result, path="$"):
     matches = re.findall(r"[^$.[\]]+", path)  # Regex to split the reference paths
     return update_path(input, matches, result)
 
-def evaluate_parameters(input, context, parameters):
+def evaluate_payload_template(input, context, template):
     """
-    https://states-language.net/spec.html#parameters
-    The value of “Parameters” after processing becomes the effective input.
+    https://states-language.net/spec.html#payload-template
 
-    If any JSON object within the value of Parameters (however deeply nested)
-    has a field whose name ends with the characters “.$”, its value MUST begin
-    with a "$".
+    A state machine interpreter dispatches data as input to tasks to do useful
+    work, and receives output back from them. It is frequently desired to
+    reshape input data to meet the format expectations of tasks, and similarly
+    to reshape the output coming back. A JSON object structure called a Payload
+    Template is provided for this purpose.
 
-    If the value begins with “$$”, the first dollar sign is stripped and the
-    remainder MUST be a PATH. In this case, the Path is applied to the Context
-    Object and the result is called the Extracted Value.
+    The value of "Parameters" MUST be a Payload Template which is a JSON object,
+    whose input is the result of applying the InputPath to the raw input. If the
+    "Parameters" field is provided, its payload, after the extraction and
+    embedding, becomes the effective input.
 
-    If the value begins with only one “$”, the value MUST be a path. In this
-    case, the Path is applied to the effective input and the result is called
-    the Extracted Value.
+    The value of "ResultSelector" MUST be a Payload Template, whose input is the
+    result, and whose payload replaces and becomes the effective result.
 
-    If the path is legal but cannot be applied successfully the Interpreter
-    fails the execution with an Error Name of “States.ParameterPathFailure”.
+    Values from the Payload Template’s input and the Context Object can be
+    inserted into the payload with a combination of a field-naming convention,
+    Paths and Intrinsic Functions.
+
+    If any field within the Payload Template (however deeply nested) has a name
+    ending with the characters ".$", its value is transformed and the field is
+    renamed to strip the ".$" suffix.
+
+    If the field value begins with only one "$", the value MUST be a Path. In
+    this case, the Path is applied to the Payload Template’s input and is the
+    new field value.
+
+    If the field value begins with "$$", the first dollar sign is stripped and
+    the remainder MUST be a Path. In this case, the Path is applied to the
+    Context Object and is the new field value.
+
+    If the field value does not begin with "$", it MUST be an Intrinsic Function.
+    The interpreter invokes the Intrinsic Function and the result is the new value.
+
+    If the path is legal but cannot be applied successfully, the interpreter
+    fails the machine execution with an Error Name of "States.ParameterPathFailure".
+    If the Intrinsic Function fails during evaluation, the interpreter fails the
+    machine execution with an Error Name of "States.IntrinsicFailure".
 
     When a field name ends with “.$” and its value can be used to generate an
     Extracted Value as described above, the field is replaced within the
@@ -214,34 +256,28 @@ def evaluate_parameters(input, context, parameters):
             is_tuple = False
 
         if v_is_path:
-            if not v.startswith("$"):
-                raise ParameterPathFailure("{} must be a JSONPath".format(v))
-            if v.startswith("$$"):  # Use Context object, not input
-                v = v[1:]  # Strip leading "$" from context path
-                v = apply_jsonpath(context, v)
-            else:
-                v = apply_jsonpath(input, v)
+            v = apply_path(input, context, v)
 
         if is_tuple:
             return k, v
         else:
             return v
 
-    def clone(parameters):
+    def clone(template):
         """
-        Recursively crawl the source JSON parameters creating a clone of its
+        Recursively crawl the source JSON template creating a clone of its
         structure but evaluating and expanding fields whose name ends with “.$”
         """
-        if isinstance(parameters, list):
+        if isinstance(template, list):
             target = []
-            for item in parameters:
+            for item in template:
                 if isinstance(item, (dict, list)):
                     target.append(clone(item))
                 else:
                     target.append(evaluate(item))
-        elif isinstance(parameters, dict):
+        elif isinstance(template, dict):
             target = {}
-            for k, v in parameters.items():
+            for k, v in template.items():
                 if isinstance(v, (dict, list)):
                     target[k] = clone(v)
                 else:
@@ -249,7 +285,7 @@ def evaluate_parameters(input, context, parameters):
                     target[k] = v
         return target
 
-    if not parameters:
+    if not template:
         return input
-    return clone(parameters)
+    return clone(template)
 

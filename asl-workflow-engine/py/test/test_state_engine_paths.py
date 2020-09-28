@@ -26,11 +26,7 @@ assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 import unittest
 import json
 
-from asl_workflow_engine.state_engine_paths import (
-    apply_jsonpath,
-    apply_resultpath,
-    evaluate_parameters,
-)
+from asl_workflow_engine.state_engine_paths import apply_jsonpath
 
 """
 JSON document for use by examples from https://goessner.net/articles/JsonPath/
