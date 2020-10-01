@@ -108,6 +108,8 @@ def apply_path(input, context, path="$", return_false_on_failed_match=False):
     sign is stripped, and the remaining text, which begins with a dollar sign,
     is interpreted as the JSONPath applying to the Context Object.
     """
+    if path == None:
+        return {}
     if not path.startswith("$"):
         raise ParameterPathFailure("{} must be a JSONPath".format(path))
     if path.startswith("$$"):  # Use Context object, not input
@@ -163,16 +165,16 @@ def apply_resultpath(input, result, path="$"):
             except (ValueError, IndexError) as e:
                 raise ResultPathMatchFailure(e)
         elif isinstance(target, dict):
-            try:
+            try:  # Test if key is (incorrectly) an int.
                 int(key)
                 raise ResultPathMatchFailure(
-                    "object index {} is not a valid key string".format(key)
+                    "Object index {} is not a valid key string".format(key)
                 )
             except ValueError:
                 target[key] = update_path(target.get(key, {}), keys, default)
         else:
             raise ResultPathMatchFailure(
-                "cannot use key {} to index a primitive type".format(key)
+                "Cannot use key {} to index a primitive type".format(key)
             )
         return target
 
@@ -182,6 +184,14 @@ def apply_resultpath(input, result, path="$"):
         return input
     if path == "$":
         return result
+    if path.startswith("$$"):
+        """
+        The value of "ResultPath" MUST NOT begin with "$$"; i.e. it may not be
+        used to insert content into the Context Object.
+        """
+        raise ResultPathMatchFailure(
+            "The value of \"ResultPath\" MUST NOT begin with \"$$\""
+        )
 
     matches = re.findall(r"[^$.[\]]+", path)  # Regex to split the reference paths
     return update_path(input, matches, result)

@@ -17,9 +17,31 @@
 # under the License.
 #
 # Run with:
-# PYTHONPATH=.. python3 test_wait_state.py
-# PYTHONPATH=.. LOG_LEVEL=DEBUG python3 test_wait_state.py
+# PYTHONPATH=.. python3 test_global_context.py
+# PYTHONPATH=.. LOG_LEVEL=DEBUG python3 test_global_context.py
 #
+"""
+This test tests the ASL update that made the context object globally visible.
+
+In the past, the context object was only accessible in the Parameters block,
+but with this update removing this restriction you have the flexibility to
+reference the context object outside the parameter block. Accessing the context
+object will now be allowed wherever ASL allows JSON reference paths. This will
+give you access to the context object in the following fields:
+
+* InputPath
+* OutputPath
+* ItemsPath (in Map states)
+* Variable (in Choice states)
+* ResultSelector
+* Variable to variable comparison operators
+
+https://states-language.net/spec.html#path
+
+Note that some of the paths used are rather contrived (like the OutputPath of
+ChoiceState) and their role is primarily to exercise the path logic to test
+that it works correctly against both input/output data and execution context.
+"""
 
 import sys
 assert sys.version_info >= (3, 0) # Bomb out if not running Python3
@@ -36,50 +58,52 @@ ASL = """{
     "States": {
        "ChoiceState": {
             "Type": "Choice",
+            "InputPath": "$$.Execution.Input",
+            "OutputPath": "$$.Execution",
             "Choices": [
                 {
-                    "Variable": "$.test",
-                    "NumericEquals": 1,
-                    "Next": "TestSeconds"
-                },
-                {
-                    "Variable": "$.test",
-                    "NumericEquals": 2,
-                    "Next": "TestSecondsPath"
-                },
-                {
-                    "Variable": "$.test",
-                    "NumericEquals": 3,
-                    "Next": "TestTimestamp"
-                },
-                {
-                    "Variable": "$.test",
-                    "NumericEquals": 4,
-                    "Next": "TestTimestampPath"
+                    "And": [
+                        {
+                            "Variable": "$.items[0]",
+                            "NumericEquals": 0
+                        },
+                        {
+                            "Variable": "$$.State.Name",
+                            "StringEquals": "ChoiceState"
+                        }
+                    ],
+                    "Next": "Validate-All"
                 }
             ]
         },
-        "TestSeconds": {
-            "Type": "Wait",
-            "Seconds":10,
-            "End": true
-        },
-        "TestSecondsPath": {
-            "Type": "Wait",
-            "InputPath": "$$.Execution.Input",
-            "SecondsPath":"$.delay",
-            "End": true
-        },
-        "TestTimestamp": {
-            "Type": "Wait",
-            "Timestamp":"2019-08-08T10:55:25.325038+01:00",
-            "End": true
-        },
-        "TestTimestampPath": {
-            "Type": "Wait",
-            "TimestampPath":"$$.Execution.Input.expiry",
-            "End": true
+        "Validate-All": {
+          "Type": "Map",
+          "InputPath": "$.Input",
+          "OutputPath": "$",
+          "ItemsPath": "$$.Execution.Input.items",
+          "MaxConcurrency": 3,
+          "ResultPath": "$",
+          "Parameters": {
+            "item.$": "$$.Map.Item.Value",
+            "index.$": "$$.Map.Item.Index"
+          },
+          "ResultSelector": {
+            "state.$": "$$.State.Name",
+            "items.$": "$.[:].item"
+          },
+          "Iterator": {
+            "StartAt": "Validate",
+            "States": {
+              "Validate": {
+                "Type": "Pass",
+                "Comment": "The Result from each iteration should be its *effective* input, which is a JSON node that contains the current item data and its index from the context object.",
+                "End": true
+              }
+            }
+          },
+          "End": true
         }
+
     }
 }"""
 
@@ -111,6 +135,7 @@ class EventDispatcherStub(object):
         self.state_engine = state_engine
         self.state_engine.event_dispatcher = self
         self.message_count = -1
+        self.output_event = None # Retain last event so test can check its value
 
     """
     This simple threaded timeout should work OK, the real timeout is actually
@@ -142,7 +167,7 @@ class EventDispatcherStub(object):
         self.dispatch(json.dumps(item))
     
     def broadcast(self, subject, message):
-        pass
+        self.output_event = message
 
 """
 This stubs out the real TaskDispatcher execute_task method which requires
@@ -154,11 +179,11 @@ def execute_task_stub(resource_arn, parameters, callback):
     callback(result)
 
 
-class TestWaitState(unittest.TestCase):
+class TestPayloadTemplate(unittest.TestCase):
 
     def setUp(self):
         # Initialise logger
-        logger = init_logging(log_name="test_wait_state")
+        logger = init_logging(log_name="test_global_context")
         config = {
             "state_engine": {
                 "store_url": "ASL_store.json", 
@@ -171,20 +196,21 @@ class TestWaitState(unittest.TestCase):
         state_engine.task_dispatcher.execute_task = execute_task_stub
         self.event_dispatcher = EventDispatcherStub(state_engine, config)
     
-    def test_seconds(self):
-        self.event_dispatcher.dispatch('{"data": {"test": 1}, "context": ' + context + '}')
+    def test_global_context(self):
+        self.event_dispatcher.dispatch('{"data": {"items": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]}, "context": ' + context + '}')
+        #self.event_dispatcher.dispatch('{"data": {}, "context": ' + context + '}')
 
-    def test_seconds_path(self):
-        self.event_dispatcher.dispatch('{"data": {"test": 2, "delay":15}, "context": ' + context + '}')
-    
-    def test_timestamp(self):
-        self.event_dispatcher.dispatch('{"data": {"test": 3}, "context": ' + context + '}')
-    
-    def test_timestamp_path(self):
-        delta = timedelta(seconds=10)
-        time_now_plus_10s = (datetime.now(timezone.utc) + delta).astimezone().isoformat()
-        self.event_dispatcher.dispatch('{"data": {"test": 4, "expiry":"' + time_now_plus_10s + '"}, "context": ' + context + '}')
-    
+        #print(self.event_dispatcher.output_event)
+        output_event_detail = self.event_dispatcher.output_event["detail"]
+        status = output_event_detail["status"]
+        output = output_event_detail["output"]
+        print(status)
+        print(output)
+        state_first = '{"state":"Validate-All","items":[0,1,2,3,4,5,6,7,8,9,10,11,12]}'
+        items_first = '{"items":[0,1,2,3,4,5,6,7,8,9,10,11,12],"state":"Validate-All"}'
+
+        self.assertEqual(status, "SUCCEEDED")
+        self.assertEqual(output == state_first or output == items_first, True)
 
 if __name__ == '__main__':
     unittest.main()

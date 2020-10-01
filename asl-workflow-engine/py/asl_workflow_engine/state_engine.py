@@ -36,6 +36,7 @@ import operator, time, uuid, opentracing
 
 from datetime import datetime, timezone, timedelta
 from asl_workflow_engine.state_engine_paths import (
+    apply_path,
     apply_jsonpath,
     get_full_jsonpath,
     apply_resultpath,
@@ -117,15 +118,16 @@ def find_state(current_state_machine, current_state):
 
     return state, current_state_machine
 
-def merge_result(data, result, state, output_path=None):
+def merge_result(data, context, result, state, output_path=None):
     """
     Boiler plate to apply both ResultPath and OutputPath (or supplied output_path)
     """
     output = apply_resultpath(
         data, result, state.get("ResultPath", "$")
     )
+
     output_path = output_path if output_path else state.get("OutputPath", "$")
-    return apply_jsonpath(output, output_path)
+    return apply_path(output, context, output_path)
 
 
 class StateEngine(object):
@@ -908,7 +910,7 @@ class StateEngine(object):
                         “ResultPath” field is not provided, is “$”, meaning
                         that the output consists entirely of the Error Output. 
                         """
-                        event["data"] = merge_result(data, result, catcher, "$")
+                        event["data"] = merge_result(data, context, result, catcher, "$")
 
                         self.change_state(
                             state_machine_type,
@@ -968,7 +970,7 @@ class StateEngine(object):
             to its output, performing no work. Pass States are useful when
             constructing and debugging state machines.
             """
-            input = apply_jsonpath(data, state.get("InputPath", "$"))
+            input = apply_path(data, context, state.get("InputPath", "$"))
 
             """
             https://states-language.net/spec.html#using-paths
@@ -993,7 +995,7 @@ class StateEngine(object):
 
             try:
                 # Pass state applies ResultPath to "raw input"
-                event["data"] = merge_result(data, result, state)
+                event["data"] = merge_result(data, context, result, state)
 
                 if state.get("End"):
                     handle_terminal_state(state_type, event, id)
@@ -1060,7 +1062,7 @@ class StateEngine(object):
                         )
 
                         # Task state applies ResultPath to "raw input"
-                        event["data"] = merge_result(data, result, state)
+                        event["data"] = merge_result(data, context, result, state)
 
                         if state.get("End"):
                             handle_terminal_state(state_type, event, id)
@@ -1077,7 +1079,7 @@ class StateEngine(object):
                         self.event_dispatcher.acknowledge(id)
 
 
-            input = apply_jsonpath(data, state.get("InputPath", "$"))
+            input = apply_path(data, context, state.get("InputPath", "$"))
 
             """
             The Task State (identified by "Type":"Task") causes the interpreter
@@ -1162,7 +1164,7 @@ class StateEngine(object):
             InputPath & OutputPath are allowed (but unusual) in Choice states.
             https://states-language.net/spec.html#statetypes
             """
-            input = apply_jsonpath(data, state.get("InputPath", "$"))
+            input = apply_path(data, context, state.get("InputPath", "$"))
 
             """
             The choose function implements the actual choice logic. We must
@@ -1170,10 +1172,12 @@ class StateEngine(object):
             scan the effective input for the actual value the we wish to match.
             """
             def choose(choice):
-                # variable_field may be None for And, Or, Not choice rules
-                variable_field = choice.get("Variable")
-                variable = apply_jsonpath(
-                    input, variable_field, return_false_on_failed_match=True
+                # "Variable" field may be None for And, Or, Not choice rules
+                variable = apply_path(
+                    input,
+                    context,
+                    choice.get("Variable"),
+                    return_false_on_failed_match=True
                 )
                 next = choice.get("Next", True)
 
@@ -1322,7 +1326,7 @@ class StateEngine(object):
             """
             next_state = next_state if next_state else state.get("Default")
 
-            event["data"] = apply_jsonpath(input, state.get("OutputPath", "$"))
+            event["data"] = apply_path(input, context, state.get("OutputPath", "$"))
             """
             The interpreter will raise a run-time States.NoChoiceMatched error
             if a “Choice” state fails to match a Choice Rule and no “Default”
@@ -1354,7 +1358,7 @@ class StateEngine(object):
             https://states-language.net/spec.html#statetypes. This is defined
             before on_timeout() so that input is captured in its closure.
             """
-            input = apply_jsonpath(data, state.get("InputPath", "$"))
+            input = apply_path(data, context, state.get("InputPath", "$"))
 
             """
             It's important for this function to be nested as we want the event,
@@ -1362,7 +1366,7 @@ class StateEngine(object):
             timeout actually fires.
             """
             def on_timeout():
-                event["data"] = apply_jsonpath(input, state.get("OutputPath", "$"))
+                event["data"] = apply_path(input, context, state.get("OutputPath", "$"))
                 if state.get("End"):
                     handle_terminal_state(state_type, event, id)
                 else:
@@ -1421,18 +1425,21 @@ class StateEngine(object):
             entered_time = context["State"].get("EnteredTime")
             state_timestamp = parse_rfc3339_datetime(entered_time).timestamp()
 
+            timeout = 0
             if seconds:
                 current_timestamp = time.time()
                 timeout = (state_timestamp + seconds - current_timestamp) * 1000
             elif seconds_path:
-                seconds = apply_jsonpath(input, seconds_path)
-                current_timestamp = time.time()
-                timeout = (state_timestamp + seconds - current_timestamp) * 1000
+                seconds = apply_path(input, context, seconds_path)
+                if seconds:
+                    current_timestamp = time.time()
+                    timeout = (state_timestamp + seconds - current_timestamp) * 1000
             elif timestamp:
                 timeout = get_timeout_from_rfc3339_datetime(timestamp)
             elif timestamp_path:
-                timestamp = apply_jsonpath(input, timestamp_path)
-                timeout = get_timeout_from_rfc3339_datetime(timestamp)
+                timestamp = apply_path(input, context, timestamp_path)
+                if timestamp:
+                    timeout = get_timeout_from_rfc3339_datetime(timestamp)
 
             """
             Schedule the timeout. This is slightly subtle, the idea is that
@@ -1456,8 +1463,8 @@ class StateEngine(object):
             InputPath & OutputPath are allowed (but unusual) in Succeed states.
             https://states-language.net/spec.html#statetypes
             """
-            input = apply_jsonpath(data, state.get("InputPath", "$"))
-            event["data"] = apply_jsonpath(input, state.get("OutputPath", "$"))
+            input = apply_path(data, context, state.get("InputPath", "$"))
+            event["data"] = apply_path(input, context, state.get("OutputPath", "$"))
             handle_terminal_state(state_type, event, id)
 
         def asl_state_Fail():
@@ -1500,7 +1507,7 @@ class StateEngine(object):
             The Parallel state passes its input (potentially as filtered by the
             “InputPath” field) as the input to each branch’s “StartAt” state.
             """
-            input = apply_jsonpath(data, state.get("InputPath", "$"))
+            input = apply_path(data, context, state.get("InputPath", "$"))
 
             """
             https://states-language.net/spec.html#using-paths
@@ -1584,7 +1591,7 @@ class StateEngine(object):
 
             The “InputPath” field operates as usual, selecting part of the raw input .
             """
-            input = apply_jsonpath(data, state.get("InputPath", "$"))
+            input = apply_path(data, context, state.get("InputPath", "$"))
 
             """
             The “ItemsPath” field’s value is a reference path identifying where
@@ -1595,7 +1602,7 @@ class StateEngine(object):
             “ItemsPath” field, it is assuming that the raw input to the state
             will be a JSON array.
             """
-            items_path = apply_jsonpath(input, state.get("ItemsPath", "$"))
+            items_path = apply_path(input, context, state.get("ItemsPath", "$"))
             if not isinstance(items_path, list):
                 items_path = []
 
@@ -1731,7 +1738,7 @@ class StateEngine(object):
                 )
 
                 # Parallel and Map states apply ResultPath to "raw input"
-                event["data"] = merge_result(data, result, state)
+                event["data"] = merge_result(data, context, result, state)
 
                 if state.get("End"):
                     handle_terminal_state(state_type, event, id)
@@ -1854,7 +1861,7 @@ class StateEngine(object):
                 result, context, state.get("ResultSelector")
             )
 
-            event["data"] = merge_result(data, result, state)
+            event["data"] = merge_result(data, context, result, state)
 
             """
             Publish any new state change before acknowledging the events.
