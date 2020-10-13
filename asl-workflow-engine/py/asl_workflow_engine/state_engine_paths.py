@@ -47,19 +47,19 @@ from jsonpath import jsonpath  # sudo pip3 install jsonpath
 from asl_workflow_engine.asl_exceptions import *
 
 
-def apply_jsonpath(input, path="$", return_false_on_failed_match=False):
+def apply_jsonpath(input, path="$", throw_exception_on_failed_match=False):
     """
     Performs the InputPath and OutputPath logic described in the ASL spec.
     https://states-language.net/spec.html#filters
     This is mostly just calling jsonpath() and applying the specified defaults.
 
-    The return_false_on_failed_match parameter allows callers to select whether
-    a failed JSONPath match will return boolean False or an empty object.
+    The throw_exception_on_failed_match parameter allows callers to select
+    whether a failed JSONPath match will throw an exception or just return {}.
     This is because it's a little unclear what the best/most useful behaviour
     is in this circumstance. The default is currently to return an empty object
     this is because the behaviour of InputPath and OutputPath being null is to
     return an empty JSON object and a null JSONPath result is somewhat
-    consistent with this. OTOH deliberately returning False on match failure
+    consistent with this. OTOH throwing an exception on match failure
     is also useful especially in the Choice state Variable field as that allows
     us to match a BooleanEquals False Choice for the case of no JSONPath match.
     TODO need to check what AWS StepFunctions actually do with these cases
@@ -74,8 +74,8 @@ def apply_jsonpath(input, path="$", return_false_on_failed_match=False):
     result = jsonpath(input, path)
 
     if result == False:
-        if return_false_on_failed_match:
-            return False
+        if throw_exception_on_failed_match:
+            raise PathMatchFailure("JSONPath {} failed to match".format(path))
         else:
             return {}
 
@@ -96,7 +96,7 @@ def apply_jsonpath(input, path="$", return_false_on_failed_match=False):
             return result[0]
     return result
 
-def apply_path(input, context, path="$", return_false_on_failed_match=False):
+def apply_path(input, context, path="$", throw_exception_on_failed_match=False):
     """
     https://states-language.net/spec.html#path
 
@@ -114,9 +114,9 @@ def apply_path(input, context, path="$", return_false_on_failed_match=False):
         raise ParameterPathFailure("{} must be a JSONPath".format(path))
     if path.startswith("$$"):  # Use Context object, not input
         path = path[1:]  # Strip leading "$" from context path
-        return apply_jsonpath(context, path, return_false_on_failed_match)
+        return apply_jsonpath(context, path, throw_exception_on_failed_match)
     else:
-        return apply_jsonpath(input, path, return_false_on_failed_match)
+        return apply_jsonpath(input, path, throw_exception_on_failed_match)
 
 def get_full_jsonpath(input, path):
     """

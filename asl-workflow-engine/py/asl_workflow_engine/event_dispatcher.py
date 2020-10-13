@@ -269,7 +269,7 @@ class EventDispatcher(object):
         message.subject = subject  # Selects the queue to publish to
         self.event_queue_producer.send(message, threadsafe)
 
-    def broadcast(self, subject, item):
+    def broadcast(self, subject, item, carrier_properties=None):
         """
         Broadcast the supplied item to the topic hosted on the underlying
         messaging fabric. This method is mainly here to abstract some of the
@@ -279,7 +279,7 @@ class EventDispatcher(object):
         operation, however it is the correct thing to do:
         https://www.ietf.org/rfc/rfc4627.txt.
         """
-        message = Message(json.dumps(item), content_type="application/json")
+        message = Message(json.dumps(item), content_type="application/json", properties=carrier_properties)
         message.subject = subject
         self.topic_producer.send(message)
 

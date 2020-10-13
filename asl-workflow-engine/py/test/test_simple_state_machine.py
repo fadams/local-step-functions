@@ -217,7 +217,7 @@ class EventDispatcherStub(object):
         # Convert event back to JSON string for dispatching.
         self.dispatch(json.dumps(item))
     
-    def broadcast(self, subject, message):
+    def broadcast(self, subject, message, carrier_properties=None):
         pass
 
 """

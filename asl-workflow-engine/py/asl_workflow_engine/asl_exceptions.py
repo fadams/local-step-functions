@@ -51,3 +51,8 @@ class BranchFailed(Exception):
 
 class NoChoiceMatched(Exception):
     pass
+
+
+# Not defined in the ASL spec but used in the Choice state path handling.
+class PathMatchFailure(Exception):
+    pass

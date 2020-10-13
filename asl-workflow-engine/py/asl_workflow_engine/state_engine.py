@@ -32,7 +32,7 @@ import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 
-import operator, time, uuid, opentracing
+import operator, time, uuid, fnmatch, opentracing
 
 from datetime import datetime, timezone, timedelta
 from asl_workflow_engine.state_engine_paths import (
@@ -190,7 +190,7 @@ class StateEngine(object):
         )
         self.event_dispatcher.acknowledge(id)
 
-    def broadcast_notification(self, execution_arn, execution_detail):
+    def broadcast_notification(self, execution_arn, execution_detail, context):
         """
         Broadcasts notification of execution status changes to a topic.
 
@@ -228,21 +228,36 @@ class StateEngine(object):
         if not isinstance(execution_detail , dict):  # May be (non JSON) RedisDict
             execution_detail = dict(execution_detail)
 
-        event_time = datetime.now(timezone.utc).astimezone().isoformat()
-        cw_event = {
-            "version": "0",  # By default, this is set to 0 (zero) in all events.
-            "id": str(uuid.uuid4()),  # A unique value is generated for every event.
-            "detail-type": "Step Functions Execution Status Change",
-            "source": "aws.states",  # Identifies the service that sourced the event.
-            "account": account,  # The 12-digit number identifying an AWS account.
-            "time": event_time,  # Seems to be in rfc-3339 format in examples.
-            "region": region,  # Identifies the AWS region where the event originated.
-            "resources": [execution_arn],
-            "detail": execution_detail,
-        }
 
-        subject = execution_detail["stateMachineArn"] + "." + execution_detail["status"]
-        self.event_dispatcher.broadcast(subject, cw_event)
+        """
+        Start an OpenTracing trace for the notification.
+        https://opentracing.io/guides/python/tracers/ standard tags are from
+        https://opentracing.io/specification/conventions/
+        """
+        with opentracing.tracer.start_active_span(
+            operation_name="StatusChange",
+            child_of=span_context("text_map", context.get("Tracer", {}), self.logger),
+            tags={
+                "component": "state_engine",
+                "execution_arn": execution_arn,
+            }
+        ) as scope:
+            carrier = inject_span("text_map", scope.span, self.logger)
+            event_time = datetime.now(timezone.utc).astimezone().isoformat()
+            cw_event = {
+                "version": "0",  # By default, this is set to 0 (zero) in all events.
+                "id": str(uuid.uuid4()),  # A unique value is generated for every event.
+                "detail-type": "Step Functions Execution Status Change",
+                "source": "aws.states",  # Identifies the service that sourced the event.
+                "account": account,  # The 12-digit number identifying an AWS account.
+                "time": event_time,  # Seems to be in rfc-3339 format in examples.
+                "region": region,  # Identifies the AWS region where the event originated.
+                "resources": [execution_arn],
+                "detail": execution_detail,
+            }
+
+            subject = execution_detail["stateMachineArn"] + "." + execution_detail["status"]
+            self.event_dispatcher.broadcast(subject, cw_event, carrier_properties=carrier)
 
     def start_state_machine(self, state_machine_type, start_state, event):
         """
@@ -359,7 +374,7 @@ class StateEngine(object):
             {"input": input_as_string, "roleArn": execution["RoleArn"]},
         )
 
-        self.broadcast_notification(execution_arn, execution_detail)
+        self.broadcast_notification(execution_arn, execution_detail, context)
 
     def change_state(self, state_machine_type, state_type, next_state, event):
         """
@@ -509,7 +524,7 @@ class StateEngine(object):
         if execution_arn in self.branch_results:
             del self.branch_results[execution_arn]
 
-        self.broadcast_notification(execution_arn, execution_detail)
+        self.broadcast_notification(execution_arn, execution_detail, context)
 
     def update_execution_history(
             self, state_machine_type, execution_arn, update_type, details
@@ -1172,14 +1187,25 @@ class StateEngine(object):
             scan the effective input for the actual value the we wish to match.
             """
             def choose(choice):
-                # "Variable" field may be None for And, Or, Not choice rules
-                variable = apply_path(
-                    input,
-                    context,
-                    choice.get("Variable"),
-                    return_false_on_failed_match=True
-                )
+                """
+                "Variable" field may be None for And, Or, Not choice rules
+                The throw_exception_on_failed_match flag provides a way to
+                test for a Variable/path actually being present.
+                """
+                path_match_failed = False
+                try:
+                    variable = apply_path(
+                        input,
+                        context,
+                        choice.get("Variable"),
+                        throw_exception_on_failed_match=True
+                    )
+                except PathMatchFailure:
+                    variable = False
+                    path_match_failed = True
+
                 next = choice.get("Next", True)
+
 
                 def isnumber(x):
                     # General test for numeric - any number x zero is zero
@@ -1270,6 +1296,13 @@ class StateEngine(object):
                 def asl_choice_StringLessThanEquals(value):
                     return next_if(variable, operator.le, value, str)
 
+                def asl_choice_StringMatches(value):
+                    # Change the \ escape to fnmatch [seq] escape and also
+                    # escape [ to allow things like a literal [hello]
+                    value = value.replace("[", "[[]").replace("\*", "[*]")
+                    if fnmatch.fnmatch(variable, value):
+                        return next
+
                 def asl_choice_TimestampEquals(value):
                     return next_if_timestamp(variable, operator.eq, value)
 
@@ -1285,15 +1318,49 @@ class StateEngine(object):
                 def asl_choice_TimestampLessThanEquals(value):
                     return next_if_timestamp(variable, operator.le, value)
 
+                def asl_choice_IsBoolean(value):
+                    if not path_match_failed and (isinstance(variable, bool) == value):
+                        return next
+
+                def asl_choice_IsNull(value):
+                    if ((variable is None) == value):
+                        return next
+
+                def asl_choice_IsNumeric(value):
+                    if (isnumber(variable) == value):
+                        return next
+
+                def asl_choice_IsString(value):
+                    if (isinstance(variable, str) == value):
+                        return next
+
+                def asl_choice_IsPresent(value):
+                    if (not path_match_failed == value):
+                        return next
+
+                def asl_choice_IsTimestamp(value):
+                    try:
+                        parse_rfc3339_datetime(variable)
+                        if (value):
+                            return next
+                    except Exception:
+                        if (not value):
+                            return next
+
                 for key in choice:
                     """
                     Determine the ASL choice operator of the current choice and
                     use that to dynamically invoke the appropriate choice handler.
                     """
                     try:
-                        next_state = locals().get(
-                            "asl_choice_" + key, lambda: None
-                        )(choice[key])
+                        value = choice[key]
+                        key = "asl_choice_" + key
+                        if key.endswith("Path"):  # Handle variable to variable comparison
+                            # Slice off "Path" suffix and get value from path
+                            key = key[:-4]
+                            value = apply_path(data, context, value)
+
+                        next_state = locals().get(key, lambda: None)(value)
                     except Exception:
                         next_state = None
 
