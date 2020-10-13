@@ -237,7 +237,7 @@ class TestSimpleStateMachine(unittest.TestCase):
         logger = init_logging(log_name="test_simple_state_machine")
         config = {
             "state_engine": {
-                "store_url": "ASL_store.json", 
+                "store_url": "ASL_store.json",
                 "execution_ttl": 500
             }
         }
