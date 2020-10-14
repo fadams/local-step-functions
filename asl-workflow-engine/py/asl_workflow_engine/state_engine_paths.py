@@ -108,7 +108,7 @@ def apply_path(input, context, path="$", throw_exception_on_failed_match=False):
     sign is stripped, and the remaining text, which begins with a dollar sign,
     is interpreted as the JSONPath applying to the Context Object.
     """
-    if path == None:
+    if path == None or not isinstance(path, str):
         return {}
     if not path.startswith("$"):
         raise ParameterPathFailure("{} must be a JSONPath".format(path))

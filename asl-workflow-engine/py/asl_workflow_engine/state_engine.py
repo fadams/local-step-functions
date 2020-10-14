@@ -1141,13 +1141,23 @@ class StateEngine(object):
 
             start_time = context["Execution"].get("StartTime")
             execution_timestamp = parse_rfc3339_datetime(start_time).timestamp()
-            t1 = (execution_timestamp + ASL.get("TimeoutSeconds", 31536000) - current_timestamp) * 1000
+            execution_timeout = ASL.get("TimeoutSeconds", 31536000)
+            t1 = (execution_timestamp + execution_timeout - current_timestamp) * 1000
 
             entered_time = context["State"].get("EnteredTime")
             state_timestamp = parse_rfc3339_datetime(entered_time).timestamp()
-            t2 = (state_timestamp + state.get("TimeoutSeconds", 99999999) - current_timestamp) * 1000
-            #t2 = (state_timestamp + state.get("TimeoutSeconds", 60) - current_timestamp) * 1000
-            #t2 = (state_timestamp + state.get("TimeoutSeconds", 10) - current_timestamp) * 1000
+
+
+            state_timeout = state.get("TimeoutSecondsPath")
+            if state_timeout:
+                state_timeout = apply_path(data, context, state_timeout)
+                state_timeout = state_timeout if isinstance(state_timeout, int) else 0
+            else:
+                state_timeout = state.get("TimeoutSeconds", 99999999)
+                #state_timeout = state.get("TimeoutSeconds", 60)  # 60s default
+                #state_timeout = state.get("TimeoutSeconds", 10)  # 10s default
+
+            t2 = (state_timestamp + state_timeout - current_timestamp) * 1000
 
             timeout = t1 if t1 < t2 else t2
 
