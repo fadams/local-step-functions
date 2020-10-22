@@ -89,7 +89,7 @@ ASL = """{
           },
           "ResultSelector": {
             "state.$": "$$.State.Name",
-            "items.$": "$.[:].item"
+            "items.$": "$[:].item"
           },
           "Iterator": {
             "StartAt": "Validate",
@@ -106,13 +106,6 @@ ASL = """{
 
     }
 }"""
-
-# Replace the absolute time Timestamp stored in the TestTimestamp state with
-# the current time plus ten seconds. This will make the test more sensible.
-delta = timedelta(seconds=10)
-time_now_plus_10s = (datetime.now(timezone.utc) + delta).astimezone().isoformat()
-ASL = ASL.replace("2019-08-08T10:55:25.325038+01:00", time_now_plus_10s)
-
 
 context = '{"StateMachine": {"Id": "arn:aws:states:local:0123456789:stateMachine:simple_state_machine", "Definition": ' + ASL + '}}'
 
@@ -179,7 +172,7 @@ def execute_task_stub(resource_arn, parameters, callback):
     callback(result)
 
 
-class TestPayloadTemplate(unittest.TestCase):
+class TestGlobalContext(unittest.TestCase):
 
     def setUp(self):
         # Initialise logger

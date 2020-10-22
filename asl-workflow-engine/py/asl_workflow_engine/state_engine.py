@@ -338,7 +338,7 @@ class StateEngine(object):
         history are actually JSON strings not JSON objects.
         It actually took a while to note that subtlety, especially as the AWS
         CLI describe-execution call doesn't actually complain and displayed the
-        JSON object that was originally being send before json.dumps() was added.
+        JSON object that was originally being sent before json.dumps() was added.
         """
         input_as_string = json.dumps(data)
         execution_detail = {
@@ -993,7 +993,12 @@ class StateEngine(object):
             If the “Parameters” field is provided, its value, after the
             extraction and embedding, becomes the effective input.
             """
-            parameters = evaluate_payload_template(input, context, state.get("Parameters"))
+            try:
+                parameters = evaluate_payload_template(input, context, state.get("Parameters"))
+            except IntrinsicFailure as e:
+                handle_error("States.IntrinsicFailure", str(e))
+                self.event_dispatcher.acknowledge(id)
+                return
 
             """
             A Pass State MAY have a field named “Result”. If present, its value
@@ -1092,6 +1097,9 @@ class StateEngine(object):
                     except ResultPathMatchFailure as e:
                         handle_error("States.ResultPathMatchFailure", str(e))
                         self.event_dispatcher.acknowledge(id)
+                    except IntrinsicFailure as e:
+                        handle_error("States.IntrinsicFailure", str(e))
+                        self.event_dispatcher.acknowledge(id)
 
 
             input = apply_path(data, context, state.get("InputPath", "$"))
@@ -1113,7 +1121,12 @@ class StateEngine(object):
             If the “Parameters” field is provided, its value, after the
             extraction and embedding, becomes the effective input.
             """
-            parameters = evaluate_payload_template(input, context, state.get("Parameters"))
+            try:
+                parameters = evaluate_payload_template(input, context, state.get("Parameters"))
+            except IntrinsicFailure as e:
+                handle_error("States.IntrinsicFailure", str(e))
+                self.event_dispatcher.acknowledge(id)
+                return
 
             """
             Tasks can optionally specify timeouts. Timeouts (the “TimeoutSeconds”
@@ -1592,7 +1605,12 @@ class StateEngine(object):
             If the “Parameters” field is provided, its value, after the
             extraction and embedding, becomes the effective input.
             """
-            parameters = evaluate_payload_template(input, context, state.get("Parameters"))
+            try:
+                parameters = evaluate_payload_template(input, context, state.get("Parameters"))
+            except IntrinsicFailure as e:
+                handle_error("States.IntrinsicFailure", str(e))
+                self.event_dispatcher.acknowledge(id)
+                return
 
             """
             A Parallel State MUST contain a field named “Branches” which is an
@@ -1768,7 +1786,13 @@ class StateEngine(object):
                     If the “Parameters” field is provided, its value, after the
                     extraction and embedding, becomes the effective input.
                     """
-                    parameters = evaluate_payload_template(input, context, params)
+                    try:
+                        parameters = evaluate_payload_template(input, context, params)
+                    except IntrinsicFailure as e:
+                        handle_error("States.IntrinsicFailure", str(e))
+                        self.event_dispatcher.acknowledge(id)
+                        return
+
                     del context["Map"]  # Delete after parameters have been processed
                 else:
                     """
@@ -1810,9 +1834,14 @@ class StateEngine(object):
                 input is the result, and whose payload replaces and becomes the
                 effective result.
                 """
-                result = evaluate_payload_template(
-                    [], context, state.get("ResultSelector")
-                )
+                try:
+                    result = evaluate_payload_template(
+                        [], context, state.get("ResultSelector")
+                    )
+                except IntrinsicFailure as e:
+                    handle_error("States.IntrinsicFailure", str(e))
+                    self.event_dispatcher.acknowledge(id)
+                    return
 
                 # Parallel and Map states apply ResultPath to "raw input"
                 event["data"] = merge_result(data, context, result, state)
@@ -1934,9 +1963,17 @@ class StateEngine(object):
             input is the result, and whose payload replaces and becomes the
             effective result.
             """
-            result = evaluate_payload_template(
-                result, context, state.get("ResultSelector")
-            )
+            try:
+                result = evaluate_payload_template(
+                    result, context, state.get("ResultSelector")
+                )
+            except IntrinsicFailure as e:
+                handle_error("States.IntrinsicFailure", str(e))
+                # Acknowledge the events for each branch's terminal state
+                for event_id in event_ids:
+                    if event_id:
+                        self.event_dispatcher.acknowledge(event_id)
+                return
 
             event["data"] = merge_result(data, context, result, state)
 

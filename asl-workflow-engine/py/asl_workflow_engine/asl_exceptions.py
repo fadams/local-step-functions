@@ -45,6 +45,10 @@ class ParameterPathFailure(Exception):
     pass
 
 
+class IntrinsicFailure(Exception):
+    pass
+
+
 class BranchFailed(Exception):
     pass
 

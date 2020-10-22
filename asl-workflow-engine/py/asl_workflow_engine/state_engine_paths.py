@@ -46,6 +46,11 @@ from jsonpath import jsonpath  # sudo pip3 install jsonpath
 
 from asl_workflow_engine.asl_exceptions import *
 
+try:  # Attempt to use ujson if available https://pypi.org/project/ujson/
+    import ujson as json
+except:  # Fall back to standard library json
+    import json
+
 
 def apply_jsonpath(input, path="$", throw_exception_on_failed_match=False):
     """
@@ -94,6 +99,7 @@ def apply_jsonpath(input, path="$", throw_exception_on_failed_match=False):
         path_has_slice = re.search(r"\[.*:.*\]", path)
         if not path_has_slice:
             return result[0]
+
     return result
 
 def apply_path(input, context, path="$", throw_exception_on_failed_match=False):
@@ -249,15 +255,122 @@ def evaluate_payload_template(input, context, template):
     $.map.c to the input.
     """
 
+    def evaluate_intrinsic_function(intrinsic):
+
+        def asl_intrinsic_Format(args):
+            template_string = args[0]
+            args = args[1:]
+            try:
+                return template_string.format(*args)
+            except Exception as e:
+                raise IntrinsicFailure(
+                    "States.Format failed with {}.".format(e)
+                )
+
+        def asl_intrinsic_StringToJson(args):
+            if len(args) != 1:
+                raise IntrinsicFailure(
+                    "States.StringToJson failed with too many arguments."
+                )
+            try:
+                return json.loads(args[0])
+            except Exception as e:
+                raise IntrinsicFailure(
+                    "States.StringToJson failed with {}.".format(e)
+                )
+
+        def asl_intrinsic_JsonToString(args):
+            if len(args) != 1:
+                raise IntrinsicFailure(
+                    "States.JsonToString failed with too many arguments."
+                )
+            try:
+                return json.dumps(args[0])
+            except Exception as e:
+                raise IntrinsicFailure(
+                    "States.JsonToString failed with {}.".format(e)
+                )
+
+        def asl_intrinsic_Array(args):
+            return args
+
+        def asl_intrinsic_Default(args):
+            raise IntrinsicFailure(
+                "Intrinsic Function {} is not supported.".format(func)
+            )
+
+
+        # Extract intrinsic name and normalise it to asl_intrinsic_<name>
+        func, args = intrinsic.split("(", 1)
+        func = func.strip()
+        normalised_func = func.replace("States.", "asl_intrinsic_")
+        # Extract raw args string
+        args = args.rsplit(")", 1)[0]
+
+        """
+        Extract the individual args from the raw string into a list. Intrinsic
+        Function arguments may be strings enclosed by apostrophe (') characters,
+        numbers, null, Paths, or nested Intrinsic Functions. The regex finds
+        each valid argument as follows:
+        \'.*?(?<!\\\)\'         extracts apostrophe delimited string. This uses
+            a negative lookbehind to match a closing ' only if not preceeded
+            by a \ in order to support escaped apostrophes in the string.
+        States.*?\)             extracts nested intrinsic
+
+        String and nested intrinsics can contain commas so we explicitly match
+        those cases, but the last part of the regex '|[^\s*,]+' just matches
+        anything except whitespace comma. We actually *want* a fairly loose
+        match here so if we have an invalid number like f123.45 it would match
+        but subsequent evaluation would raise an IntrinsicFailure which we want.
+        """
+        arglist = re.findall('\'.*?(?<!\\\)\'|States.*?\)|[^\s*,]+', args)
+
+        # Evaluate the arguments
+        for i, arg in enumerate(arglist):
+            if arg.startswith("'"):  # It's an apostrophe delimited string
+                arglist[i] = arg.strip("'")
+            elif arg.startswith("$"):  # It's a path
+                arglist[i] = apply_path(input, context, arg)
+            elif arg.startswith("States."):  # It's a nested intrinsic function
+                arglist[i] = evaluate_intrinsic_function(arg)
+            elif arg == "null":
+                arglist[i] = None
+            elif arg == "true":
+                """
+                Note that the ASL spec doesn't explicitly include booleans in
+                the supported Intrinsic Function arguments, however as there
+                is a States.Array intrinsic that returns a JSON array containing
+                the Values of the arguments, the implication is that arguments
+                could be JSON primitives. It's a little unclear.
+                """
+                arglist[i] = True
+            elif arg == "false":
+                arglist[i] = False
+            else:
+                try:
+                    arglist[i] = int(arg)
+                except ValueError:
+                    try:
+                        arglist[i] = float(arg)
+                    except ValueError:
+                        raise IntrinsicFailure(
+                            "Intrinsic Function {}, Invalid argument {}.".format(func, arg)
+                        )
+
+        return locals().get(
+            normalised_func,
+            asl_intrinsic_Default,
+        )(arglist)
+
     def evaluate(k, v=None):
         """
         Evaluate and expand fields whose name ends with “.$” as described above
         """
         if isinstance(k, str) and k.endswith(".$"):
             k = k[:-2]  # strip ".$" from end
-            v_is_path = True
+            v_is_path_or_intrinsic = True
         else:
-            v_is_path = False
+            v_is_path_or_intrinsic = False
 
         if v:
             is_tuple = True
@@ -265,8 +378,11 @@ def evaluate_payload_template(input, context, template):
             v = k
             is_tuple = False
 
-        if v_is_path:
-            v = apply_path(input, context, v)
+        if v_is_path_or_intrinsic:
+            if v.startswith("$"):  # It's a path
+                v = apply_path(input, context, v)
+            else:  # It's an Intrinsic Function
+                v = evaluate_intrinsic_function(v)
 
         if is_tuple:
             return k, v
