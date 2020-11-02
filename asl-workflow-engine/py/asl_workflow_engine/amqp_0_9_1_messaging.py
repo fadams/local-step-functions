@@ -643,9 +643,13 @@ class Consumer(Destination):
         myqueue; {"node": {"x-declare": {"durable": true, "auto-delete": false}}, "link": {"x-subscribe": {"exclusive": true}}}'
         """
         ex = self.link_subscribe.get("exclusive", False)
+        args = self.link_subscribe.get("arguments", None)
         self._message_listener = message_listener
         self.session.channel.basic_consume(
-            on_message_callback=self.message_listener, queue=self.name, exclusive=ex
+            on_message_callback=self.message_listener,
+            queue=self.name,
+            exclusive=ex,
+            arguments=args
         )
 
     def message_listener(self, channel, method, properties, body):
