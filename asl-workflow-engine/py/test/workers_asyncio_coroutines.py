@@ -17,42 +17,50 @@
 # under the License.
 #
 # Run with:
-# PYTHONPATH=.. python3 workers.py
+# PYTHONPATH=.. python3 workers_asyncio_coroutines.py
+# PYTHONPATH=.. LOG_LEVEL=DEBUG python3 workers_asyncio_coroutines.py
 #
+"""
+This is an asyncio based version of the blocking workers.py example.
+
+This version is entirely single threaded, using a single event loop and spawning
+multiple coroutines as concurrent tasks. It is, however, structurally very similar
+to the original workers.py that uses a BlockingConnection and multiple threads.
+"""
 
 import sys
-assert sys.version_info >= (3, 0) # Bomb out if not running Python3
+assert sys.version_info >= (3, 6) # Bomb out if not running Python3.6
 
-import json, time, threading, opentracing
+import asyncio, json, time, opentracing
 
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.open_tracing_factory import create_tracer, span_context, inject_span
-from asl_workflow_engine.amqp_0_9_1_messaging import Connection, Message
+from asl_workflow_engine.amqp_0_9_1_messaging_asyncio import Connection, Message
 from asl_workflow_engine.messaging_exceptions import *
 
-class Worker(threading.Thread):
+class Worker():
 
     def __init__(self, name):
-        super().__init__(name=name) # Call Thread constructor
+        self.name = name
         # Initialise logger
         self.logger = init_logging(log_name=name)
 
     def handler(self, message):
-        print(self.getName() + " working")
+        print(self.name + " working")
         print(message)
 
         with opentracing.tracer.start_active_span(
-            operation_name=self.getName(),
+            operation_name=self.name,
             child_of=span_context("text_map", message.properties, self.logger),
             tags={
                 "component": "workers",
-                "message_bus.destination": self.getName(),
+                "message_bus.destination": self.name,
                 "span.kind": "consumer",
                 "peer.address": "amqp://localhost:5672"
             }
         ) as scope:
             # Create simple reply. In a real processor **** DO WORK HERE ****
-            reply = {"reply": self.getName() + " reply"}
+            reply = {"reply": self.name + " reply"}
 
             """
             Create the response message by reusing the request note that this
@@ -67,7 +75,7 @@ class Worker(threading.Thread):
             https://opentracing.io/specification/conventions/
             """
             with opentracing.tracer.start_active_span(
-                operation_name=self.getName(),
+                operation_name=self.name,
                 child_of=opentracing.tracer.active_span,
                 tags={
                     "component": "workers",
@@ -83,22 +91,22 @@ class Worker(threading.Thread):
                 self.producer.send(message)
                 message.acknowledge() # Acknowledges the original request
 
-    def run(self):
+    async def run(self):
         # Connect to worker queue and process data.
         connection = Connection("amqp://localhost:5672?connection_attempts=20&retry_delay=10&heartbeat=0")
         try:
-            connection.open()
-            session = connection.session()
-            self.consumer = session.consumer(
-                self.getName() + '; {"node": {"auto-delete": true}}'
+            await connection.open()
+            session = await connection.session()
+            self.consumer = await session.consumer(
+                self.name + '; {"node": {"auto-delete": true}}'
             )
             self.consumer.capacity = 100; # Enable consumer prefetch
             self.consumer.set_message_listener(self.handler)
-            self.producer = session.producer()
+            self.producer = await session.producer()
 
-            connection.start(); # Blocks until event loop exits.
-
-        except MessagingError as e:
+            await connection.start(); # Wait until connection closes.
+    
+        except MessagingError as e:  # ConnectionError, SessionError etc.
             self.logger.error(e)
 
         connection.close();
@@ -116,7 +124,10 @@ if __name__ == '__main__':
                "InternalErrorNotHandledLambda",
                "mime-id",]
     #workers = ["SuccessLambda"]
-    for w in workers:
-        worker = Worker(name = w)
-        worker.start()
-
+    loop = asyncio.get_event_loop()
+    # Create list of Worker tasks using list comprehension
+    tasks = [loop.create_task(Worker(name=w).run()) for w in workers]
+    # Run the tasks concurrently
+    loop.run_until_complete(asyncio.gather(*tasks))
+    loop.close()
+    

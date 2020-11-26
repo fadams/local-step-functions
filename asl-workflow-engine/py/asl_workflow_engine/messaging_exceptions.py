@@ -43,3 +43,8 @@ class ProducerError(MessagingError):
 class ConsumerError(MessagingError):
     pass
 
+
+class SendError(MessagingError):
+    pass
+
+

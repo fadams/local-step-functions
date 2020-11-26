@@ -17,17 +17,37 @@
 # under the License.
 #
 # Run with:
-# PYTHONPATH=.. python3 workers.py
+# PYTHONPATH=.. python3 workers_asyncio_threaded.py
+# PYTHONPATH=.. LOG_LEVEL=DEBUG python3 workers_asyncio_threaded.py
 #
+"""
+This is an asyncio based version of the blocking workers.py example.
+Note that is version is mostly intended to illustrate how one might use asyncio
+in a multi-threaded application and it replicates the structure of the original
+workers.py quite closely, but rather than running messaging based on the Pika
+BlockingConnection in each thread instead we use the AsyncioConnection based
+messaging.
+
+Note that in each thread we use new_event_loop() not get_event_loop() as we are
+running in a thread and by default there is no current event loop in threads.
+In other words this example illustrates running each thread with its own asyncio
+event loop.
+
+In general this is probably not the best way of using asyncio and rather than
+using threads it's probably better to use a single event loop and spawn multiple
+coroutines. That's not to say there aren't cases where it might be good to use
+a pattern like we've illustrated here, but for this example there seems little
+benefit and it's mostly included just by way of an illustration.
+"""
 
 import sys
-assert sys.version_info >= (3, 0) # Bomb out if not running Python3
+assert sys.version_info >= (3, 6) # Bomb out if not running Python3.6
 
-import json, time, threading, opentracing
+import asyncio, json, time, threading, opentracing
 
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.open_tracing_factory import create_tracer, span_context, inject_span
-from asl_workflow_engine.amqp_0_9_1_messaging import Connection, Message
+from asl_workflow_engine.amqp_0_9_1_messaging_asyncio import Connection, Message
 from asl_workflow_engine.messaging_exceptions import *
 
 class Worker(threading.Thread):
@@ -84,24 +104,34 @@ class Worker(threading.Thread):
                 message.acknowledge() # Acknowledges the original request
 
     def run(self):
-        # Connect to worker queue and process data.
-        connection = Connection("amqp://localhost:5672?connection_attempts=20&retry_delay=10&heartbeat=0")
-        try:
-            connection.open()
-            session = connection.session()
-            self.consumer = session.consumer(
-                self.getName() + '; {"node": {"auto-delete": true}}'
-            )
-            self.consumer.capacity = 100; # Enable consumer prefetch
-            self.consumer.set_message_listener(self.handler)
-            self.producer = session.producer()
+        async def connect():
+            # Connect to worker queue and process data.
+            connection = Connection("amqp://localhost:5672?connection_attempts=20&retry_delay=10&heartbeat=0")
+            try:
+                await connection.open()
+                session = await connection.session()
+                self.consumer = await session.consumer(
+                    self.getName() + '; {"node": {"auto-delete": true}}'
+                )
+                self.consumer.capacity = 100; # Enable consumer prefetch
+                self.consumer.set_message_listener(self.handler)
+                self.producer = await session.producer()
 
-            connection.start(); # Blocks until event loop exits.
+                await connection.start(); # Wait until connection closes.
+    
+            except MessagingError as e:  # ConnectionError, SessionError etc.
+                self.logger.error(e)
+                asyncio.get_event_loop().stop()
 
-        except MessagingError as e:
-            self.logger.error(e)
+            connection.close();
 
-        connection.close();
+        """
+        Note we use new_event_loop() not get_event_loop() here as we are running
+        in a thread and by default there is no current event loop in threads.
+        """
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(connect())
+        loop.close()
 
 if __name__ == '__main__':
     """
@@ -115,7 +145,7 @@ if __name__ == '__main__':
                "InternalErrorHandledLambda",
                "InternalErrorNotHandledLambda",
                "mime-id",]
-    #workers = ["SuccessLambda"]
+    workers = ["SuccessLambda"]
     for w in workers:
         worker = Worker(name = w)
         worker.start()

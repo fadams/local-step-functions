@@ -26,15 +26,51 @@ reasonably abstracted from the underlying messaging fabric, so that it should
 """
 
 import sys
-assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
+assert sys.version_info >= (3, 6)  # Bomb out if not running Python3.6
 
-import json
+import json, asyncio
 
 # Tested using Pika 1.0.1, may not work correctly with earlier versions.
 import pika  # sudo pip3 install pika
+from pika.adapters.asyncio_connection import AsyncioConnection
 
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.messaging_exceptions import *
+
+def make_future(func, *args, **kwargs):
+    """
+    This function provides some generic boiler plate to "wrap" functions that
+    would normally take a callback argument and instead returns a Future whose
+    eventual result will be the value passed to the callback (or exception).
+    The goal of this is to make such functions more async/await friendly and
+    thus make callback heavy asyncio code more linear and readable.
+
+    The asyncio.get_event_loop().create_future() syntax is preferred over just
+    calling asyncio.Future() according to the documentation:
+    https://docs.python.org/3.6/library/asyncio-eventloop.html#asyncio.AbstractEventLoop.create_future
+
+    The functions we are wrapping have different keywords used for callback args,
+    e.g. on_open_callback, callback, etc. We allow make_future to pass in the
+    keyword to use, e.g. callback_kw="on_open_callback", defaults to "callback".
+    The code below retrieves the callback_kw, removes it from the kwargs then
+    adds the actual callback_kw, associating it with our callback lambda function.
+    """
+    if "callback_kw" in kwargs:
+        callback_kw = kwargs["callback_kw"]
+        del kwargs["callback_kw"]
+    else:
+        callback_kw = "callback"
+
+    future = asyncio.get_event_loop().create_future()
+    kwargs[callback_kw] = lambda value: future.set_result(value)
+
+    result = func(*args, **kwargs)
+    if hasattr(result, "add_on_open_error_callback"):
+        result.add_on_open_error_callback(
+            lambda x, err : future.set_exception(err)
+        )
+
+    return future
 
 class Connection(object):
     def __init__(self, url="amqp://localhost:5672"):
@@ -46,11 +82,11 @@ class Connection(object):
         https://pika.readthedocs.io/en/stable/modules/parameters.html
         https://pika.readthedocs.io/en/stable/examples/using_urlparameters.html
         """
-        self.logger = init_logging(log_name="amqp_0_9_1_messaging")
+        self.logger = init_logging(log_name="amqp_0_9_1_messaging_async")
         self.logger.info("Creating Connection with url: {}".format(url))
         self.parameters = pika.URLParameters(url)
 
-    def open(self, timeout=None):
+    async def open(self, timeout=None):
         """
         Opens the connection.
         """
@@ -67,10 +103,39 @@ class Connection(object):
             )
         )
 
-        try:
-            self.connection = pika.BlockingConnection(self.parameters)
-        except pika.exceptions.AMQPConnectionError as e:
-            raise ConnectionError(repr(e))
+        """
+        The connection_attempts from parameters *should* cause AsyncioConnection
+        to automatically attempt reconnection if, for example, the broker is
+        unavailable. With BlockingConnection that seems to work fine but whilst
+        AsyncioConnection does attempt to reconnect, as the broker is restarting
+        AsyncioConnection raises IncompatibleProtocolError. To cater for this
+        we wrap in a loop and retry if IncompatibleProtocolError is raised. In
+        general this will only happen once as the broker is restarting, but we
+        bound the loop with connection_attempts just in case.
+        """
+        connection_attempts_remaining = self.parameters.connection_attempts
+        while connection_attempts_remaining:
+            try:
+                self.connection = await make_future(
+                    AsyncioConnection,
+                    parameters=self.parameters,
+                    callback_kw="on_open_callback"
+                )
+                """
+                In order to trap broker restarts we await the "closed" Future
+                in the start() method and set connection's on_close_callback to
+                trigger the Future's exception
+                """
+                self.closed = asyncio.get_event_loop().create_future()
+                self.connection.add_on_close_callback(
+                    lambda x, err : self.closed.set_exception(err)
+                )
+                break
+            except pika.exceptions.IncompatibleProtocolError as e:
+                await asyncio.sleep(self.parameters.retry_delay)
+                connection_attempts_remaining -= 1
+            except pika.exceptions.AMQPConnectionError as e:
+                raise ConnectionError(repr(e))
 
     def is_open(self):
         """
@@ -90,7 +155,7 @@ class Connection(object):
             )
             self.connection.close()
 
-    def session(self, name=None, transactional=False, auto_ack=False):
+    async def session(self, name=None, transactional=False, auto_ack=False):
         """
         Creates a Session object.
 
@@ -100,60 +165,48 @@ class Connection(object):
         thread. Pika is single threaded and moreover generally not thread-safe
         so to have similar behaviour it is (generally) necessary to have a
         separate Pika *connection* per thread. We should threfore create a new
-        connection for each session, but for now only support a single Session
-        such that the first call to session() will create the Session and
-        subsequent calls will return that Session.
+        connection for each session.
+
+        With asyncio we can however create multiple Sessions, which will each
+        run on separate AMQP channels. Any message listeners will be called
+        asynchronously as messages become available. Note however that message
+        listeners should avoid blocking to avoid blocking the asyncio event loop.
         """
-        if not hasattr(self, "_session"):
-            self._session = Session(self, name, transactional, auto_ack)
+        self._session = Session(self, name, transactional, auto_ack)
+        await self._session.open()
         return self._session
 
     def set_timeout(self, callback, delay):
         """
         Executes the specified callback function after the specified ms delay.
         Intended to have the same semantics as the JavaScript setTimeout().
-        NOTE: the timer callbacks are dispatched only in the scope of 
-        BlockingConnection.process_data_events() and
-        BlockingChannel.start_consuming() e.g. after the start() method below
-        has been called.
+        NOTE: Using await asyncio.sleep() is most likely a better approach, but
+        we retain this callback based method to align with the blocking API.
         Clamp delay to >= 0 as call_later doesn't handle negative values.
         """
         if delay < 0:
             delay = 0
-        return self.connection.call_later(delay / 1000, callback)
+        return self.connection._adapter_call_later(delay / 1000, callback)
 
     def clear_timeout(self, timeout_id):
         """
         Remove a timer if it’s still in the timeout stack.
         Intended to have the same semantics as the JavaScript clearTimeout().
         """
-        self.connection.remove_timeout(timeout_id)
+        self.connection._adapter_remove_timeout(timeout_id)
 
-    def start(self):
+    async def start(self):
         """
-        Starts (or restarts) a connection's delivery of incoming messages.
-        A call to start on a connection that has already been started is ignored.
-
-        TODO when multiple sessions are supported start them all.
-        There is actually a lot going on in start_consuming as Pika is basically
-        single threaded and largely not thread safe the main docs are here
-        https://pika.readthedocs.io/en/stable/modules/adapters/blocking.html
-
-        One issue is how to communicate with the Pika dispatch loop from a
-        different thread. I *think* that the way to do it is via the
-        connection.add_callback_threadsafe(callback) method which requests a
-        call to the given function as soon as possible in the context of this
-        connection’s thread.
-
-        It's also not clear how to consume on multiple channels as the
-        start_consuming call is a method on channel, but it blocks, so how to
-        consume on other channels in that case??
+        For AsyncioConnection this method is used to trap broker restarts.
+        self.closed is a Future that we await for completion. The connection's
+        add_on_close_callback is used to set the Future's exception if the
+        broker is stopped, thus if we do await connection.start() we will get
+        the same exception semantics as we get with the BlockingConnection.
         """
-        if hasattr(self, "_session"):
-            try:
-                self._session.channel.start_consuming()
-            except pika.exceptions.ConnectionClosedByBroker as e:
-                raise ConnectionError(repr(e))
+        try:
+            await self.closed
+        except pika.exceptions.AMQPConnectionError as e:
+            raise ConnectionError(repr(e))
 
 # ------------------------------------------------------------------------------
 
@@ -177,11 +230,15 @@ class Session(object):
         # TODO maybe do something with transactional?
         self.auto_ack = auto_ack
 
+    async def open(self):
         """
         For RabbitMQ AMQP Channel documentation see:
         https://pika.readthedocs.io/en/stable/modules/channel.html
         """
-        self.channel = connection.connection.channel()
+        self.channel = await make_future(
+            self.connection.connection.channel,
+            callback_kw="on_open_callback"
+        )
 
     def acknowledge(self, message=None):
         """
@@ -228,21 +285,25 @@ class Session(object):
             self.logger.info("Closing Session")  # TODO log session name
             self.channel.close()
 
-    def producer(self, target=""):
+    async def producer(self, target=""):
         """
         Creates a Producer used to send messages to the specified target.
         :param target: The target to which messages will be sent
         :type target: str
         """
-        return Producer(self, target)
+        producer = Producer(self, target)
+        await producer.open()
+        return producer
 
-    def consumer(self, source=""):
+    async def consumer(self, source=""):
         """
         Creates a Consumer used to fetch messages from the specified source.
         :param source: The source of messages
         :type source: str
         """
-        return Consumer(self, source)
+        consumer = Consumer(self, source)
+        await consumer.open()
+        return consumer
 
 # ------------------------------------------------------------------------------
 
@@ -454,6 +515,14 @@ class Producer(Destination):
         self.previous_nack_start = 1
 
         """
+        self.sync is used when enable_exceptions(True) has been called to record
+        the indices of the Futures returned by the send() method in that mode
+        of operation and held in the sync dict pending result or exception.
+        """
+        self.sync_pub = False
+        self.sync = {}
+
+        """
         self.undelivered is used when enable_exceptions(sync=False) has been
         called. It records the sequence numbers of undelivered (unpublished)
         messages as tuples, representing contiguous blocks of unpublished
@@ -467,12 +536,47 @@ class Producer(Destination):
         except ValueError as e:
             raise ProducerError("Failed to parse address: {} {}".format(target, e))
 
+    async def open(self):
         # Check if an exchange with the name of this destination exists.
         if self.name:
             try:
                 # Use temporary channel as the channel gets closed on an exception.
-                temp_channel = self.session.connection.connection.channel()
+                temp_channel = await make_future(
+                    self.session.connection.connection.channel,
+                    callback_kw="on_open_callback"
+                )
+
+                """
+                The following, slightly fiddly, code block equates to
                 temp_channel.exchange_declare(self.name, passive=True)
+                It's fiddly because with passive set, the server will reply with
+                Declare-Ok if the exchange already exists with the same name,
+                and raise an error if not and if the exchange does not already
+                exist, the server MUST raise a channel exception with reply code
+                404 (not found). The exception raised is a *channel* exception,
+                so we explicitly expose the exchange_declare Future and add an
+                on_close callback to our temp_channel that triggers the future's
+                exception if the channel gets closed. By doing this the rest of
+                the code can behave in the same way as the blocking API code.
+                Note that after awaiting the exchange_declare Future it is
+                important to remove the _on_channel_close callback, as that
+                triggers the exception on a Future that is now "done". If we
+                fail to remove this callback, when we call temp_channel.close()
+                it will be triggered again and cause "strange" behaviour due
+                to causing an InvalidStateError on the (done) Future.
+                """
+                future = make_future(
+                    temp_channel.exchange_declare,
+                    self.name, passive=True
+                )
+                temp_channel.add_on_close_callback(
+                    lambda x, err : future.set_exception(err)
+                )
+                await future
+                temp_channel.callbacks.remove_all(
+                    temp_channel.channel_number, "_on_channel_close"
+                )
+
                 temp_channel.close()
             except pika.exceptions.ChannelClosedByBroker as e:
                 # If 404 NOT_FOUND the specified exchange doesn't exist.
@@ -484,7 +588,8 @@ class Producer(Destination):
 
         if self.declare.get("exchange"):
             # Exchange declare.
-            self.session.channel.exchange_declare(
+            await make_future(
+                self.session.channel.exchange_declare,
                 exchange=self.declare["exchange"],
                 exchange_type=self.declare["exchange-type"],
                 passive=self.declare["passive"],
@@ -511,22 +616,25 @@ class Producer(Destination):
         When enable_exceptions() is called the default behaviour is to raise an
         exception on the first call to send() after one or more basic_nack has
         been received from the broker.
-
+        
         The exception contains the sequence numbers of the nacked messages and
         this information may be used by applications to identify messages that
         might need to be resent.
 
-        If sync=True send() will instead block until delivery confirmation by
-        the broker. This mode of operation is what the BlockingChannel
-        confirm_delivery() does and the underlying basic_publish call will block
-        until ack or nack is received. NOTE that setting sync=True could impact
-        message throughput and latency considerably and unfortunately the pika
-        BlockingChannel doesn't provide a convenient way to block for a batch
-        of messages.
+        If sync=True send() will instead return an awaitable, the sync callback
+        below allows a new awaitable to be returned for each call to send()
+        tracked by sequence number and removed when the Future is resolved.
+        Applications can retain their own references to the awaitables to allow
+        batching of waits e.g. by calling await asyncio.gather(*waiters).
 
-        WARNING: do not modify the exception_ack_nack_callback function unless
-        you know what you are doing. The gist is that it records the sequence
-        numbers of the ack and nack methods returned by the broker.
+        WARNING: do not modify the exception_ack_nack_callback or 
+        sync_ack_nack_callback functions unless you know what you are doing. The
+        gist of them is that they record the sequence numbers of the ack and
+        nack methods returned by the broker. The sync callback is a little
+        simpler as it's mostly just storing the Futures in a dict then looking
+        those up and resolving based on the ack or nack sequence number, but
+        it is possible for nacks to arrive quite late with a sequence number
+        much lower than the current ack hence testing if i in self.sync.
 
         The possibility of nacks filling "holes" in the sequencing is part of
         the reason the exception callback is quite complicated. The function
@@ -538,6 +646,37 @@ class Producer(Destination):
         One reason to be careful is that the out of sequence case is sporadic
         and only cropped up on edge cases.
         """
+
+        def resolve_future(index, method):
+            if isinstance(method, pika.spec.Basic.Ack):
+                self.sync[index].set_result(index)
+            elif isinstance(method, pika.spec.Basic.Nack):
+                undelivered = [(index, index)]
+                send_exception = SendError(
+                    "Failed to send message: seq_no = {}".format(undelivered)
+                )
+                send_exception.undelivered = undelivered
+                self.sync[index].set_exception(send_exception)
+
+            del self.sync[index]
+
+        def sync_ack_nack_callback(result):
+            method = result.method
+            seq_no = method.delivery_tag
+
+            if method.multiple:
+                new_ack_nack_seq_no = seq_no + 1
+
+                for i in range(self.saved_seq_no, new_ack_nack_seq_no):           
+                    if i in self.sync:
+                        resolve_future(i, method)
+
+                self.saved_seq_no = new_ack_nack_seq_no
+            else:
+                resolve_future(seq_no, method)
+                if self.saved_seq_no == seq_no:
+                    self.saved_seq_no += 1
+        
 
         def exception_ack_nack_callback(result):
             method = result.method
@@ -574,16 +713,17 @@ class Producer(Destination):
                 self.saved_nack_seq_no = seq_no + 1
 
         if sync:
-            self.session.channel.confirm_delivery()
+            self.saved_seq_no = 1
+            ack_nack_callback = sync_ack_nack_callback
+            self.sync_pub = True  # Tell send() to return awaitable
         else:
             self.saved_ack_seq_no = 1
             self.saved_nack_seq_no = 1
+            ack_nack_callback = exception_ack_nack_callback
 
-            # Need to access the blocking channel's underlying async channel
-            # for this mode of operation.
-            self.session.channel._impl.confirm_delivery(
-                ack_nack_callback=exception_ack_nack_callback,
-            ) 
+        self.session.channel.confirm_delivery(
+            ack_nack_callback=ack_nack_callback,
+        )        
 
     def send(self, message, threadsafe=False):
         """
@@ -624,22 +764,15 @@ class Producer(Destination):
                 cluster_id=message.cluster_id,
             )
 
-            try:
-                self.session.channel.basic_publish(
-                    exchange=self.name,
-                    routing_key=routing_key,
-                    body=message.body,
-                    properties=properties,
-                )
-            except pika.exceptions.NackError as e:
-                undelivered = [(self.next_publish_seq_no, self.next_publish_seq_no)]
-                send_exception = SendError(
-                    "Failed to send message: undelivered = {}".format(undelivered)
-                )
-                send_exception.undelivered = undelivered
-                raise send_exception
+            self.session.channel.basic_publish(
+                exchange=self.name,
+                routing_key=routing_key,
+                body=message.body,
+                properties=properties,
+            )
 
-        if self.undelivered:  # Will only be True if enable_exceptions(sync=False).
+
+        if self.undelivered:  # Will only be True if self.sync_pub is not set.
             """
             If enable_exceptions() has been called with sync=False (the default)
             the sequence numbers of nacked messages are recorded in undelivered,
@@ -658,11 +791,32 @@ class Producer(Destination):
             self.undelivered = []
             raise send_exception
         elif threadsafe:
-            self.session.connection.connection.add_callback_threadsafe(publish)
+            self.session.connection.connection._adapter_add_callback_threadsafe(publish)
         else:
             publish()
 
         self.next_publish_seq_no += 1
+
+        if self.sync_pub:  # "synchronous"/awaitable exception handling enabled.
+            """
+            If enable_exceptions() has been called with sync=True we return a
+            Future that may be awaited e.g. await self.producer.send(message)
+            For efficiency it is possible to batch by recording the awaitables
+            in a list and periodically gathering e.g.
+            waiters = []
+            for i in range(1000000):
+                waiters.append(self.producer.send(message))
+                if i % 100 == 0:
+                    await asyncio.gather(*waiters)
+                    waiters = []
+            If any published message is nacked the Future associated with that
+            message is exceptioned. Applications can work out which messages
+            succeeded or failed by examining the state of the waiters in the
+            exception handlers.
+            """
+            future = asyncio.get_event_loop().create_future()
+            self.sync[self.next_publish_seq_no - 1] = future
+            return future
 
 # ------------------------------------------------------------------------------
 
@@ -687,13 +841,48 @@ class Consumer(Destination):
         except ValueError as e:
             raise ConsumerError("Failed to parse address: {} {}".format(source, e))
 
+    async def open(self):
         # Check if an exchange with the name of this destination exists.
         exchange = None
         if self.name:
             try:
                 # Use temporary channel as the channel gets closed on an exception.
-                temp_channel = self.session.connection.connection.channel()
+                temp_channel = await make_future(
+                    self.session.connection.connection.channel,
+                    callback_kw="on_open_callback"
+                )
+
+                """
+                The following, slightly fiddly, code block equates to
                 temp_channel.exchange_declare(self.name, passive=True)
+                It's fiddly because with passive set, the server will reply with
+                Declare-Ok if the exchange already exists with the same name,
+                and raise an error if not and if the exchange does not already
+                exist, the server MUST raise a channel exception with reply code
+                404 (not found). The exception raised is a *channel* exception,
+                so we explicitly expose the exchange_declare Future and add an
+                on_close callback to our temp_channel that triggers the future's
+                exception if the channel gets closed. By doing this the rest of
+                the code can behave in the same way as the blocking API code.
+                Note that after awaiting the exchange_declare Future it is
+                important to remove the _on_channel_close callback, as that
+                triggers the exception on a Future that is now "done". If we
+                fail to remove this callback, when we call temp_channel.close()
+                it will be triggered again and cause "strange" behaviour due
+                to causing an InvalidStateError on the (done) Future.
+                """
+                future = make_future(
+                    temp_channel.exchange_declare,
+                    self.name, passive=True
+                )
+                temp_channel.add_on_close_callback(
+                    lambda x, err : future.set_exception(err)
+                )
+                await future
+                temp_channel.callbacks.remove_all(
+                    temp_channel.channel_number, "_on_channel_close"
+                )
+
                 temp_channel.close()
                 exchange = self.name
             except pika.exceptions.ChannelClosedByBroker as e:
@@ -722,7 +911,8 @@ class Consumer(Destination):
         # Declare queue, exchange and bindings as necessary
         if self.declare.get("exchange"):
             # Exchange declare - unusual scenario for Consumer, but handle it.
-            self.session.channel.exchange_declare(
+            await make_future(
+                self.session.channel.exchange_declare,
                 exchange=self.declare["exchange"],
                 exchange_type=self.declare["exchange-type"],
                 passive=self.declare["passive"],
@@ -736,8 +926,9 @@ class Consumer(Destination):
             declare = self.link_declare
         if self.name == "":
             declare["auto-delete"] = True
-
-        result = self.session.channel.queue_declare(
+        
+        result = await make_future(
+            self.session.channel.queue_declare,
             queue=self.name,
             passive=declare["passive"],
             durable=declare["durable"],
@@ -755,7 +946,8 @@ class Consumer(Destination):
         for binding in self.bindings:
             if binding["exchange"] == "":
                 continue  # Can't bind to default
-            self.session.channel.queue_bind(
+            await make_future(
+                self.session.channel.queue_bind,
                 queue=binding["queue"],
                 exchange=binding["exchange"], 
                 routing_key=binding.get("key"),
@@ -824,7 +1016,13 @@ class Consumer(Destination):
             # Message's acknowledge() methods
             message._channel = channel
             message._delivery_tag = method.delivery_tag
-            self._message_listener(message)
+            # If message listener is coroutine run as a task else call directly. 
+            if asyncio.iscoroutinefunction(self._message_listener):
+                asyncio.get_event_loop().create_task(
+                    self._message_listener(message)
+                )
+            else:
+                self._message_listener(message)
 
     @property
     def capacity(self):

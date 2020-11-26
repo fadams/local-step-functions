@@ -184,7 +184,7 @@ class TaskDispatcher(object):
                 )
 
 
-        message.acknowledge()
+        message.acknowledge(multiple=False)
 
     def execute_task(self, resource_arn, parameters, callback, timeout, context):
         # TODO this import should be handled by the "Connection Factory for the

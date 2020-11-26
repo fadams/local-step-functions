@@ -220,7 +220,7 @@ class EventDispatcher(object):
             self.logger.error(
                 "Message {} does not contain valid JSON".format(message.body)
             )
-            message.acknowledge()
+            message.acknowledge(multiple=False)
         except Exception as e:
             """
             If state_engine.notify bombs out with an exception it is likely to
@@ -234,7 +234,7 @@ class EventDispatcher(object):
                     message.body, type(e).__name__, str(e)
                 )
             )
-            message.acknowledge()
+            message.acknowledge(multiple=False)
 
     def acknowledge(self, id):
         """
@@ -243,7 +243,7 @@ class EventDispatcher(object):
         dictionary. See the comment for unacknowledged_messages in constructor.
         """
         message = self.unacknowledged_messages[id]
-        message.acknowledge()
+        message.acknowledge(multiple=False)
         del self.unacknowledged_messages[id]
 
     def publish(self, item, threadsafe=False, start_execution=False):
