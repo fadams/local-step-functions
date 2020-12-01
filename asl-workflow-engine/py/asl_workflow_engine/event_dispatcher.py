@@ -75,13 +75,17 @@ class EventDispatcher(object):
             .replace("-", "_")
             .replace(".", "_")
         )
-        name = "asl_workflow_engine." + name + "_messaging"
 
-        self.logger.info("Loading messaging module {}".format(name))
+        if name.endswith("_asyncio"):
+            self.name = "asl_workflow_engine." + name[:-8] + "_messaging_asyncio"
+        else:
+            self.name = "asl_workflow_engine." + name + "_messaging"
+
+        self.logger.info("Loading messaging module {}".format(self.name))
 
         # Load the module whose name is derived from the specified queue_type.
         try:
-            messaging = importlib.import_module(name)
+            messaging = importlib.import_module(self.name)
             globals()["Connection"] = messaging.Connection
             globals()["Message"] = messaging.Message
         except ImportError as e:
@@ -194,6 +198,108 @@ class EventDispatcher(object):
             sys.exit(1)
 
         connection.close()
+
+    # asyncio version of the start() method above
+    async def start_asyncio(self):
+        # Connect to event queue and start the main event loop.
+        # TODO This code will connect on broker startup, but need to add code to
+        # reconnect for cases where the broker fails and then restarts.
+        connection = Connection(self.queue_config["connection_url"])
+        try:
+            await connection.open()
+            session = await connection.session()
+            """
+            The asl_workflow_events queue is a shared event queue, that is to
+            say every asl_workflow_engine instance receives events from this
+            queue. This is used to publish StartExecution events to and is non-
+            exclusive so multiple asl_workflow_engine instances can consume from
+            it and will thus load-balance executions across multiple instances.
+            """
+            self.queue_name = self.queue_config.get("queue_name", "asl_workflow_events")
+            shared_queue = self.queue_name + '; {"node": {"durable": true}}'
+            shared_event_consumer = await session.consumer(shared_queue)
+            shared_event_consumer.capacity = 100  # Enable consumer prefetch
+            shared_event_consumer.set_message_listener(self.dispatch)
+
+            """
+            the instance_event_consumer is an event queue that is set up for
+            each asl_workflow_engine instance. This should be an exclusive
+            queue such that only a single instance can consume from it. This
+            queue is used for the remainder of the events for each execution.
+            The idea of having an event queue per instance is because most
+            messaging implementations scale across queues so simply having lots
+            of consumers on a single queue is fine if the bottleneck is due to
+            the consumer performance, but if the bottleneck is due to limits
+            of the messaging fabric then it won't help. Another reason for a
+            per instance queue is because with the Parallel and Map states we
+            would like each branch to notify the same instance when complete.
+            """
+            instance_id = self.queue_config.get("instance_id", "")
+            self.instance_queue_name = self.queue_name + "-" + instance_id
+            instance_queue = self.instance_queue_name + '; {"node": {"durable": true}, "link": {"x-subscribe": {"exclusive": true}}}'
+
+            instance_event_consumer = await session.consumer(instance_queue)
+            instance_event_consumer.capacity = 100  # Enable consumer prefetch
+            instance_event_consumer.set_message_listener(self.dispatch)
+
+            """
+            The event_queue_producer is used to publish events corresponding
+            to state transitions. This can publish to both the asl_workflow_events
+            queue that is shared by every asl_workflow_engine instance and also
+            the per-instance queues of each instance. The Message subject is
+            used to select which queue the Message should be published to.
+            """
+            self.event_queue_producer = await session.producer(self.queue_name)
+
+            """
+            The topic_producer specifies the topic that notification events
+            should be published to. Notification events are analogous to AWS
+            CloudWatch events and the JSON format of the notification Messages
+            is the same as that used by CloudWatch.
+            """
+            self.topic_producer = await session.producer(self.notifier_config["topic"])
+
+            """
+            TODO Passing connection.set_timeout here is kind of ugly but I can't
+            think of a nicer way yet. The issue is that we want the state engine
+            to be able to support timeouts, however that is being called from
+            Pika's event loop, which isn't thread-safe and we want asynchronous
+            timeouts not blocking timeouts as when in an ASL Wait state we still
+            want to be able to process other events that might be available on
+            the event queue. This (hopefully temporary) approach is Pika specific.
+            """
+            self.set_timeout = connection.set_timeout
+            self.clear_timeout = connection.clear_timeout
+
+            """
+            Start a periodic "heartbeat". The idea of this is that sometimes
+            "bad things happen", for example if a service goes down we might
+            be sat stuck in a Task state. Now things *should* carry on when the
+            service is restarted, but for that to work we'd need to ensure
+            redelivery of unacknowledged messages via recover call. Similarly
+            in the TaskDispatcher we might have message requests for which no
+            responses have been received and those are likely to require reaping
+            for cases where no explicit timeout has been added to the State.
+            """
+            #self.set_timeout(self.heartbeat, 1000)
+
+            """
+            Share messaging session with state_engine.task_dispatcher. This
+            is to allow rpcmessage invocations that share the same message
+            fabric instance as the event queue to reuse connections etc.
+            """
+            await self.state_engine.task_dispatcher.start_asyncio(session)
+
+            await connection.start()  # Blocks until event loop exits.
+        except ConnectionError as e:
+            self.logger.error(e)
+            sys.exit(1)
+        except SessionError as e:
+            self.logger.error(e)
+            sys.exit(1)
+
+        connection.close()
+
 
     def dispatch(self, message):
         """

@@ -28,13 +28,15 @@ This is the main application entry point to the ASL Workflow Engine.
 This class reads the JSON configuration file config.json and stores the config
 object for the rest of the application to use, it then creates and starts a
 StateEngine and EventDispatcher and a Web Server to handle AWS CLI/SDK REST API.
+
+NOTE Due to the addition of asyncio support Python 3.6 is now required.
 """
 
 import sys
-assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
+assert sys.version_info >= (3, 6)  # Bomb out if not running Python3.6
 
 
-import json, os
+import asyncio, json, os
 import threading  # Run REST API in its own thread
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.metrics import init_metrics
@@ -127,7 +129,12 @@ class WorkflowEngine(object):
         self.rest_api = RestAPI(state_engine, self.event_dispatcher, config)
 
     def start(self):
-        self.event_dispatcher.start()
+        if self.event_dispatcher.name.endswith("_asyncio"):
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(self.event_dispatcher.start_asyncio())
+            loop.close()
+        else:
+            self.event_dispatcher.start()
 
 if __name__ == "__main__":
     workflow_engine = WorkflowEngine("config.json")

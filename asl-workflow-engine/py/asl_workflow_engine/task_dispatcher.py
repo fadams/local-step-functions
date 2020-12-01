@@ -85,7 +85,7 @@ class TaskDispatcher(object):
         maps requests with their callbacks using correlation IDs.
         """
         self.pending_requests = {}
-        
+
     def start(self, session):
         """
         Connect to the messaging fabric to enable Task States to integrate with
@@ -110,6 +110,35 @@ class TaskDispatcher(object):
         self.reply_to.capacity = 100
         self.reply_to.set_message_listener(self.handle_rpcmessage_response)
         self.producer = session.producer()
+
+        #print(self.reply_to.name)
+        #print(self.producer.name)
+
+    # asyncio version of the start() method above
+    async def start_asyncio(self, session):
+        """
+        Connect to the messaging fabric to enable Task States to integrate with
+        "rpcmessage" based services as described in execute_task.
+        """
+        #self.reply_to = await session.consumer()  # reply_to with normal priority
+        """
+        Increase the consumer priority of the reply_to consumer.
+        See https://www.rabbitmq.com/consumer-priority.html
+        N.B. This syntax uses the JMS-like Address String which gets parsed into
+        implementation specific constructs. The link/x-subscribe is an
+        abstraction for AMQP link subscriptions, which in AMQP 0.9.1 maps to
+        channel.basic_consume and alows us to pass the exclusive and arguments
+        parameters. NOTE HOWEVER that setting the consumer priority is RabbitMQ
+        specific and it might well not be possible to do this on other providers.
+        """
+        self.reply_to = await session.consumer(
+            '; {"link": {"x-subscribe": {"arguments": {"x-priority": 10}}}}'
+        )
+
+        # Enable consumer prefetch
+        self.reply_to.capacity = 100
+        self.reply_to.set_message_listener(self.handle_rpcmessage_response)
+        self.producer = await session.producer()
 
         #print(self.reply_to.name)
         #print(self.producer.name)
