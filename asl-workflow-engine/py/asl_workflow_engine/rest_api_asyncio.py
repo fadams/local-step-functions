@@ -75,12 +75,13 @@ aws stepfunctions --endpoint http://localhost:4584 get-execution-history --execu
 """
 
 import sys
-assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
+assert sys.version_info >= (3, 6)  # Bomb out if not running Python3.6
 
 
 import re, time, uuid, logging, opentracing
 from datetime import datetime, timezone
-from flask import Flask, escape, request, jsonify, abort
+#from flask import Flask, escape, request, jsonify, abort
+from quart import Quart, escape, request, jsonify, abort
 
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.open_tracing_factory import span_context, inject_span
@@ -159,20 +160,25 @@ class RestAPI(object):
         self.event_dispatcher = event_dispatcher
 
     def create_app(self):
-        app = Flask(__name__)
+        app = Quart(__name__)
 
-        # Turn off Flask standard logging
+        # Turn off Quart standard logging
         app.logger.disabled = True
-        log = logging.getLogger("werkzeug")
+        log = logging.getLogger("quart.serving")
         log.disabled = True
 
         """
-        Flask "catch-all" URL
+        Flask/Quart "catch-all" URL
         see https://gist.github.com/fitiavana07/bf4eb97b20bbe3853681e153073c0e5e
+
+        As Quart is an asynchronous framework based on asyncio, it is necessary
+        to explicitly add async and await keywords. The most notable place in
+        which to do this is route functions.
+        see https://pgjones.gitlab.io/quart/how_to_guides/flask_migration.html
         """
         @app.route("/", defaults={"path": ""}, methods=["POST"])
         @app.route("/<path:path>", methods=["POST"])
-        def handle_post(path):
+        async def handle_post(path):
             """
             Perform initial validation of the HTTP request. The AWS Step 
             Functions API is a slightly "weird" REST API as it mostly seems to
@@ -191,7 +197,11 @@ class RestAPI(object):
             action = target.split(".")[1]
             # print(action)
 
-            data = request.data
+            """
+            request.data is one of the common calls that requires awaiting
+            https://pgjones.gitlab.io/quart/how_to_guides/flask_migration.html
+            """
+            data = await request.data
 
             try:
                 params = json.loads(data.decode("utf8"))

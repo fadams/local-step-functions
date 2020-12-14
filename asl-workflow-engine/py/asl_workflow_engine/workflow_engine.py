@@ -43,7 +43,9 @@ from asl_workflow_engine.metrics import init_metrics
 from asl_workflow_engine.open_tracing_factory import create_tracer
 from asl_workflow_engine.state_engine import StateEngine
 from asl_workflow_engine.event_dispatcher import EventDispatcher
-from asl_workflow_engine.rest_api import RestAPI
+
+import asl_workflow_engine.rest_api
+import asl_workflow_engine.rest_api_asyncio
 
 class WorkflowEngine(object):
     def __init__(self, configuration_file):
@@ -124,29 +126,36 @@ class WorkflowEngine(object):
 
         init_metrics("asl_workflow_engine", config["metrics"])
 
-        state_engine = StateEngine(config)
-        self.event_dispatcher = EventDispatcher(state_engine, config)
-        self.rest_api = RestAPI(state_engine, self.event_dispatcher, config)
+        self.state_engine = StateEngine(config)
+        self.event_dispatcher = EventDispatcher(self.state_engine, config)
+
+        self.config = config
 
     def start(self):
         if self.event_dispatcher.name.endswith("_asyncio"):
+            self.rest_api = asl_workflow_engine.rest_api_asyncio.RestAPI(
+                self.state_engine, self.event_dispatcher, self.config
+            )
+            app = self.rest_api.create_app()
             loop = asyncio.get_event_loop()
-            loop.run_until_complete(self.event_dispatcher.start_asyncio())
-            loop.close()
+            loop.create_task(self.event_dispatcher.start_asyncio())
+            app.run(host="0.0.0.0", port=4584)
         else:
+            self.rest_api = asl_workflow_engine.rest_api.RestAPI(
+                self.state_engine, self.event_dispatcher, self.config
+            )
+            app = self.rest_api.create_app()
+            # https://stackoverflow.com/questions/31264826/start-a-flask-application-in-separate-thread/31265602#31265602
+            threading.Thread(
+                target=app.run,
+                kwargs={
+                    "host": self.rest_api.host,
+                    "port": self.rest_api.port,
+                },
+                daemon=True,
+            ).start()
             self.event_dispatcher.start()
 
 if __name__ == "__main__":
-    workflow_engine = WorkflowEngine("config.json")
-    app = workflow_engine.rest_api.create_app()
-    # https://stackoverflow.com/questions/31264826/start-a-flask-application-in-separate-thread/31265602#31265602
-    threading.Thread(
-        target=app.run,
-        kwargs={
-            "host": workflow_engine.rest_api.host,
-            "port": workflow_engine.rest_api.port,
-        },
-        daemon=True,
-    ).start()
-    workflow_engine.start()
+    WorkflowEngine("config.json").start()
 
