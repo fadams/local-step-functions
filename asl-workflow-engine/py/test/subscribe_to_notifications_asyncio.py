@@ -103,7 +103,7 @@ class NotificationHandler(object):
                 # exchange doesn't already exist.
                 consumer = await session.consumer("asl_workflow_engine/" + s)
                 consumer.capacity = 100; # Enable consumer prefetch
-                consumer.set_message_listener(scoped_handler(s))
+                await consumer.set_message_listener(scoped_handler(s))
 
 
             await connection.start(); # Blocks until event loop exits.

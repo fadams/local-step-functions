@@ -137,7 +137,7 @@ class TaskDispatcher(object):
 
         # Enable consumer prefetch
         self.reply_to.capacity = 100
-        self.reply_to.set_message_listener(self.handle_rpcmessage_response)
+        await self.reply_to.set_message_listener(self.handle_rpcmessage_response)
         self.producer = await session.producer()
 
         #print(self.reply_to.name)

@@ -114,7 +114,7 @@ class Worker(threading.Thread):
                     self.getName() + '; {"node": {"auto-delete": true}}'
                 )
                 self.consumer.capacity = 100; # Enable consumer prefetch
-                self.consumer.set_message_listener(self.handler)
+                await self.consumer.set_message_listener(self.handler)
                 self.producer = await session.producer()
 
                 await connection.start(); # Wait until connection closes.
@@ -145,7 +145,7 @@ if __name__ == '__main__':
                "InternalErrorHandledLambda",
                "InternalErrorNotHandledLambda",
                "mime-id",]
-    workers = ["SuccessLambda"]
+    #workers = ["SuccessLambda"]
     for w in workers:
         worker = Worker(name = w)
         worker.start()

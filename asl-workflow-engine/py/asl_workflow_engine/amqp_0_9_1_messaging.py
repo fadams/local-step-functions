@@ -777,13 +777,16 @@ class Consumer(Destination):
         ex = self.link_subscribe.get("exclusive", False)
         args = self.link_subscribe.get("arguments", None)
         self._message_listener = message_listener
-        self.session.channel.basic_consume(
-            on_message_callback=self.message_listener,
-            queue=self.name,
-            auto_ack=self.session.auto_ack,
-            exclusive=ex,
-            arguments=args
-        )
+        try:
+            self.session.channel.basic_consume(
+                on_message_callback=self.message_listener,
+                queue=self.name,
+                auto_ack=self.session.auto_ack,
+                exclusive=ex,
+                arguments=args
+            )
+        except pika.exceptions.ChannelClosedByBroker as e:
+            raise ConsumerError(e.reply_text)
 
     def message_listener(self, channel, method, properties, body):
         """

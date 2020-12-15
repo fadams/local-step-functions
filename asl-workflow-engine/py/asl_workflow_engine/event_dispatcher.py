@@ -21,7 +21,7 @@ import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 
-import importlib
+import asyncio, importlib
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.messaging_exceptions import *
 
@@ -190,10 +190,7 @@ class EventDispatcher(object):
             self.state_engine.task_dispatcher.start(session)
 
             connection.start()  # Blocks until event loop exits.
-        except ConnectionError as e:
-            self.logger.error(e)
-            sys.exit(1)
-        except SessionError as e:
+        except MessagingError as e:
             self.logger.error(e)
             sys.exit(1)
 
@@ -219,7 +216,7 @@ class EventDispatcher(object):
             shared_queue = self.queue_name + '; {"node": {"durable": true}}'
             shared_event_consumer = await session.consumer(shared_queue)
             shared_event_consumer.capacity = 100  # Enable consumer prefetch
-            shared_event_consumer.set_message_listener(self.dispatch)
+            await shared_event_consumer.set_message_listener(self.dispatch)
 
             """
             the instance_event_consumer is an event queue that is set up for
@@ -240,7 +237,7 @@ class EventDispatcher(object):
 
             instance_event_consumer = await session.consumer(instance_queue)
             instance_event_consumer.capacity = 100  # Enable consumer prefetch
-            instance_event_consumer.set_message_listener(self.dispatch)
+            await instance_event_consumer.set_message_listener(self.dispatch)
 
             """
             The event_queue_producer is used to publish events corresponding
@@ -291,15 +288,11 @@ class EventDispatcher(object):
             await self.state_engine.task_dispatcher.start_asyncio(session)
 
             await connection.start()  # Blocks until event loop exits.
-        except ConnectionError as e:
-            self.logger.error(e)
-            sys.exit(1)
-        except SessionError as e:
+        except MessagingError as e:
             self.logger.error(e)
             sys.exit(1)
 
         connection.close()
-
 
     def dispatch(self, message):
         """

@@ -133,11 +133,19 @@ class WorkflowEngine(object):
 
     def start(self):
         if self.event_dispatcher.name.endswith("_asyncio"):
+            def global_exception_handler(loop, context):
+                """
+                Just swallow "exception was never retrieved" as we handle the
+                main exceptions that we care about in EventDispatcher.start_asyncio()
+                """
+                pass
+
             self.rest_api = asl_workflow_engine.rest_api_asyncio.RestAPI(
                 self.state_engine, self.event_dispatcher, self.config
             )
             app = self.rest_api.create_app()
             loop = asyncio.get_event_loop()
+            loop.set_exception_handler(global_exception_handler)
             loop.create_task(self.event_dispatcher.start_asyncio())
             app.run(host="0.0.0.0", port=4584)
         else:

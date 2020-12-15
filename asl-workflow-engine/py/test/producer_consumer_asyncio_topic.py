@@ -77,7 +77,7 @@ class Worker():
             )
 
             self.consumer.capacity = 100; # Enable consumer prefetch
-            self.consumer.set_message_listener(self.handler)
+            await self.consumer.set_message_listener(self.handler)
 
             self.producer = await session.producer("test_topic")
 

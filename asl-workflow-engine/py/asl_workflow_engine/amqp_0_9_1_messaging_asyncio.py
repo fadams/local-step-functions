@@ -50,19 +50,47 @@ def make_future(func, *args, **kwargs):
     https://docs.python.org/3.6/library/asyncio-eventloop.html#asyncio.AbstractEventLoop.create_future
 
     The functions we are wrapping have different keywords used for callback args,
-    e.g. on_open_callback, callback, etc. We allow make_future to pass in the
+    e.g. on_open_callback, callback, etc. make_future can optionally pass in the
     keyword to use, e.g. callback_kw="on_open_callback", defaults to "callback".
     The code below retrieves the callback_kw, removes it from the kwargs then
     adds the actual callback_kw, associating it with our callback lambda function.
+
+    As an added complication, for the methods bound to pika.channel.Channel like
+    exchange_declare, queue_declare, etc. whilst success callbacks are bound to
+    the method, errors actually cause closure of the channel. We check this case
+    and add_on_close_callback to the channel passing a set_exception lambda.
+    For this case we need the success callback to remove the _on_channel_close
+    callback, as clients subsequently closing the channel legitimately would
+    trigger the exception on a Future that is now "done". In other words we
+    need to remove the channel _on_channel_close callback if we successfully
+    await methods bound to Channel.
     """
+    future = asyncio.get_event_loop().create_future()
+
+    """
+    Wrap the actual set_result callback in a closure with channel in its scope.
+    https://stackoverflow.com/questions/12423614/local-variables-in-nested-functions
+    """
+    def set_result_wrapper(channel):
+        def set_result(value):
+            channel.callbacks.remove_all(
+                channel.channel_number, "_on_channel_close"
+            )
+            future.set_result(value)
+        return set_result
+
     if "callback_kw" in kwargs:
         callback_kw = kwargs["callback_kw"]
         del kwargs["callback_kw"]
     else:
         callback_kw = "callback"
 
-    future = asyncio.get_event_loop().create_future()
-    kwargs[callback_kw] = lambda value: future.set_result(value)
+    channel = func.__self__ if hasattr(func, "__self__") else None
+    if channel and isinstance(channel, pika.channel.Channel):
+        channel.add_on_close_callback(lambda x, err : future.set_exception(err))
+        kwargs[callback_kw] = set_result_wrapper(channel)
+    else:
+        kwargs[callback_kw] = lambda value : future.set_result(value)
 
     result = func(*args, **kwargs)
     if hasattr(result, "add_on_open_error_callback"):
@@ -545,38 +573,10 @@ class Producer(Destination):
                     self.session.connection.connection.channel,
                     callback_kw="on_open_callback"
                 )
-
-                """
-                The following, slightly fiddly, code block equates to
-                temp_channel.exchange_declare(self.name, passive=True)
-                It's fiddly because with passive set, the server will reply with
-                Declare-Ok if the exchange already exists with the same name,
-                and raise an error if not and if the exchange does not already
-                exist, the server MUST raise a channel exception with reply code
-                404 (not found). The exception raised is a *channel* exception,
-                so we explicitly expose the exchange_declare Future and add an
-                on_close callback to our temp_channel that triggers the future's
-                exception if the channel gets closed. By doing this the rest of
-                the code can behave in the same way as the blocking API code.
-                Note that after awaiting the exchange_declare Future it is
-                important to remove the _on_channel_close callback, as that
-                triggers the exception on a Future that is now "done". If we
-                fail to remove this callback, when we call temp_channel.close()
-                it will be triggered again and cause "strange" behaviour due
-                to causing an InvalidStateError on the (done) Future.
-                """
-                future = make_future(
+                await make_future(
                     temp_channel.exchange_declare,
                     self.name, passive=True
                 )
-                temp_channel.add_on_close_callback(
-                    lambda x, err : future.set_exception(err)
-                )
-                await future
-                temp_channel.callbacks.remove_all(
-                    temp_channel.channel_number, "_on_channel_close"
-                )
-
                 temp_channel.close()
             except pika.exceptions.ChannelClosedByBroker as e:
                 # If 404 NOT_FOUND the specified exchange doesn't exist.
@@ -851,38 +851,10 @@ class Consumer(Destination):
                     self.session.connection.connection.channel,
                     callback_kw="on_open_callback"
                 )
-
-                """
-                The following, slightly fiddly, code block equates to
-                temp_channel.exchange_declare(self.name, passive=True)
-                It's fiddly because with passive set, the server will reply with
-                Declare-Ok if the exchange already exists with the same name,
-                and raise an error if not and if the exchange does not already
-                exist, the server MUST raise a channel exception with reply code
-                404 (not found). The exception raised is a *channel* exception,
-                so we explicitly expose the exchange_declare Future and add an
-                on_close callback to our temp_channel that triggers the future's
-                exception if the channel gets closed. By doing this the rest of
-                the code can behave in the same way as the blocking API code.
-                Note that after awaiting the exchange_declare Future it is
-                important to remove the _on_channel_close callback, as that
-                triggers the exception on a Future that is now "done". If we
-                fail to remove this callback, when we call temp_channel.close()
-                it will be triggered again and cause "strange" behaviour due
-                to causing an InvalidStateError on the (done) Future.
-                """
-                future = make_future(
+                await make_future(
                     temp_channel.exchange_declare,
                     self.name, passive=True
                 )
-                temp_channel.add_on_close_callback(
-                    lambda x, err : future.set_exception(err)
-                )
-                await future
-                temp_channel.callbacks.remove_all(
-                    temp_channel.channel_number, "_on_channel_close"
-                )
-
                 temp_channel.close()
                 exchange = self.name
             except pika.exceptions.ChannelClosedByBroker as e:
@@ -954,7 +926,7 @@ class Consumer(Destination):
                 arguments=binding.get("arguments"),
             )
 
-    def set_message_listener(self, message_listener):
+    async def set_message_listener(self, message_listener):
         """
         For RabbitMQ AMQP Channel documentation see:
         https://pika.readthedocs.io/en/stable/modules/channel.html
@@ -969,13 +941,17 @@ class Consumer(Destination):
         ex = self.link_subscribe.get("exclusive", False)
         args = self.link_subscribe.get("arguments", None)
         self._message_listener = message_listener
-        self.session.channel.basic_consume(
-            on_message_callback=self.message_listener,
-            queue=self.name,
-            auto_ack=self.session.auto_ack,
-            exclusive=ex,
-            arguments=args
-        )
+        try:
+            await make_future(
+                self.session.channel.basic_consume,
+                on_message_callback=self.message_listener,
+                queue=self.name,
+                auto_ack=self.session.auto_ack,
+                exclusive=ex,
+                arguments=args
+            )
+        except pika.exceptions.ChannelClosedByBroker as e:
+            raise ConsumerError(e.reply_text)
 
     def message_listener(self, channel, method, properties, body):
         """
