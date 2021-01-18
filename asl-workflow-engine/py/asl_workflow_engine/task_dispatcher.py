@@ -380,7 +380,7 @@ class TaskDispatcher(object):
                     callback, timeout_id, task_span = request
                     error = {
                         "errorType": "States.Timeout",
-                        "errorMessage": "State or Execution ran for longer " \
+                        "errorMessage": "State or Execution ran for longer " +
                             "than the specified TimeoutSeconds value",
                     }
                     with opentracing.tracer.scope_manager.activate(
