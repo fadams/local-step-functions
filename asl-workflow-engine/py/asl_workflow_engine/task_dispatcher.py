@@ -419,7 +419,7 @@ class TaskDispatcher(object):
                     subject=resource,
                     reply_to=self.reply_to.name,
                     correlation_id=correlation_id,
-                    expiration=timeout, # Give the RPC Message a TTL equivalent to the ASL
+                    #expiration=timeout, # Give the RPC Message a TTL equivalent to the ASL
                                         # Task State (or Execution) timeout period. Both are ms.
                 )
 
