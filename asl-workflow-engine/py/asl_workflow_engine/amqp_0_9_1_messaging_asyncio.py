@@ -755,7 +755,7 @@ class Producer(Destination):
                 priority=message.priority,
                 correlation_id=message.correlation_id,
                 reply_to=message.reply_to,
-                expiration=message.expiration,#str(message.expiration) if message.expiration is not None else None,
+                expiration=str(int(float(message.expiration))) if message.expiration is not None else None,
                 message_id=message.message_id,
                 timestamp=message.timestamp,
                 type=message.type,

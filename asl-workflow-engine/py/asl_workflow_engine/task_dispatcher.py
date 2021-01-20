@@ -276,6 +276,8 @@ class TaskDispatcher(object):
 
         If the supplied resource starts with $ the resource will be treated as
         an environment variable and the real ARN will be looked up from there.
+        
+        Timeout is in ms as a floating point number.
         """
 
         def error_callback(carrier, error, callback):
@@ -419,8 +421,9 @@ class TaskDispatcher(object):
                     subject=resource,
                     reply_to=self.reply_to.name,
                     correlation_id=correlation_id,
-                    #expiration=timeout, # Give the RPC Message a TTL equivalent to the ASL
-                                        # Task State (or Execution) timeout period. Both are ms.
+                            # Give the RPC Message a TTL equivalent to the ASL
+                            # Task State (or Execution) timeout period. Both are ms.
+                    expiration=timeout,
                 )
 
                 timeout_id = self.state_engine.event_dispatcher.set_timeout(
