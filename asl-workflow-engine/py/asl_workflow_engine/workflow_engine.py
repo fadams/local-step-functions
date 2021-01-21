@@ -147,7 +147,7 @@ class WorkflowEngine(object):
             loop = asyncio.get_event_loop()
             loop.set_exception_handler(global_exception_handler)
             loop.create_task(self.event_dispatcher.start_asyncio())
-            app.run(host="0.0.0.0", port=4584)
+            app.run(host="0.0.0.0", port=4584, loop=loop)
         else:
             self.rest_api = asl_workflow_engine.rest_api.RestAPI(
                 self.state_engine, self.event_dispatcher, self.config
