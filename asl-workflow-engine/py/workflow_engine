@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# Run with:
+# ./workflow_engine
+# LOG_LEVEL=DEBUG ./workflow_engine
+#
+# Run with cProfile enabled:
+# PYTHONPATH=.. python3 -m cProfile -s tottime ./workflow_engine > prof-tottime.txt
+#
+"""
+This is the main executable to run the ASL Workflow Engine.
+
+NOTE Due to the addition of asyncio support Python >= 3.6 is now required.
+"""
+
+import sys, os
+assert sys.version_info >= (3, 6)  # Bomb out if not running Python3.6
+
+from asl_workflow_engine.logger import init_logging
+from asl_workflow_engine.workflow_engine import WorkflowEngine
+
+"""
+Looks for the file config.json first checking if it has been passed as
+an argument, then ./config.json then searching the module paths looking
+for asl_workflow_engine1/config.json
+"""
+if __name__ == "__main__":
+    # Initialise logger
+    logger = init_logging(log_name="asl_workflow_engine")
+
+    config_paths = [i + "/asl_workflow_engine/config.json" for i in sys.path]
+    config_paths = sys.argv[1:] + ["./config.json"] + config_paths
+
+    config_path = ""
+    for path in config_paths:
+        if os.path.exists(path):
+            config_path = path
+            break
+
+    if config_path:
+        print(config_path)
+        WorkflowEngine(config_path).start()
+    else:
+        logger.error(
+            "Unable to find config.json on the search path:\n{}".format(config_paths)
+        )
+

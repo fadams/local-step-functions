@@ -5,7 +5,7 @@
 # the environment variables.
 ################################################################################
 
-touch ASL_store.json
+mkdir -p asl_store
 docker run --rm -it \
     -u $(id -u):$(id -g) \
     -p 4584:4584 \
@@ -13,6 +13,6 @@ docker run --rm -it \
     -e EVENT_QUEUE_CONNECTION_URL="amqp://$(hostname -I | awk '{print $1}'):5672?connection_attempts=20&retry_delay=10&heartbeat=0" \
     -e EVENT_QUEUE_QUEUE_TYPE="AMQP-0.9.1-asyncio" \
     -e JAEGER_AGENT_HOST=$(hostname -I | awk '{print $1}') \
-    -v $PWD/ASL_store.json:/usr/src/ASL_store.json \
+    -v $PWD/asl_store:/tmp \
     asl-workflow-engine
 

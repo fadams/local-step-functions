@@ -1,32 +1,26 @@
 FROM python:3.6-alpine
 
-COPY py/asl_workflow_engine /usr/src/asl_workflow_engine/
-COPY py/setup.py /usr/src/
+COPY py /usr/local/lib/asl_workflow_engine
 
-WORKDIR /usr/src
+# copy all python tests to a test directory ready to be executed.
+COPY py/test/test* /tmp/test/
 
 # update-ca-certificates generates a somewhat confusing/worrying warning:
 # WARNING: ca-certificates.crt does not contain exactly one certificate or CRL: skipping
 # This is however apparently "normal" (though other Linux distros don't do this)
 # https://github.com/gliderlabs/docker-alpine/issues/30
 RUN apk update && apk upgrade && \
-    apk add ca-certificates && update-ca-certificates && \
-    apk add --no-cache --update \
-    gcc \
-    g++ \
-    musl-dev \
-    python3-dev \
-    libffi-dev \
-    openssl-dev && \
-    mv asl_workflow_engine/config.json . && pip install -e .
+    apk add ca-certificates gcc g++ \
+    musl-dev python3-dev libffi-dev openssl-dev && \
+    update-ca-certificates && \
+    pip install -e /usr/local/lib/asl_workflow_engine && \
+    pip install pytest && \
+    mkdir -p /tmp/results/
 
-RUN pip install pytest
+ENTRYPOINT python -m pytest --junitxml /tmp/results/test_results.xml /tmp/test/
 
-RUN mkdir /results/
+#-------------------------------------------------------------------------------
+# Build the image (note using .. not . here to reference the Docker context)
+# docker build -t asl-workflow-engine-test -f ./Dockerfile.test ..
 
-# copy all python tests to a test directory ready to be executed.
-COPY py/test/test* test/
-
-ENTRYPOINT python -m pytest --junitxml /results/test_results.xml test/
-
-
+# docker run --rm -it asl-workflow-engine-test

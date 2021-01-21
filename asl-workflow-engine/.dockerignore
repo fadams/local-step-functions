@@ -1,0 +1,17 @@
+
+# First exclude everything
+**
+*.*
+
+# Then explicitly whitelist
+#!py/setup.py
+#!py/workflow_engine
+#!py/asl_workflow_engine/**
+
+!py/**
+
+# Ignore unnecessary files inside allowed directories
+# This should go after the allowed directories
+py/.gitignore
+py/asl_workflow_engine/__pycache__
+py/asl_workflow_engine/ASL_store.json
