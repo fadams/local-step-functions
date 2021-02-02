@@ -138,7 +138,7 @@ class EventDispatcher(object):
             instance_queue = self.instance_queue_name + '; {"node": {"durable": true}, "link": {"x-subscribe": {"exclusive": true}}}'
 
             instance_event_consumer = session.consumer(instance_queue)
-            instance_event_consumer.capacity = 100  # Enable consumer prefetch
+            instance_event_consumer.capacity = 1000  # Enable consumer prefetch
             instance_event_consumer.set_message_listener(self.dispatch)
 
             """
@@ -236,7 +236,7 @@ class EventDispatcher(object):
             instance_queue = self.instance_queue_name + '; {"node": {"durable": true}, "link": {"x-subscribe": {"exclusive": true}}}'
 
             instance_event_consumer = await session.consumer(instance_queue)
-            instance_event_consumer.capacity = 100  # Enable consumer prefetch
+            instance_event_consumer.capacity = 1000  # Enable consumer prefetch
             await instance_event_consumer.set_message_listener(self.dispatch)
 
             """
