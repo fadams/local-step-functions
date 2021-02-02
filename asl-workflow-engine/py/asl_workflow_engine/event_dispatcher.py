@@ -117,7 +117,7 @@ class EventDispatcher(object):
             self.queue_name = self.queue_config.get("queue_name", "asl_workflow_events")
             shared_queue = self.queue_name + '; {"node": {"durable": true}}'
             shared_event_consumer = session.consumer(shared_queue)
-            shared_event_consumer.capacity = 100  # Enable consumer prefetch
+            shared_event_consumer.capacity = 1000  # Enable consumer prefetch
             shared_event_consumer.set_message_listener(self.dispatch)
 
             """
@@ -215,7 +215,7 @@ class EventDispatcher(object):
             self.queue_name = self.queue_config.get("queue_name", "asl_workflow_events")
             shared_queue = self.queue_name + '; {"node": {"durable": true}}'
             shared_event_consumer = await session.consumer(shared_queue)
-            shared_event_consumer.capacity = 100  # Enable consumer prefetch
+            shared_event_consumer.capacity = 1000  # Enable consumer prefetch
             await shared_event_consumer.set_message_listener(self.dispatch)
 
             """
