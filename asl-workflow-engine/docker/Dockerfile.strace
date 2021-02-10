@@ -1,0 +1,22 @@
+FROM asl-workflow-engine
+
+# Switch to root user needed for adding packages
+USER root
+
+RUN apk update && apk upgrade && \
+    apk add strace
+
+# Switch back to unprivileged asluser
+USER asluser
+
+ENTRYPOINT ["strace", "-f", "-o", "/tmp/asl-strace.log", "/usr/local/bin/workflow_engine"]
+
+#-------------------------------------------------------------------------------
+# Extend the original asl-workflow-engine image to add strace package
+# and modify the ENTRYPOINT to launch via strace so we can capture the
+# syscall trace to use for generating a custom seccomp profile.
+#
+# Build the image (note using .. not . here to reference the Docker context)
+# docker build -t asl-workflow-engine-strace -f ./Dockerfile.strace ..
+
+
