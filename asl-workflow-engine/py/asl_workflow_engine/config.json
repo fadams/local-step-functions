@@ -3,7 +3,7 @@
         "comment": "instance_id should be unique for each instance of the workflow engine in a cluster. It will be used to create a unique per-instance event queue.",
         "queue_name": "asl_workflow_events",
         "instance_id": "9256f7e8-55ec-47ea-885e-8ee1f922efa8",
-        "queue_type": "AMQP-0.9.1",
+        "queue_type": "AMQP-0.9.1-asyncio",
         "connection_url": "amqp://localhost:5672?connection_attempts=20&retry_delay=10&heartbeat=0",
         "connection_options": ""
     },
