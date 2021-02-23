@@ -117,7 +117,10 @@ class EventDispatcher(object):
             self.queue_name = self.queue_config.get("queue_name", "asl_workflow_events")
             shared_queue = self.queue_name + '; {"node": {"durable": true}}'
             shared_event_consumer = session.consumer(shared_queue)
-            shared_event_consumer.capacity = 1000  # Enable consumer prefetch
+            capacity = self.queue_config.get("shared_event_consumer_capacity", 1000)
+            capacity = int(float(capacity))  # Handles numbers or strings
+            self.logger.info("Setting shared_event_consumer.capacity to {}".format(capacity))
+            shared_event_consumer.capacity = capacity  # Enable consumer prefetch
             shared_event_consumer.set_message_listener(self.dispatch)
 
             """
@@ -136,9 +139,11 @@ class EventDispatcher(object):
             instance_id = self.queue_config.get("instance_id", "")
             self.instance_queue_name = self.queue_name + "-" + instance_id
             instance_queue = self.instance_queue_name + '; {"node": {"durable": true}, "link": {"x-subscribe": {"exclusive": true}}}'
-
             instance_event_consumer = session.consumer(instance_queue)
-            instance_event_consumer.capacity = 1000  # Enable consumer prefetch
+            capacity = self.queue_config.get("instance_event_consumer_capacity", 1000)
+            capacity = int(float(capacity))  # Handles numbers or strings
+            self.logger.info("Setting instance_event_consumer.capacity to {}".format(capacity))
+            instance_event_consumer.capacity = capacity  # Enable consumer prefetch
             instance_event_consumer.set_message_listener(self.dispatch)
 
             """
@@ -215,7 +220,10 @@ class EventDispatcher(object):
             self.queue_name = self.queue_config.get("queue_name", "asl_workflow_events")
             shared_queue = self.queue_name + '; {"node": {"durable": true}}'
             shared_event_consumer = await session.consumer(shared_queue)
-            shared_event_consumer.capacity = 1000  # Enable consumer prefetch
+            capacity = self.queue_config.get("shared_event_consumer_capacity", 1000)
+            capacity = int(float(capacity))  # Handles numbers or strings
+            self.logger.info("Setting shared_event_consumer.capacity to {}".format(capacity))
+            shared_event_consumer.capacity = capacity  # Enable consumer prefetch
             await shared_event_consumer.set_message_listener(self.dispatch)
 
             """
@@ -234,9 +242,11 @@ class EventDispatcher(object):
             instance_id = self.queue_config.get("instance_id", "")
             self.instance_queue_name = self.queue_name + "-" + instance_id
             instance_queue = self.instance_queue_name + '; {"node": {"durable": true}, "link": {"x-subscribe": {"exclusive": true}}}'
-
             instance_event_consumer = await session.consumer(instance_queue)
-            instance_event_consumer.capacity = 1000  # Enable consumer prefetch
+            capacity = self.queue_config.get("instance_event_consumer_capacity", 1000)
+            capacity = int(float(capacity))  # Handles numbers or strings
+            self.logger.info("Setting instance_event_consumer.capacity to {}".format(capacity))
+            instance_event_consumer.capacity = capacity  # Enable consumer prefetch
             await instance_event_consumer.set_message_listener(self.dispatch)
 
             """

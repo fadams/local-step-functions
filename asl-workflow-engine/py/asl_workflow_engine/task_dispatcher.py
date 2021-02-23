@@ -52,9 +52,9 @@ class TaskDispatcher(object):
         Get the messaging peer.address, e.g. the Broker address for use
         by OpenTracing later.
         """
-        
-        peer_address_string = config.get("event_queue", {}).get("connection_url",
-                                                         "amqp://localhost:5672")
+        queue_config = config.get("event_queue", {})
+        peer_address_string = queue_config.get("connection_url",
+                                               "amqp://localhost:5672")
         try:
             parsed_peer_address = urllib.parse.urlparse(peer_address_string)
         except Exception as e:
@@ -69,6 +69,10 @@ class TaskDispatcher(object):
             self.peer_address = self.peer_address + ":" + str(parsed_peer_address.port)
         if parsed_peer_address.scheme:
             self.peer_address = parsed_peer_address.scheme + "://" + self.peer_address
+
+        # Get the channel capacity/prefetch value for the reply_to consumer
+        capacity = queue_config.get("reply_to_consumer_capacity", 100)
+        self.reply_to_capacity = int(float(capacity))  # Handles numbers or strings
 
         self.state_engine = state_engine
 
@@ -107,7 +111,8 @@ class TaskDispatcher(object):
         )
 
         # Enable consumer prefetch
-        self.reply_to.capacity = 100
+        self.logger.info("Setting reply_to.capacity to {}".format(self.reply_to_capacity))
+        self.reply_to.capacity = self.reply_to_capacity
         self.reply_to.set_message_listener(self.handle_rpcmessage_response)
         self.producer = session.producer()
 
@@ -136,7 +141,8 @@ class TaskDispatcher(object):
         )
 
         # Enable consumer prefetch
-        self.reply_to.capacity = 100
+        self.logger.info("Setting reply_to.capacity to {}".format(self.reply_to_capacity))
+        self.reply_to.capacity = self.reply_to_capacity
         await self.reply_to.set_message_listener(self.handle_rpcmessage_response)
         self.producer = await session.producer()
 

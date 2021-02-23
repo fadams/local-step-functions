@@ -103,6 +103,18 @@ class WorkflowEngine(object):
         eq["connection_options"] = os.environ.get(
             "EVENT_QUEUE_CONNECTION_OPTIONS", eq.get("connection_options")
         )
+        eq["shared_event_consumer_capacity"] = os.environ.get(
+            "EVENT_QUEUE_SHARED_EVENT_CONSUMER_CAPACITY", 
+            eq.get("shared_event_consumer_capacity")
+        )
+        eq["instance_event_consumer_capacity"] = os.environ.get(
+            "EVENT_QUEUE_INSTANCE_EVENT_CONSUMER_CAPACITY", 
+            eq.get("instance_event_consumer_capacity")
+        )
+        eq["reply_to_consumer_capacity"] = os.environ.get(
+            "EVENT_QUEUE_REPLY_TO_CONSUMER_CAPACITY",
+            eq.get("reply_to_consumer_capacity")
+        )
 
         no = config["notifier"]
         no["topic"] = os.environ.get(
@@ -147,7 +159,7 @@ class WorkflowEngine(object):
             loop = asyncio.get_event_loop()
             loop.set_exception_handler(global_exception_handler)
             loop.create_task(self.event_dispatcher.start_asyncio())
-            app.run(host="0.0.0.0", port=4584, loop=loop)
+            app.run(host=self.rest_api.host, port=self.rest_api.port, loop=loop)
         else:
             self.rest_api = asl_workflow_engine.rest_api.RestAPI(
                 self.state_engine, self.event_dispatcher, self.config

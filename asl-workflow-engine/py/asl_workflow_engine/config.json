@@ -5,7 +5,10 @@
         "instance_id": "9256f7e8-55ec-47ea-885e-8ee1f922efa8",
         "queue_type": "AMQP-0.9.1-asyncio",
         "connection_url": "amqp://localhost:5672?connection_attempts=20&retry_delay=10&heartbeat=0",
-        "connection_options": ""
+        "connection_options": "",
+        "shared_event_consumer_capacity": 1000,
+        "instance_event_consumer_capacity": 1000,
+        "reply_to_consumer_capacity": 100
     },
     "notifier": {
         "comment": "The topic the workflow engine will publish notifications to. These are rather like AWS CloudWatch events. This currently maps to an AMQP topic exchange and if it is not the default amq.topic then an address string describing the node should be used with full x-declare syntax so that the exchange is declared before it is used.",
