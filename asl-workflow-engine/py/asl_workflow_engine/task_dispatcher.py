@@ -222,10 +222,15 @@ class TaskDispatcher(object):
         message.acknowledge(multiple=False)
 
     def execute_task(self, resource_arn, parameters, callback, timeout, context):
-        # TODO this import should be handled by the "Connection Factory for the
-        # event queue" code in the constructor, but not sure yet how to do
-        # this cleanly.
-        from asl_workflow_engine.amqp_0_9_1_messaging import Message
+        """
+        In the EventDispatcher constructor we have a "Connection Factory" for
+        the event queue that lets the messaging implementation used be set
+        via the configuration e.g. AMQP-0.9.1-asyncio. Part of that is to set
+        the Message implementation class on event_dispatcher globals(), so
+        we can do the import of the Message class from event_dispatcher.
+        """
+        from asl_workflow_engine.event_dispatcher import Message
+        #from asl_workflow_engine.amqp_0_9_1_messaging import Message
         """
         Use the value of the “Resource” field to determine the type of the task
         to execute. For real AWS Step Functions the service integrations are

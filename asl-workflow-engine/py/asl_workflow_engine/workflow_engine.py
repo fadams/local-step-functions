@@ -57,20 +57,20 @@ class WorkflowEngine(object):
         :raises AssertionError: If configuration file does not contain the required fields
         """
         # Initialise logger
-        logger = init_logging(log_name="asl_workflow_engine")
+        self.logger = init_logging(log_name="asl_workflow_engine")
 
         # Load the configuration file.
         try:
             with open(configuration_file, "r") as fp:
                 config = json.load(fp)
-            logger.info("Creating WorkflowEngine")
+            self.logger.info("Creating WorkflowEngine")
         except IOError as e:
-            logger.error(
+            self.logger.error(
                 "Unable to read configuration file: {}".format(configuration_file)
             )
             raise
         except ValueError as e:
-            logger.error("Configuration file does not contain valid JSON")
+            self.logger.error("Configuration file does not contain valid JSON")
             raise
 
         # Provide defaults for any unset config key
@@ -150,7 +150,11 @@ class WorkflowEngine(object):
                 Just swallow "exception was never retrieved" as we handle the
                 main exceptions that we care about in EventDispatcher.start_asyncio()
                 """
-                pass
+                # context["message"] will always be there; but context["exception"] may not
+                self.logger.error(context.get("message"))
+                exception = context.get("exception")
+                if exception:
+                    self.logger.error(repr(exception))
 
             self.rest_api = asl_workflow_engine.rest_api_asyncio.RestAPI(
                 self.state_engine, self.event_dispatcher, self.config
