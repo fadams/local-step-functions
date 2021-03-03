@@ -45,6 +45,18 @@ class EventDispatcher(object):
         self.notifier_config = config["notifier"]  # TODO Handle missing config
         # TODO validate that config contains the keys we need.
 
+        self.queue_name = self.queue_config.get("queue_name", "asl_workflow_events")
+
+        instance_id = self.queue_config.get("instance_id", "")
+        self.instance_queue_name = self.queue_name + "-" + instance_id
+
+        # Get consumer capacities from config as numbers or numeric strings
+        capacity = self.queue_config.get("shared_event_consumer_capacity", 1000)
+        self.shared_event_consumer_capacity = int(float(capacity))
+
+        capacity = self.queue_config.get("instance_event_consumer_capacity", 1000)
+        self.instance_event_consumer_capacity = int(float(capacity))
+
         """
         Create an association with the state engine and give that a reference
         back to this event dispatcher so that it can publish events and make
@@ -62,7 +74,13 @@ class EventDispatcher(object):
         is a simple one-up number used as a key.
         """
         self.unacknowledged_messages = {}
+        self.shared_event_consumer_unack_count = 0
+        self.instance_event_consumer_unack_count = 0
         self.message_count = 0
+
+        """
+        """
+        self.heartbeat_count = 0
 
         """
         Connection Factory for the event queue. The idea is to eventually
@@ -96,6 +114,15 @@ class EventDispatcher(object):
     def heartbeat(self):
         print("**** EventDispatcher heartbeat ****")
         #self.state_engine.heartbeat()
+        """
+        self.heartbeat_count += 1
+        if self.heartbeat_count % 60 == 0:
+            print("self.instance_event_consumer_unack_count")
+            print(self.instance_event_consumer_unack_count)
+
+            print("len(self.unacknowledged_messages)")
+            print(len(self.unacknowledged_messages))
+        """
         self.set_timeout(self.heartbeat, 1000)
     
 
@@ -104,9 +131,29 @@ class EventDispatcher(object):
         # TODO This code will connect on broker startup, but need to add code to
         # reconnect for cases where the broker fails and then restarts.
         connection = Connection(self.queue_config["connection_url"])
+        """
+        TODO Passing connection.set_timeout here is kind of ugly but I can't
+        think of a nicer way yet. The issue is that we want the state engine
+        to be able to support timeouts, however that is being called from
+        Pika's event loop, which isn't thread-safe and we want asynchronous
+        timeouts not blocking timeouts as when in an ASL Wait state we still
+        want to be able to process other events that might be available on
+        the event queue. This (hopefully temporary) approach is Pika specific.
+        """
+        self.set_timeout = connection.set_timeout
+        self.clear_timeout = connection.clear_timeout
+
         try:
             connection.open()
             session = connection.session()
+
+            """
+            Share messaging session with state_engine.task_dispatcher. This
+            is to allow rpcmessage invocations that share the same message
+            fabric instance as the event queue to reuse connections etc.
+            """
+            self.state_engine.task_dispatcher.start(session)
+
             """
             The asl_workflow_events queue is a shared event queue, that is to
             say every asl_workflow_engine instance receives events from this
@@ -114,13 +161,13 @@ class EventDispatcher(object):
             exclusive so multiple asl_workflow_engine instances can consume from
             it and will thus load-balance executions across multiple instances.
             """
-            self.queue_name = self.queue_config.get("queue_name", "asl_workflow_events")
             shared_queue = self.queue_name + '; {"node": {"durable": true}}'
             shared_event_consumer = session.consumer(shared_queue)
-            capacity = self.queue_config.get("shared_event_consumer_capacity", 1000)
-            capacity = int(float(capacity))  # Handles numbers or strings
-            self.logger.info("Setting shared_event_consumer.capacity to {}".format(capacity))
-            shared_event_consumer.capacity = capacity  # Enable consumer prefetch
+            # Enable consumer prefetch
+            self.logger.info("Setting shared_event_consumer.capacity to {}".format(
+                self.shared_event_consumer_capacity)
+            )
+            shared_event_consumer.capacity = self.shared_event_consumer_capacity
             shared_event_consumer.set_message_listener(self.dispatch)
 
             """
@@ -136,14 +183,13 @@ class EventDispatcher(object):
             per instance queue is because with the Parallel and Map states we
             would like each branch to notify the same instance when complete.
             """
-            instance_id = self.queue_config.get("instance_id", "")
-            self.instance_queue_name = self.queue_name + "-" + instance_id
             instance_queue = self.instance_queue_name + '; {"node": {"durable": true}, "link": {"x-subscribe": {"exclusive": true}}}'
             instance_event_consumer = session.consumer(instance_queue)
-            capacity = self.queue_config.get("instance_event_consumer_capacity", 1000)
-            capacity = int(float(capacity))  # Handles numbers or strings
-            self.logger.info("Setting instance_event_consumer.capacity to {}".format(capacity))
-            instance_event_consumer.capacity = capacity  # Enable consumer prefetch
+            # Enable consumer prefetch
+            self.logger.info("Setting instance_event_consumer.capacity to {}".format(
+                self.instance_event_consumer_capacity)
+            )
+            instance_event_consumer.capacity = self.instance_event_consumer_capacity
             instance_event_consumer.set_message_listener(self.dispatch)
 
             """
@@ -164,18 +210,6 @@ class EventDispatcher(object):
             self.topic_producer = session.producer(self.notifier_config["topic"])
 
             """
-            TODO Passing connection.set_timeout here is kind of ugly but I can't
-            think of a nicer way yet. The issue is that we want the state engine
-            to be able to support timeouts, however that is being called from
-            Pika's event loop, which isn't thread-safe and we want asynchronous
-            timeouts not blocking timeouts as when in an ASL Wait state we still
-            want to be able to process other events that might be available on
-            the event queue. This (hopefully temporary) approach is Pika specific.
-            """
-            self.set_timeout = connection.set_timeout
-            self.clear_timeout = connection.clear_timeout
-
-            """
             Start a periodic "heartbeat". The idea of this is that sometimes
             "bad things happen", for example if a service goes down we might
             be sat stuck in a Task state. Now things *should* carry on when the
@@ -186,13 +220,6 @@ class EventDispatcher(object):
             for cases where no explicit timeout has been added to the State.
             """
             #self.set_timeout(self.heartbeat, 1000)
-
-            """
-            Share messaging session with state_engine.task_dispatcher. This
-            is to allow rpcmessage invocations that share the same message
-            fabric instance as the event queue to reuse connections etc.
-            """
-            self.state_engine.task_dispatcher.start(session)
 
             connection.start()  # Blocks until event loop exits.
         except MessagingError as e:
@@ -207,9 +234,29 @@ class EventDispatcher(object):
         # TODO This code will connect on broker startup, but need to add code to
         # reconnect for cases where the broker fails and then restarts.
         connection = Connection(self.queue_config["connection_url"])
+        """
+        TODO Passing connection.set_timeout here is kind of ugly but I can't
+        think of a nicer way yet. The issue is that we want the state engine
+        to be able to support timeouts, however that is being called from
+        Pika's event loop, which isn't thread-safe and we want asynchronous
+        timeouts not blocking timeouts as when in an ASL Wait state we still
+        want to be able to process other events that might be available on
+        the event queue. This (hopefully temporary) approach is Pika specific.
+        """
+        self.set_timeout = connection.set_timeout
+        self.clear_timeout = connection.clear_timeout
+
         try:
             await connection.open()
             session = await connection.session()
+
+            """
+            Share messaging session with state_engine.task_dispatcher. This
+            is to allow rpcmessage invocations that share the same message
+            fabric instance as the event queue to reuse connections etc.
+            """
+            await self.state_engine.task_dispatcher.start_asyncio(session)
+
             """
             The asl_workflow_events queue is a shared event queue, that is to
             say every asl_workflow_engine instance receives events from this
@@ -217,13 +264,13 @@ class EventDispatcher(object):
             exclusive so multiple asl_workflow_engine instances can consume from
             it and will thus load-balance executions across multiple instances.
             """
-            self.queue_name = self.queue_config.get("queue_name", "asl_workflow_events")
             shared_queue = self.queue_name + '; {"node": {"durable": true}}'
             shared_event_consumer = await session.consumer(shared_queue)
-            capacity = self.queue_config.get("shared_event_consumer_capacity", 1000)
-            capacity = int(float(capacity))  # Handles numbers or strings
-            self.logger.info("Setting shared_event_consumer.capacity to {}".format(capacity))
-            shared_event_consumer.capacity = capacity  # Enable consumer prefetch
+            # Enable consumer prefetch
+            self.logger.info("Setting shared_event_consumer.capacity to {}".format(
+                self.shared_event_consumer_capacity)
+            )
+            shared_event_consumer.capacity = self.shared_event_consumer_capacity
             await shared_event_consumer.set_message_listener(self.dispatch)
 
             """
@@ -239,14 +286,13 @@ class EventDispatcher(object):
             per instance queue is because with the Parallel and Map states we
             would like each branch to notify the same instance when complete.
             """
-            instance_id = self.queue_config.get("instance_id", "")
-            self.instance_queue_name = self.queue_name + "-" + instance_id
             instance_queue = self.instance_queue_name + '; {"node": {"durable": true}, "link": {"x-subscribe": {"exclusive": true}}}'
             instance_event_consumer = await session.consumer(instance_queue)
-            capacity = self.queue_config.get("instance_event_consumer_capacity", 1000)
-            capacity = int(float(capacity))  # Handles numbers or strings
-            self.logger.info("Setting instance_event_consumer.capacity to {}".format(capacity))
-            instance_event_consumer.capacity = capacity  # Enable consumer prefetch
+            # Enable consumer prefetch
+            self.logger.info("Setting instance_event_consumer.capacity to {}".format(
+                self.instance_event_consumer_capacity)
+            )
+            instance_event_consumer.capacity = self.instance_event_consumer_capacity
             await instance_event_consumer.set_message_listener(self.dispatch)
 
             """
@@ -267,18 +313,6 @@ class EventDispatcher(object):
             self.topic_producer = await session.producer(self.notifier_config["topic"])
 
             """
-            TODO Passing connection.set_timeout here is kind of ugly but I can't
-            think of a nicer way yet. The issue is that we want the state engine
-            to be able to support timeouts, however that is being called from
-            Pika's event loop, which isn't thread-safe and we want asynchronous
-            timeouts not blocking timeouts as when in an ASL Wait state we still
-            want to be able to process other events that might be available on
-            the event queue. This (hopefully temporary) approach is Pika specific.
-            """
-            self.set_timeout = connection.set_timeout
-            self.clear_timeout = connection.clear_timeout
-
-            """
             Start a periodic "heartbeat". The idea of this is that sometimes
             "bad things happen", for example if a service goes down we might
             be sat stuck in a Task state. Now things *should* carry on when the
@@ -289,13 +323,6 @@ class EventDispatcher(object):
             for cases where no explicit timeout has been added to the State.
             """
             #self.set_timeout(self.heartbeat, 1000)
-
-            """
-            Share messaging session with state_engine.task_dispatcher. This
-            is to allow rpcmessage invocations that share the same message
-            fabric instance as the event queue to reuse connections etc.
-            """
-            await self.state_engine.task_dispatcher.start_asyncio(session)
 
             await connection.start()  # Blocks until event loop exits.
         except MessagingError as e:
@@ -323,6 +350,16 @@ class EventDispatcher(object):
         try:
             item = json.loads(message.body.decode("utf8"))
             self.unacknowledged_messages[self.message_count] = message
+
+            if message.subject == self.queue_name:
+                self.shared_event_consumer_unack_count += 1
+                #print("self.shared_event_consumer_unack_count")
+                #print(self.shared_event_consumer_unack_count)
+            else:
+                self.instance_event_consumer_unack_count += 1
+                #print("self.instance_event_consumer_unack_count")
+                #print(self.instance_event_consumer_unack_count)
+
             self.state_engine.notify(item, self.message_count)
             self.message_count += 1
         except ValueError as e:
@@ -354,6 +391,15 @@ class EventDispatcher(object):
         message = self.unacknowledged_messages[id]
         message.acknowledge(multiple=False)
         del self.unacknowledged_messages[id]
+
+        if message.subject == self.queue_name:
+            self.shared_event_consumer_unack_count -= 1
+            #print("self.shared_event_consumer_unack_count")
+            #print(self.shared_event_consumer_unack_count)
+        else:
+            self.instance_event_consumer_unack_count -= 1
+            #print("self.instance_event_consumer_unack_count")
+            #print(self.instance_event_consumer_unack_count)
 
     def publish(self, item, threadsafe=False, start_execution=False):
         """
@@ -388,7 +434,11 @@ class EventDispatcher(object):
         operation, however it is the correct thing to do:
         https://www.ietf.org/rfc/rfc4627.txt.
         """
-        message = Message(json.dumps(item), content_type="application/json", properties=carrier_properties)
+        message = Message(
+            json.dumps(item),
+            content_type="application/json",
+            properties=carrier_properties
+        )
         message.subject = subject
         self.topic_producer.send(message)
 
