@@ -346,7 +346,7 @@ class StateEngine(object):
             "input": input_as_string,
             "name": execution["Name"],
             "output": None,
-            "startDate": time.time(),
+            "startDate": int(time.time() * 1000),
             "stateMachineArn": state_machine_id,
             "status": "RUNNING",
             "stopDate": None,
@@ -472,13 +472,13 @@ class StateEngine(object):
                 "input": json.dumps(execution["Input"]),
                 "name": name,
                 "output": None,
-                "startDate": start_date,
+                "startDate": int(start_date * 1000),
                 "stateMachineArn": state_machine_arn,
                 "status": "RUNNING",
                 "stopDate": None,
             }
 
-        execution_detail["stopDate"] = time.time()
+        execution_detail["stopDate"] = int(time.time() * 1000)  # ms Timestamp
 
         with opentracing.tracer.start_active_span(
             operation_name="StartExecution:ExecutionEnding",
@@ -576,7 +576,7 @@ class StateEngine(object):
                 "input": None,
                 "name": name,
                 "output": None,
-                "startDate": time.time(),
+                "startDate": int(time.time() * 1000),
                 "stateMachineArn": state_machine_arn,
                 "status": "RUNNING",
                 "stopDate": None,

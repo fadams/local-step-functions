@@ -21,7 +21,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="asl_workflow_engine",
-    version="1.10.5",
+    version="1.10.6",
     description="A workflow engine based on the Amazon States Language (ASL).",
     long_description="A workflow engine based on the Amazon States Language (ASL). It is intended to provide the features and API of AWS Step Functions in an engine that can be deployed to a range of different hosting environments.",
     packages=find_packages(),
