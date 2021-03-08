@@ -696,17 +696,7 @@ class RestAPI(object):
                         self.logger.error(message)
                         return aws_error("InternalError", message), 500
 
-                    """
-                    The DescribeExecution documentation has startDate and
-                    stopDate described as number and Type: Timestamp, but
-                    doesn't mention anything about Timestamp units.
-                    https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html
-                    However the EventBridge (CloudWatch Events) example here:
-                    https://docs.aws.amazon.com/step-functions/latest/dg/cw-events.html#cw-events-execution-succeeded
-                    illustrates them as millisecond Timestamps so go with that.
-                    """
-                    resp = {"executionArn": execution_arn,
-                            "startDate": int(time.time() * 1000)}
+                    resp = {"executionArn": execution_arn, "startDate": time.time()}
 
                     return jsonify(resp), 200
 

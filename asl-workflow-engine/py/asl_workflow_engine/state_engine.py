@@ -228,6 +228,28 @@ class StateEngine(object):
         if not isinstance(execution_detail , dict):  # May be (non JSON) RedisDict
             execution_detail = dict(execution_detail)
 
+        """
+        There is an inconsistency in AWS. The DescribeExecution documentation
+        has startDate and stopDate described as number and Type: Timestamp, but
+        doesn't mention anything about Timestamp units (seconds or millis),
+        however boto3 barfs on start_execution, list_execution and
+        describe_execution unless timestamp is in epoch seconds e.g. time.time()
+        https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html
+        However the EventBridge (CloudWatch Events) example here:
+        https://docs.aws.amazon.com/step-functions/latest/dg/cw-events.html#cw-events-execution-succeeded
+        illustrates startDate and stopDate as millisecond Timestamps and that
+        seems to be the case for real with CW Events too, so we need to
+        convert to millis here. Rather than clone the whole dict just for
+        those two fields we save their original values and copy them back after
+        we broadcast the message.
+        """
+        saved_startDate = execution_detail["startDate"]
+        saved_stopDate = execution_detail["stopDate"]
+
+        if saved_startDate:
+            execution_detail["startDate"] = int(saved_startDate * 1000)
+        if execution_detail["stopDate"]:
+            execution_detail["stopDate"] = int(saved_stopDate * 1000)
 
         """
         Start an OpenTracing trace for the notification.
@@ -258,6 +280,10 @@ class StateEngine(object):
 
             subject = execution_detail["stateMachineArn"] + "." + execution_detail["status"]
             self.event_dispatcher.broadcast(subject, cw_event, carrier_properties=carrier)
+
+        # Copy the original seconds since epoch timestamps back.
+        execution_detail["startDate"] = saved_startDate
+        execution_detail["stopDate"] = saved_stopDate
 
     def start_state_machine(self, state_machine_type, start_state, event):
         """
@@ -346,7 +372,7 @@ class StateEngine(object):
             "input": input_as_string,
             "name": execution["Name"],
             "output": None,
-            "startDate": int(time.time() * 1000),
+            "startDate": time.time(),
             "stateMachineArn": state_machine_id,
             "status": "RUNNING",
             "stopDate": None,
@@ -472,13 +498,13 @@ class StateEngine(object):
                 "input": json.dumps(execution["Input"]),
                 "name": name,
                 "output": None,
-                "startDate": int(start_date * 1000),
+                "startDate": start_date,
                 "stateMachineArn": state_machine_arn,
                 "status": "RUNNING",
                 "stopDate": None,
             }
 
-        execution_detail["stopDate"] = int(time.time() * 1000)  # ms Timestamp
+        execution_detail["stopDate"] = time.time()
 
         with opentracing.tracer.start_active_span(
             operation_name="StartExecution:ExecutionEnding",
@@ -576,7 +602,7 @@ class StateEngine(object):
                 "input": None,
                 "name": name,
                 "output": None,
-                "startDate": int(time.time() * 1000),
+                "startDate": time.time(),
                 "stateMachineArn": state_machine_arn,
                 "status": "RUNNING",
                 "stopDate": None,
