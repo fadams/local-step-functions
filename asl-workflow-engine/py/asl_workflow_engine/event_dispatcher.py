@@ -155,6 +155,23 @@ class EventDispatcher(object):
             self.state_engine.task_dispatcher.start(session)
 
             """
+            The event_queue_producer is used to publish events corresponding
+            to state transitions. This can publish to both the asl_workflow_events
+            queue that is shared by every asl_workflow_engine instance and also
+            the per-instance queues of each instance. The Message subject is
+            used to select which queue the Message should be published to.
+            """
+            self.event_queue_producer = session.producer(self.queue_name)
+
+            """
+            The topic_producer specifies the topic that notification events
+            should be published to. Notification events are analogous to AWS
+            CloudWatch events and the JSON format of the notification Messages
+            is the same as that used by CloudWatch.
+            """
+            self.topic_producer = session.producer(self.notifier_config["topic"])
+
+            """
             The asl_workflow_events queue is a shared event queue, that is to
             say every asl_workflow_engine instance receives events from this
             queue. This is used to publish StartExecution events to and is non-
@@ -191,23 +208,6 @@ class EventDispatcher(object):
             )
             instance_event_consumer.capacity = self.instance_event_consumer_capacity
             instance_event_consumer.set_message_listener(self.dispatch)
-
-            """
-            The event_queue_producer is used to publish events corresponding
-            to state transitions. This can publish to both the asl_workflow_events
-            queue that is shared by every asl_workflow_engine instance and also
-            the per-instance queues of each instance. The Message subject is
-            used to select which queue the Message should be published to.
-            """
-            self.event_queue_producer = session.producer(self.queue_name)
-
-            """
-            The topic_producer specifies the topic that notification events
-            should be published to. Notification events are analogous to AWS
-            CloudWatch events and the JSON format of the notification Messages
-            is the same as that used by CloudWatch.
-            """
-            self.topic_producer = session.producer(self.notifier_config["topic"])
 
             """
             Start a periodic "heartbeat". The idea of this is that sometimes
@@ -258,6 +258,23 @@ class EventDispatcher(object):
             await self.state_engine.task_dispatcher.start_asyncio(session)
 
             """
+            The event_queue_producer is used to publish events corresponding
+            to state transitions. This can publish to both the asl_workflow_events
+            queue that is shared by every asl_workflow_engine instance and also
+            the per-instance queues of each instance. The Message subject is
+            used to select which queue the Message should be published to.
+            """
+            self.event_queue_producer = await session.producer(self.queue_name)
+
+            """
+            The topic_producer specifies the topic that notification events
+            should be published to. Notification events are analogous to AWS
+            CloudWatch events and the JSON format of the notification Messages
+            is the same as that used by CloudWatch.
+            """
+            self.topic_producer = await session.producer(self.notifier_config["topic"])
+
+            """
             The asl_workflow_events queue is a shared event queue, that is to
             say every asl_workflow_engine instance receives events from this
             queue. This is used to publish StartExecution events to and is non-
@@ -294,23 +311,6 @@ class EventDispatcher(object):
             )
             instance_event_consumer.capacity = self.instance_event_consumer_capacity
             await instance_event_consumer.set_message_listener(self.dispatch)
-
-            """
-            The event_queue_producer is used to publish events corresponding
-            to state transitions. This can publish to both the asl_workflow_events
-            queue that is shared by every asl_workflow_engine instance and also
-            the per-instance queues of each instance. The Message subject is
-            used to select which queue the Message should be published to.
-            """
-            self.event_queue_producer = await session.producer(self.queue_name)
-
-            """
-            The topic_producer specifies the topic that notification events
-            should be published to. Notification events are analogous to AWS
-            CloudWatch events and the JSON format of the notification Messages
-            is the same as that used by CloudWatch.
-            """
-            self.topic_producer = await session.producer(self.notifier_config["topic"])
 
             """
             Start a periodic "heartbeat". The idea of this is that sometimes
