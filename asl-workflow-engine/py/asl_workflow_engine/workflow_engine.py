@@ -156,14 +156,45 @@ class WorkflowEngine(object):
                 if exception:
                     self.logger.error(repr(exception))
 
+            # Attempt to use uvloop libuv based event loop if available
+            # https://github.com/MagicStack/uvloop
+            try:
+                import uvloop
+                uvloop.install()
+                self.logger.info("Using uvloop asyncio event loop")
+            except:  # Fall back to standard library asyncio epoll event loop
+                self.logger.info("Using standard library asyncio event loop")
+
             self.rest_api = asl_workflow_engine.rest_api_asyncio.RestAPI(
                 self.state_engine, self.event_dispatcher, self.config
             )
             app = self.rest_api.create_app()
+
             loop = asyncio.get_event_loop()
             loop.set_exception_handler(global_exception_handler)
             loop.create_task(self.event_dispatcher.start_asyncio())
-            app.run(host=self.rest_api.host, port=self.rest_api.port, loop=loop)
+
+            """
+            Start moving towards having Quart run via an external ASGI server
+            so it's easier to compare the performance of different ones.
+            Doing that is a little bit fiddly as at requires some refactoring
+            to make the REST API the main application entry point rather than
+            the WorkflowEngine class. Another complication is ensuring the
+            EventDispatcher gets passed the correct event loop when refactoring.
+            For now just start via the API serve function as described here:
+            https://pgjones.gitlab.io/hypercorn/how_to_guides/api_usage.html
+            instead of using app.run()
+            """
+            #app.run(host=self.rest_api.host, port=self.rest_api.port, loop=loop)
+
+            from hypercorn.asyncio import serve
+            from hypercorn.config import Config
+            from hypercorn.run import run
+
+            config = Config()
+            config.bind = ["{}:{}".format(self.rest_api.host, self.rest_api.port)]
+
+            loop.run_until_complete(serve(app, config))
         else:
             self.rest_api = asl_workflow_engine.rest_api.RestAPI(
                 self.state_engine, self.event_dispatcher, self.config

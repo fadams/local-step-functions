@@ -22,7 +22,7 @@
 # LOG_LEVEL=DEBUG ./workflow_engine
 #
 # Run with cProfile enabled:
-# PYTHONPATH=.. python3 -m cProfile -s tottime ./workflow_engine > prof-tottime.txt
+# python3 -m cProfile -s tottime ./workflow_engine > prof-tottime.txt
 #
 """
 This is the main executable to run the ASL Workflow Engine.
@@ -55,7 +55,9 @@ if __name__ == "__main__":
             break
 
     if config_path:
-        print(config_path)
+        logger.debug(
+            "Path of config.json:\n{}".format(config_path)
+        )
         WorkflowEngine(config_path).start()
     else:
         logger.error(

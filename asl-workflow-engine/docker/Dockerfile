@@ -1,4 +1,4 @@
-FROM python:3.6-alpine
+FROM python:3.8-alpine
 
 COPY py/asl_workflow_engine /usr/local/lib/asl_workflow_engine/asl_workflow_engine
 COPY py/setup.py /usr/local/lib/asl_workflow_engine
