@@ -132,6 +132,18 @@ class WorkflowEngine(object):
         ra["port"] = int(os.environ.get("REST_API_PORT", ra.get("port")))
         ra["region"] = os.environ.get("REST_API_REGION", ra.get("region"))
 
+        tr = config["tracer"]
+        tr["implementation"] = os.environ.get("TRACER_IMPLEMENTATION", 
+                                              tr.get("implementation", "None"))
+
+        # The Jaeger specific env vars are derived from this document:
+        # https://www.jaegertracing.io/docs/1.22/client-features/
+        sampler = tr["config"]["sampler"]
+        sampler["type"] = os.environ.get("JAEGER_SAMPLER_TYPE",
+                                         sampler.get("type"))
+        sampler["param"] = os.environ.get("JAEGER_SAMPLER_PARAM",
+                                          sampler.get("param"))
+
         # Initialise opentracing.tracer before creating the StateEngine,
         # EventDispatcher and RestAPIinstances.
         create_tracer("asl_workflow_engine", config["tracer"])

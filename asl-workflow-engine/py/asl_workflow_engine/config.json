@@ -29,8 +29,8 @@
         "service_name": "asl_workflow_engine",
         "config": {
             "sampler": {
-                "type": "const",
-                "param": 1
+                "type": "probabilistic",
+                "param": 0.01
             },
             "logging": false
         }
