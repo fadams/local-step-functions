@@ -98,7 +98,7 @@ def patch_boto3():
     except Exception as e:
         create_tracer.logger.warning("Failed to add Tracer to boto3: {}".format(e))
 
-def create_tracer(service_name, config):
+def create_tracer(service_name, config, use_asyncio=False):
     create_tracer.logger = init_logging(service_name)
     create_tracer.logger.info("Creating OpenTracing Tracer")
 
@@ -108,6 +108,7 @@ def create_tracer(service_name, config):
         try:
             # import deferred until Jaeger is selected in config.
             import jaeger_client
+            import tornado.ioloop
 
             """
             If Implementation = Jaeger get the Jaeger config from the config
@@ -143,7 +144,20 @@ def create_tracer(service_name, config):
             https://stackoverflow.com/questions/30373620/why-does-ioloop-in-tornado-seem-to-add-root-logger-handler
             """
             init_logging(log_name="tornado")
-            jaeger.initialize_tracer()
+
+            """
+            If we are using asyncio we want the tracer to use the main asyncio
+            event loop rather than create a new ThreadLoop (which is the default
+            behaviour unless a tornado IOLoop is passed. In recent versions of
+            Tornado that delegates to the asyncio event loop so getting the
+            current tornado IOLoop and passing that to initialize_tracer will
+            cause the tracer to use the main event loop.
+            """
+            if use_asyncio:
+                jaeger.initialize_tracer(io_loop=tornado.ioloop.IOLoop.current())
+            else:
+                jaeger.initialize_tracer()
+
             create_tracer.logger.info("Jaeger Tracer initialised")
         except Exception as e:
             create_tracer.logger.warning("Failed to initialise Jaeger Tracer : {}".format(e))

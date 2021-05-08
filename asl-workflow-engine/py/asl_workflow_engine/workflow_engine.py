@@ -144,9 +144,29 @@ class WorkflowEngine(object):
         sampler["param"] = os.environ.get("JAEGER_SAMPLER_PARAM",
                                           sampler.get("param"))
 
-        # Initialise opentracing.tracer before creating the StateEngine,
-        # EventDispatcher and RestAPIinstances.
-        create_tracer("asl_workflow_engine", config["tracer"])
+        """
+        Initialise opentracing.tracer before creating the StateEngine,
+        EventDispatcher and RestAPIinstances.
+
+        Call asyncio.get_event_loop() here, because if we are using asyncio we
+        want the tracer to use the main asyncio event loop rather than create
+        a new ThreadLoop, which is the default behaviour unless a tornado IOLoop
+        is passed. In recent versions of Tornado that delegates to asyncio loop.
+        """
+        if eq["queue_type"].endswith("-asyncio"):
+            # Attempt to use uvloop libuv based event loop if available
+            # https://github.com/MagicStack/uvloop
+            try:
+                import uvloop
+                uvloop.install()
+                self.logger.info("Using uvloop asyncio event loop")
+            except:  # Fall back to standard library asyncio epoll event loop
+                self.logger.info("Using standard library asyncio event loop")
+
+            loop = asyncio.get_event_loop()
+            create_tracer("asl_workflow_engine", config["tracer"], use_asyncio=True)
+        else:
+            create_tracer("asl_workflow_engine", config["tracer"])
 
         init_metrics("asl_workflow_engine", config["metrics"])
 
@@ -168,14 +188,6 @@ class WorkflowEngine(object):
                 if exception:
                     self.logger.error(repr(exception))
 
-            # Attempt to use uvloop libuv based event loop if available
-            # https://github.com/MagicStack/uvloop
-            try:
-                import uvloop
-                uvloop.install()
-                self.logger.info("Using uvloop asyncio event loop")
-            except:  # Fall back to standard library asyncio epoll event loop
-                self.logger.info("Using standard library asyncio event loop")
 
             self.rest_api = asl_workflow_engine.rest_api_asyncio.RestAPI(
                 self.state_engine, self.event_dispatcher, self.config
@@ -185,7 +197,6 @@ class WorkflowEngine(object):
             loop = asyncio.get_event_loop()
             loop.set_exception_handler(global_exception_handler)
             loop.create_task(self.event_dispatcher.start_asyncio())
-
             """
             Start moving towards having Quart run via an external ASGI server
             so it's easier to compare the performance of different ones.
@@ -197,6 +208,8 @@ class WorkflowEngine(object):
             https://pgjones.gitlab.io/hypercorn/how_to_guides/api_usage.html
             instead of using app.run()
             """
+            
+            # hypercorn
             #app.run(host=self.rest_api.host, port=self.rest_api.port, loop=loop)
 
             from hypercorn.asyncio import serve
@@ -207,6 +220,30 @@ class WorkflowEngine(object):
             config.bind = ["{}:{}".format(self.rest_api.host, self.rest_api.port)]
 
             loop.run_until_complete(serve(app, config))
+            
+            """
+            # uvicorn
+            import uvicorn
+
+            # Setting loop="none" in uvicorn.run actually means use current event loop
+
+            #import yappi
+            #yappi.set_clock_type("WALL")
+            #with yappi.run():
+
+            uvicorn.run(
+                app, host=self.rest_api.host, port=self.rest_api.port,
+                loop="none", log_level="error"
+            )
+
+            #yappi.get_func_stats().print_all(columns={
+            #    0: ("name", 140),
+            #    1: ("ncall", 8),
+            #    2: ("tsub", 8),
+            #    3: ("ttot", 8),
+            #    4: ("tavg", 8)
+            #})
+            """
         else:
             self.rest_api = asl_workflow_engine.rest_api.RestAPI(
                 self.state_engine, self.event_dispatcher, self.config
