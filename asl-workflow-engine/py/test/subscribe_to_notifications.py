@@ -67,13 +67,15 @@ class NotificationHandler(object):
     def __init__(self, state_machines):
         # Initialise logger
         self.logger = init_logging(log_name="subscribe_to_notifications")
+        self.state_machines = state_machines
 
+    def run(self):
         connection = Connection("amqp://localhost:5672?connection_attempts=20&retry_delay=10&heartbeat=0")
         try:
             connection.open()
             session = connection.session()
 
-            for s in state_machines:
+            for s in self.state_machines:
                 """
                 Use nested function so we can capture the subscription value s.
                 Now closures look at the value in the surrounding scope at the
@@ -120,5 +122,6 @@ if __name__ == '__main__':
         "arn:aws:states:local:0123456789:stateMachine:map1.*",
         "arn:aws:states:local:0123456789:stateMachine:iterate2_state_machine.*",
     ]
-    NotificationHandler(state_machines)
+    notification_handler = NotificationHandler(state_machines)
+    notification_handler.run()
 
