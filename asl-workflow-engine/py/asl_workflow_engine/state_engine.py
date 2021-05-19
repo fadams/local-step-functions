@@ -35,6 +35,11 @@ assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 import operator, time, uuid, fnmatch, opentracing
 
 from datetime import datetime, timezone, timedelta
+from aioprometheus import Counter, Histogram
+
+#from asl_workflow_engine.metrics_summary import TimeWindowSummary as Summary
+from asl_workflow_engine.metrics_summary import BasicSummary as Summary
+
 from asl_workflow_engine.state_engine_paths import (
     apply_path,
     apply_jsonpath,
@@ -181,6 +186,38 @@ class StateEngine(object):
         self.task_dispatcher = TaskDispatcher(self, config)
         # self.event_dispatcher set by EventDispatcher
 
+        """
+        Prometheus metrics intended to emulate Stepfunction CloudWatch metrics.
+        https://docs.aws.amazon.com/step-functions/latest/dg/procedure-cw-metrics.html
+        """
+        self.execution_metrics = {}
+        if config.get("metrics", {}).get("implementation", "") == "Prometheus":
+            self.logger.info("Enabling Prometheus Metrics")
+
+            self.execution_metrics = {
+                "ExecutionTime": Summary(
+                    "ExecutionTime",
+                    "The interval, in milliseconds, between the time the " +
+                    "execution starts and the time it closes. "
+                ),
+                "ExecutionsFailed": Counter(
+                    "ExecutionsFailed",
+                    "The number of failed executions."
+                ),
+                "ExecutionsStarted": Counter(
+                    "ExecutionsStarted",
+                    "The number of started executions."
+                ),
+                "ExecutionsSucceeded": Counter(
+                    "ExecutionsSucceeded",
+                    "The number of successfully completed executions."
+                ),
+                "ExecutionsTimedOut": Counter(
+                    "ExecutionsTimedOut",
+                    "The number of executions that time out for any reason."
+                )
+            }
+
     def log_and_drop(self, message, obj, id):
         """
         Boiler plate to deal with unrecoverable errors that should rarely occur.
@@ -285,7 +322,7 @@ class StateEngine(object):
         execution_detail["startDate"] = saved_startDate
         execution_detail["stopDate"] = saved_stopDate
 
-    def start_state_machine(self, state_machine_type, start_state, event):
+    def start_execution(self, state_machine_type, start_state, event):
         """
         Initialise the state machine execution's state, in particular this will
         set any context metadata that hasn't previously been set elsewhere.
@@ -297,7 +334,7 @@ class StateEngine(object):
         """
         data = event["data"]
         context = event["context"]
-        state_machine_id = context["StateMachine"]["Id"]
+        state_machine_arn = context["StateMachine"]["Id"]
 
         context["State"]["Name"] = start_state
 
@@ -311,7 +348,7 @@ class StateEngine(object):
         if "Id" not in execution:
             # Create Id
             # Form executionArn from stateMachineArn and uuid
-            arn = parse_arn(state_machine_id)
+            arn = parse_arn(state_machine_arn)
             execution_arn = create_arn(
                 service="states",
                 region=arn.get("region", "local"),
@@ -337,7 +374,7 @@ class StateEngine(object):
             the asl_store "database" has been manually edited because when
             it is updated via the API the roleArn field gets populated.
             """
-            asl_item = self.asl_store.get_cached_view(state_machine_id, {})
+            asl_item = self.asl_store.get_cached_view(state_machine_arn, {})
             execution["RoleArn"] = asl_item.get(
                 "roleArn", "arn:aws:iam:::role/dummy-role/dummy"
             )
@@ -373,7 +410,7 @@ class StateEngine(object):
             "name": execution["Name"],
             "output": None,
             "startDate": time.time(),
-            "stateMachineArn": state_machine_id,
+            "stateMachineArn": state_machine_arn,
             "status": "RUNNING",
             "stopDate": None,
         }
@@ -399,6 +436,11 @@ class StateEngine(object):
             "ExecutionStarted",
             {"input": input_as_string, "roleArn": execution["RoleArn"]},
         )
+
+        if self.execution_metrics:
+            self.execution_metrics["ExecutionsStarted"].inc(
+                {"StateMachineArn": state_machine_arn}
+            )
 
         self.broadcast_notification(execution_arn, execution_detail, context)
 
@@ -432,7 +474,7 @@ class StateEngine(object):
                 "Cause": error_message,
             }
             self.logger.warning("States.DataLimitExceeded: {}".format(error_message))
-            self.end_state_machine(state_machine_type, state_type, event)
+            self.end_execution(state_machine_type, state_type, event)
             return
 
         self.update_execution_history(
@@ -452,7 +494,7 @@ class StateEngine(object):
         state["EnteredTime"] = datetime.now(timezone.utc).astimezone().isoformat()
         self.event_dispatcher.publish(event)
 
-    def end_state_machine(self, state_machine_type, state_type, event):
+    def end_execution(self, state_machine_type, state_type, event):
         """
         End the state machine execution and update execution metadata.
         """
@@ -476,6 +518,7 @@ class StateEngine(object):
 
         if state_machine_type == "STANDARD":
             execution_detail = self.executions[execution_arn]
+            state_machine_arn = execution_detail["stateMachineArn"]
         else:
             """
             For "EXPRESS" workflows we don't store the execution metadata in
@@ -535,6 +578,16 @@ class StateEngine(object):
                     "ExecutionFailed",
                     {"cause": data.get("Cause"), "error": data.get("Error")}
                 )
+
+                if self.execution_metrics:
+                    if data.get("Error") == "States.Timeout":
+                        self.execution_metrics["ExecutionsTimedOut"].inc(
+                            {"StateMachineArn": state_machine_arn}
+                        )
+
+                    self.execution_metrics["ExecutionsFailed"].inc(
+                        {"StateMachineArn": state_machine_arn}
+                    )
             else:
                 opentracing.tracer.active_span.set_tag("status", "SUCCEEDED")
                 execution_detail["status"] = "SUCCEEDED"
@@ -545,10 +598,22 @@ class StateEngine(object):
                     "ExecutionSucceeded",
                     {"output": output_as_string}
                 )
+
+                if self.execution_metrics:
+                    self.execution_metrics["ExecutionsSucceeded"].inc(
+                        {"StateMachineArn": state_machine_arn}
+                    )
         
         # Tidy up self.branch_results for current execution_arn.
         if execution_arn in self.branch_results:
             del self.branch_results[execution_arn]
+
+        if self.execution_metrics:
+            duration = (execution_detail["stopDate"] - 
+                        execution_detail["startDate"]) * 1000.0
+            self.execution_metrics["ExecutionTime"].observe(
+                {"StateMachineArn": state_machine_arn}, duration 
+            )
 
         self.broadcast_notification(execution_arn, execution_detail, context)
 
@@ -698,8 +763,8 @@ class StateEngine(object):
             self.log_and_drop("event {} has no $.context.StateMachine field", event, id)
             return
 
-        state_machine_id = state_machine.get("Id")
-        if not state_machine_id:
+        state_machine_arn = state_machine.get("Id")
+        if not state_machine_arn:
             self.log_and_drop("event {} has no $.context.StateMachine.Id field", event, id)
             return
 
@@ -714,14 +779,14 @@ class StateEngine(object):
         context in a similar way to how state_machine["Definition"] is.
         """
         if "Definition" in state_machine:
-            arn = parse_arn(state_machine_id)
+            arn = parse_arn(state_machine_arn)
             creation_date = time.time()
-            self.asl_store[state_machine_id] = {
+            self.asl_store[state_machine_arn] = {
                 "creationDate": creation_date,
                 "definition": state_machine["Definition"],
                 "name": arn["resource"],
                 "roleArn": "arn:aws:iam:::role/dummy-role/dummy",
-                "stateMachineArn": state_machine_id,
+                "stateMachineArn": state_machine_arn,
                 "updateDate": creation_date,
                 "status": "ACTIVE",
                 "type": "STANDARD",
@@ -729,7 +794,7 @@ class StateEngine(object):
             del state_machine["Definition"]
 
 
-        asl_item = self.asl_store.get_cached_view(state_machine_id, {})
+        asl_item = self.asl_store.get_cached_view(state_machine_arn, {})
         ASL = asl_item.get("definition")
         if not ASL:
             """
@@ -737,7 +802,7 @@ class StateEngine(object):
             scenario as we *could* simply add the State Machine and retry. OTOH
             if a State Machine is deleted executions should also be deleted.
             """
-            self.log_and_drop("State Machine {} does not exist", state_machine_id, id)
+            self.log_and_drop("State Machine {} does not exist", state_machine_arn, id)
             return
 
         """
@@ -779,7 +844,7 @@ class StateEngine(object):
             If so initialise unset context fields and start OpenTracing span.
             """
             current_state = ASL["StartAt"]
-            self.start_state_machine(state_machine_type, current_state, event)
+            self.start_execution(state_machine_type, current_state, event)
 
             with opentracing.tracer.start_active_span(
                 operation_name="StartExecution:ExecutionStarting",
@@ -809,7 +874,7 @@ class StateEngine(object):
         state_type = state["Type"]
 
         """
-        print("state_machine_id = " + state_machine_id)
+        print("state_machine_arn = " + state_machine_arn)
         print("current_state = " + current_state)
         print("state = " + str(state))
         print("data = " + str(data))
@@ -972,7 +1037,7 @@ class StateEngine(object):
                     result["Cause"] = error_message
 
                 event["data"] = result
-                self.end_state_machine(state_machine_type, state_type, event)
+                self.end_execution(state_machine_type, state_type, event)
 
         # ----------------------------------------------------------------------
 
@@ -991,7 +1056,7 @@ class StateEngine(object):
                 )
                 asl_state_collect_results(state_type)
             else:
-                self.end_state_machine(state_machine_type, state_type, event)
+                self.end_execution(state_machine_type, state_type, event)
                 if id != None:
                     self.event_dispatcher.acknowledge(id)
 
@@ -1020,7 +1085,9 @@ class StateEngine(object):
             extraction and embedding, becomes the effective input.
             """
             try:
-                parameters = evaluate_payload_template(input, context, state.get("Parameters"))
+                parameters = evaluate_payload_template(
+                    input, context, state.get("Parameters")
+                )
             except IntrinsicFailure as e:
                 handle_error("States.IntrinsicFailure", str(e))
                 self.event_dispatcher.acknowledge(id)
@@ -1148,7 +1215,9 @@ class StateEngine(object):
             extraction and embedding, becomes the effective input.
             """
             try:
-                parameters = evaluate_payload_template(input, context, state.get("Parameters"))
+                parameters = evaluate_payload_template(
+                    input, context, state.get("Parameters")
+                )
             except IntrinsicFailure as e:
                 handle_error("States.IntrinsicFailure", str(e))
                 self.event_dispatcher.acknowledge(id)
@@ -1632,7 +1701,9 @@ class StateEngine(object):
             extraction and embedding, becomes the effective input.
             """
             try:
-                parameters = evaluate_payload_template(input, context, state.get("Parameters"))
+                parameters = evaluate_payload_template(
+                    input, context, state.get("Parameters")
+                )
             except IntrinsicFailure as e:
                 handle_error("States.IntrinsicFailure", str(e))
                 self.event_dispatcher.acknowledge(id)
@@ -1813,7 +1884,9 @@ class StateEngine(object):
                     extraction and embedding, becomes the effective input.
                     """
                     try:
-                        parameters = evaluate_payload_template(input, context, params)
+                        parameters = evaluate_payload_template(
+                            input, context, params
+                        )
                     except IntrinsicFailure as e:
                         handle_error("States.IntrinsicFailure", str(e))
                         self.event_dispatcher.acknowledge(id)

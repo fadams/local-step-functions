@@ -80,8 +80,10 @@ assert sys.version_info >= (3, 6)  # Bomb out if not running Python3.6
 
 import re, time, uuid, logging, opentracing
 from datetime import datetime, timezone
-#from flask import Flask, escape, request, jsonify, abort
 from quart import Quart, escape, request, jsonify, abort
+from aioprometheus import Registry, render
+
+from asl_workflow_engine.metrics_system import SystemMetrics
 
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.open_tracing_factory import span_context, inject_span
@@ -157,7 +159,9 @@ class RestAPI(object):
         self.asl_store = state_engine.asl_store
         self.executions = state_engine.executions
         self.execution_history = state_engine.execution_history
+        self.execution_metrics = state_engine.execution_metrics
         self.event_dispatcher = event_dispatcher
+        self.system_metrics = SystemMetrics()
 
     def create_app(self):
         app = Quart(__name__)
@@ -166,6 +170,30 @@ class RestAPI(object):
         app.logger.disabled = True
         log = logging.getLogger("quart.serving")
         log.disabled = True
+
+        """
+        Prometheus Metrics Exporter endpoint.
+        https://github.com/claws/aioprometheus
+        https://github.com/claws/aioprometheus/blob/master/examples/frameworks/quart-example.py
+
+        The metrics are intended to emulate Stepfunction CloudWatch metrics.
+        https://docs.aws.amazon.com/step-functions/latest/dg/procedure-cw-metrics.html
+        """
+        registry = Registry()
+
+        for metric in self.execution_metrics.values():
+            registry.register(metric)
+        for metric in self.system_metrics.values():
+            registry.register(metric)
+
+        @app.route("/metrics")
+        async def handle_metrics():
+            self.system_metrics.collect()
+
+            content, http_headers = render(
+                registry, request.headers.getlist("accept")
+            )
+            return content, http_headers
 
         """
         Flask/Quart "catch-all" URL
