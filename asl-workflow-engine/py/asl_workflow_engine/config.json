@@ -37,8 +37,6 @@
     },
     "metrics": {
         "implementation": "Prometheus",
-        "config": {
-            "port": 9091
-        }
+        "namespace": "asl_workflow_engine"
     }
 }

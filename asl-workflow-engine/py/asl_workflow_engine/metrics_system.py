@@ -44,7 +44,12 @@ class SystemMetrics(object):
     https://github.com/prometheus/client_python/blob/master/prometheus_client/platform_collector.py
     https://github.com/prometheus/client_python/blob/master/prometheus_client/gc_collector.py
     """
-    def __init__(self):
+    def __init__(self, namespace=""):
+        if namespace:
+            ns = namespace + '_'
+        else:
+            ns = ""
+
         self._ticks = 100.0
         try:
             self._ticks = os.sysconf('SC_CLK_TCK')
@@ -69,31 +74,31 @@ class SystemMetrics(object):
 
         self.process_metrics = {
             "info": Gauge(
-                "python_info",
+                ns + "python_info",
                 "Python platform information."
             ),
             "vmem": Gauge(
-                "process_virtual_memory_bytes",
+                ns + "process_virtual_memory_bytes",
                 "Virtual memory size in bytes."
             ),
             "rss": Gauge(
-                "process_resident_memory_bytes",
+                ns + "process_resident_memory_bytes",
                 "Resident memory size in bytes."
             ),
             "start_time": Gauge(
-                "process_start_time_seconds",
+                ns + "process_start_time_seconds",
                 "Start time of the process since unix epoch in seconds."
             ),
             "cpu": Counter(
-                "process_cpu_seconds_total",
+                ns + "process_cpu_seconds_total",
                 "Total user and system CPU time spent in seconds."
             ),
             "open_fds": Gauge(
-                "process_open_fds",
+                ns + "process_open_fds",
                 "Number of open file descriptors."
             ),
             "max_fds": Gauge(
-                "process_max_fds",
+                ns + "process_max_fds",
                 "Maximum number of open file descriptors."
             )
         }
@@ -101,15 +106,15 @@ class SystemMetrics(object):
         # Only include these metrics if CPython and gc supports get_stats
         if hasattr(gc, 'get_stats') and platform.python_implementation() == 'CPython':
             self.process_metrics["collected"] = Counter(
-                "python_gc_objects_collected",
+                ns + "python_gc_objects_collected",
                 "Objects collected during gc."
             )
             self.process_metrics["uncollectable"] = Counter(
-                "python_gc_objects_uncollectable",
+                ns + "python_gc_objects_uncollectable",
                 "Uncollectable object found during GC."
             )
             self.process_metrics["collections"] = Counter(
-                "python_gc_collections",
+                ns + "python_gc_collections",
                 "Number of times this generation was collected."
             )
 

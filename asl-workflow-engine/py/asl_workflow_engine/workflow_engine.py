@@ -39,7 +39,6 @@ assert sys.version_info >= (3, 6)  # Bomb out if not running Python3.6
 import asyncio, json, os
 import threading  # Run REST API in its own thread
 from asl_workflow_engine.logger import init_logging
-from asl_workflow_engine.metrics import init_metrics
 from asl_workflow_engine.open_tracing_factory import create_tracer
 from asl_workflow_engine.state_engine import StateEngine
 from asl_workflow_engine.event_dispatcher import EventDispatcher
@@ -139,10 +138,20 @@ class WorkflowEngine(object):
         # The Jaeger specific env vars are derived from this document:
         # https://www.jaegertracing.io/docs/1.22/client-features/
         sampler = tr["config"]["sampler"]
-        sampler["type"] = os.environ.get("JAEGER_SAMPLER_TYPE",
-                                         sampler.get("type"))
-        sampler["param"] = os.environ.get("JAEGER_SAMPLER_PARAM",
-                                          sampler.get("param"))
+        sampler["type"] = os.environ.get(
+            "JAEGER_SAMPLER_TYPE", sampler.get("type")
+        )
+        sampler["param"] = os.environ.get(
+            "JAEGER_SAMPLER_PARAM", sampler.get("param")
+        )
+
+        metrics = config["metrics"]
+        metrics["implementation"] = os.environ.get(
+            "METRICS_IMPLEMENTATION", metrics.get("implementation", "None")
+        )
+        metrics["namespace"] = os.environ.get(
+            "METRICS_NAMESPACE", metrics.get("namespace", "")
+        )
 
         """
         Initialise opentracing.tracer before creating the StateEngine,
@@ -167,8 +176,6 @@ class WorkflowEngine(object):
             create_tracer("asl_workflow_engine", config["tracer"], use_asyncio=True)
         else:
             create_tracer("asl_workflow_engine", config["tracer"])
-
-        init_metrics("asl_workflow_engine", config["metrics"])
 
         self.state_engine = StateEngine(config)
         self.event_dispatcher = EventDispatcher(self.state_engine, config)

@@ -150,18 +150,22 @@ class RestAPI(object):
             __name__, json.__name__
         ))
 
-        config = config.get("rest_api")
-        if config:
-            self.host = config.get("host", "0.0.0.0")
-            self.port = config.get("port", 4584)
-            self.region = config.get("region", "local")
+        rest_api_config = config.get("rest_api")
+        if rest_api_config:
+            self.host = rest_api_config.get("host", "0.0.0.0")
+            self.port = rest_api_config.get("port", 4584)
+            self.region = rest_api_config.get("region", "local")
 
         self.asl_store = state_engine.asl_store
         self.executions = state_engine.executions
         self.execution_history = state_engine.execution_history
         self.execution_metrics = state_engine.execution_metrics
         self.event_dispatcher = event_dispatcher
-        self.system_metrics = SystemMetrics()
+
+        self.system_metrics = {}
+        metrics_config = config.get("metrics", {})
+        if metrics_config.get("implementation", "") == "Prometheus":
+            self.system_metrics = SystemMetrics(metrics_config.get("namespace", ""))
 
     def create_app(self):
         app = Quart(__name__)
@@ -188,7 +192,8 @@ class RestAPI(object):
 
         @app.route("/metrics")
         async def handle_metrics():
-            self.system_metrics.collect()
+            if self.system_metrics:
+                self.system_metrics.collect()
 
             content, http_headers = render(
                 registry, request.headers.getlist("accept")

@@ -191,29 +191,35 @@ class StateEngine(object):
         https://docs.aws.amazon.com/step-functions/latest/dg/procedure-cw-metrics.html
         """
         self.execution_metrics = {}
-        if config.get("metrics", {}).get("implementation", "") == "Prometheus":
-            self.logger.info("Enabling Prometheus Metrics")
+        metrics_config = config.get("metrics", {})
+        if metrics_config.get("implementation", "") == "Prometheus":
+            ns = metrics_config.get("namespace", "")
+            if ns:
+                self.logger.info("Enabling Prometheus Metrics in namespace: " + ns)
+                ns += "_"
+            else:
+                self.logger.info("Enabling Prometheus Metrics")
 
             self.execution_metrics = {
                 "ExecutionTime": Summary(
-                    "ExecutionTime",
+                    ns + "ExecutionTime",
                     "The interval, in milliseconds, between the time the " +
                     "execution starts and the time it closes. "
                 ),
                 "ExecutionsFailed": Counter(
-                    "ExecutionsFailed",
+                    ns + "ExecutionsFailed",
                     "The number of failed executions."
                 ),
                 "ExecutionsStarted": Counter(
-                    "ExecutionsStarted",
+                    ns + "ExecutionsStarted",
                     "The number of started executions."
                 ),
                 "ExecutionsSucceeded": Counter(
-                    "ExecutionsSucceeded",
+                    ns + "ExecutionsSucceeded",
                     "The number of successfully completed executions."
                 ),
                 "ExecutionsTimedOut": Counter(
-                    "ExecutionsTimedOut",
+                    ns + "ExecutionsTimedOut",
                     "The number of executions that time out for any reason."
                 )
             }
