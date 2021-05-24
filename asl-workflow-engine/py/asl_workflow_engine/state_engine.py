@@ -204,7 +204,7 @@ class StateEngine(object):
                 "ExecutionTime": Summary(
                     ns + "ExecutionTime",
                     "The interval, in milliseconds, between the time the " +
-                    "execution starts and the time it closes. "
+                    "execution starts and the time it closes."
                 ),
                 "ExecutionsFailed": Counter(
                     ns + "ExecutionsFailed",

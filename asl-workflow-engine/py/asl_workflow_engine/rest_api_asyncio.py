@@ -160,6 +160,7 @@ class RestAPI(object):
         self.executions = state_engine.executions
         self.execution_history = state_engine.execution_history
         self.execution_metrics = state_engine.execution_metrics
+        self.task_metrics = state_engine.task_dispatcher.task_metrics
         self.event_dispatcher = event_dispatcher
 
         self.system_metrics = {}
@@ -185,10 +186,13 @@ class RestAPI(object):
         """
         registry = Registry()
 
-        for metric in self.execution_metrics.values():
-            registry.register(metric)
         for metric in self.system_metrics.values():
             registry.register(metric)
+        for metric in self.execution_metrics.values():
+            registry.register(metric)
+        for metric in self.task_metrics.values():
+            registry.register(metric)
+
 
         @app.route("/metrics")
         async def handle_metrics():

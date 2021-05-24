@@ -23,6 +23,10 @@ assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 import os, time, uuid, opentracing, urllib.parse
 from datetime import datetime, timezone
+from aioprometheus import Counter, Histogram
+
+#from asl_workflow_engine.metrics_summary import TimeWindowSummary as Summary
+from asl_workflow_engine.metrics_summary import BasicSummary as Summary
 
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.open_tracing_factory import span_context, inject_span
@@ -89,6 +93,62 @@ class TaskDispatcher(object):
         maps requests with their callbacks using correlation IDs.
         """
         self.pending_requests = {}
+
+        """
+        Prometheus metrics intended to emulate Stepfunction CloudWatch metrics.
+        https://docs.aws.amazon.com/step-functions/latest/dg/procedure-cw-metrics.html
+        """
+        self.task_metrics = {}
+        metrics_config = config.get("metrics", {})
+        if metrics_config.get("implementation", "") == "Prometheus":
+            ns = metrics_config.get("namespace", "")
+            ns = ns + "_" if ns else ""
+            
+            self.task_metrics = {
+                "LambdaFunctionTime": Summary(
+                    ns + "LambdaFunctionTime",
+                    "The interval, in milliseconds, between the time the " +
+                    "Lambda function is scheduled and the time it closes."
+                ),
+                "LambdaFunctionsFailed": Counter(
+                    ns + "LambdaFunctionsFailed",
+                    "The number of failed Lambda functions."
+                ),
+                "LambdaFunctionsScheduled": Counter(
+                    ns + "LambdaFunctionsScheduled",
+                    "The number of scheduled Lambda functions."
+                ),
+                "LambdaFunctionsSucceeded": Counter(
+                    ns + "LambdaFunctionsSucceeded",
+                    "The number of successfully completed Lambda functions."
+                ),
+                "LambdaFunctionsTimedOut": Counter(
+                    ns + "LambdaFunctionsTimedOut",
+                    "The number of Lambda functions that time out on close."
+                ),
+                #"ServiceIntegrationTime": Summary(
+                #    ns + "ServiceIntegrationTime",
+                #    "The interval, in milliseconds, between the time the " +
+                #    "Service Task is scheduled and the time it closes."
+                #),
+                #"ServiceIntegrationsFailed": Counter(
+                #    ns + "ServiceIntegrationsFailed",
+                #    "The number of failed Service Tasks."
+                #),
+                "ServiceIntegrationsScheduled": Counter(
+                    ns + "ServiceIntegrationsScheduled",
+                    "The number of scheduled Service Tasks."
+                ),
+                "ServiceIntegrationsSucceeded": Counter(
+                    ns + "ServiceIntegrationsSucceeded",
+                    "The number of successfully completed Service Tasks."
+                ),
+                #"ServiceIntegrationsTimedOut": Counter(
+                #    ns + "ServiceIntegrationsTimedOut",
+                #    "The number of Service Tasks that time out on close."
+                #)
+            }
+
 
     def start(self, session):
         """
@@ -164,7 +224,7 @@ class TaskDispatcher(object):
         if request:
             try:
                 del self.pending_requests[correlation_id]
-                callback, timeout_id, rpcmessage_task_span = request
+                callback, resource_arn, sched_time, timeout_id, rpcmessage_task_span = request
                 with opentracing.tracer.scope_manager.activate(
                     span=rpcmessage_task_span,
                     finish_on_close=True
@@ -191,6 +251,35 @@ class TaskDispatcher(object):
                                     "event": error_type,
                                     "message": result.get("errorMessage", ""),
                                 }
+                            )
+                            if self.task_metrics:
+                                """
+                                When Lambda times out it returns JSON including
+                                "errorType": "TimeoutError"
+                                See the following for an example illustration
+                                https://stackoverflow.com/questions/65036533/my-lambda-is-throwing-a-invoke-error-timeout
+                                rpcmessage processors should follow the same
+                                convention so we can trap processor timeout
+                                errors and provide metrics on these.
+                                """
+                                if error_type == "TimeoutError":
+                                    self.task_metrics["LambdaFunctionsTimedOut"].inc(
+                                        {"LambdaFunctionArn": resource_arn}
+                                    )
+
+                                self.task_metrics["LambdaFunctionsFailed"].inc(
+                                    {"LambdaFunctionArn": resource_arn}
+                                )
+                        else:
+                            if self.task_metrics:
+                                self.task_metrics["LambdaFunctionsSucceeded"].inc(
+                                    {"LambdaFunctionArn": resource_arn}
+                                )
+
+                        if self.task_metrics:
+                            duration = (time.time()  * 1000.0) - sched_time
+                            self.task_metrics["LambdaFunctionTime"].observe(
+                                {"LambdaFunctionArn": resource_arn}, duration
                             )
 
                         callback(result)
@@ -230,7 +319,7 @@ class TaskDispatcher(object):
         we can do the import of the Message class from event_dispatcher.
         """
         from asl_workflow_engine.event_dispatcher import Message
-        #from asl_workflow_engine.amqp_0_9_1_messaging import Message
+
         """
         Use the value of the “Resource” field to determine the type of the task
         to execute. For real AWS Step Functions the service integrations are
@@ -390,7 +479,7 @@ class TaskDispatcher(object):
                 request = self.pending_requests.get(correlation_id)
                 if request:
                     del self.pending_requests[correlation_id]
-                    callback, timeout_id, task_span = request
+                    callback, resource_arn, sched_time, timeout_id, task_span = request
                     error = {
                         "errorType": "States.Timeout",
                         "errorMessage": "State or Execution ran for longer " +
@@ -449,8 +538,15 @@ class TaskDispatcher(object):
                 As mentioned above we also store the OpenTracing span so that if a 
                 timeout occurs we can raise an error on the request span.
                 """
-                self.pending_requests[correlation_id] = (callback, timeout_id, scope.span)
+                self.pending_requests[correlation_id] = (
+                    callback, resource_arn, time.time() * 1000, timeout_id, scope.span
+                )
                 self.producer.send(message)
+
+                if self.task_metrics:
+                    self.task_metrics["LambdaFunctionsScheduled"].inc(
+                        {"LambdaFunctionArn": resource_arn}
+                    )
 
         # def asl_service_openfaas():  # TODO
         #    print("asl_service_openfaas")
@@ -588,7 +684,36 @@ class TaskDispatcher(object):
                     event, start_execution=True
                 )
 
+                """
+                The Stepfunction metrics specified in the docs:
+                https://docs.aws.amazon.com/step-functions/latest/dg/procedure-cw-metrics.html
+                describe Service Integration Metrics, which would include child
+                Stepfunctions. The "dimension" for these, however is the
+                resource ARN of the integrated service. In practice that is
+                less than ideal as it only really describes the startExecution
+                service so the ARN is the same irrespective of the state machine.
+                """
+                if self.task_metrics:
+                    self.task_metrics["ServiceIntegrationsScheduled"].inc(
+                        {"ServiceIntegrationResourceArn": resource_arn}
+                    )
+
                 result = {"executionArn": execution_arn, "startDate": time.time()}
+
+                """
+                For now we only support "fire and forget" launching of child
+                Stepfunctions and *not* synchronous ones that wait for the
+                child Stepfunction to complete nor waitForTaskToken style
+                callbacks. As it it fire and forget the ServiceIntegration
+                is deemed successful if the request is successfully dispatched.
+                TODO the other ServiceIntegration metrics are really only useful
+                for synchronous (not fire and forget) execution invocations.
+                """
+                if self.task_metrics:
+                    self.task_metrics["ServiceIntegrationsSucceeded"].inc(
+                        {"ServiceIntegrationResourceArn": resource_arn}
+                    )
+
                 callback(result)
 
         def asl_service_InvalidService():
