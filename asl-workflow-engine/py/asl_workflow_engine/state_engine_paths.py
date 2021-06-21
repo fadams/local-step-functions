@@ -411,7 +411,10 @@ def evaluate_payload_template(input, context, template):
                     target[k] = v
         return target
 
-    if not template:
+    if template == None or template == "":
         return input
-    return clone(template)
+    elif template == {}:
+        return {}
+    else:
+        return clone(template)
 

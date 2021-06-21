@@ -745,7 +745,8 @@ class Producer(Destination):
 
             # If message.subject is set use that as the routing_key, otherwise use
             # the Producer target default subject parsed from address string.
-            routing_key = message.subject if message.subject else self.subject
+            subject = message.subject
+            routing_key = subject if subject else self.subject
 
             properties = pika.BasicProperties(
                 headers=message.properties,
@@ -941,6 +942,7 @@ class Consumer(Destination):
         ex = self.link_subscribe.get("exclusive", False)
         args = self.link_subscribe.get("arguments", None)
         self._message_listener = message_listener
+        self._message_listener_is_coroutine = asyncio.iscoroutinefunction(message_listener)
         try:
             await make_future(
                 self.session.channel.basic_consume,
@@ -993,7 +995,7 @@ class Consumer(Destination):
             message._channel = channel
             message._delivery_tag = method.delivery_tag
             # If message listener is coroutine run as a task else call directly. 
-            if asyncio.iscoroutinefunction(self._message_listener):
+            if self._message_listener_is_coroutine:
                 asyncio.get_event_loop().create_task(
                     self._message_listener(message)
                 )

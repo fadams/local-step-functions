@@ -605,7 +605,8 @@ class Producer(Destination):
 
             # If message.subject is set use that as the routing_key, otherwise use
             # the Producer target default subject parsed from address string.
-            routing_key = message.subject if message.subject else self.subject
+            subject = message.subject
+            routing_key = subject if subject else self.subject
 
             properties = pika.BasicProperties(
                 headers=message.properties,
