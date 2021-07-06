@@ -324,6 +324,15 @@ class EventDispatcher(object):
             """
             #self.set_timeout(self.heartbeat, 1000)
 
+
+            def on_close_callback(ch, e):
+                code = type(e).__name__
+                messsage = f"Unexpected channel closure triggered an on_close_callback with exception: {code}: {str(e)}. Terminating!"
+                self.logger.error(messsage)
+                sys.exit(1)
+
+            session.channel.add_on_close_callback(on_close_callback)
+
             await connection.start()  # Blocks until event loop exits.
         except MessagingError as e:
             self.logger.error(e)
