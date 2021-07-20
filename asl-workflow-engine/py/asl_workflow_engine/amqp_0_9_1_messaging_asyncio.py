@@ -68,13 +68,15 @@ def make_future(func, *args, **kwargs):
     future = asyncio.get_event_loop().create_future()
 
     """
-    Wrap the actual set_result callback in a closure with channel in its scope.
+    Wrap the actual set_result callback in a closure with channel and 
+    exception_callback in its scope so when set_result is called we can also
+    remove the exception_callback bound to _on_channel_close..
     https://stackoverflow.com/questions/12423614/local-variables-in-nested-functions
     """
-    def set_result_wrapper(channel):
+    def set_result_wrapper(channel, exception_callback):
         def set_result(value):
-            channel.callbacks.remove_all(
-                channel.channel_number, "_on_channel_close"
+            channel.callbacks.remove(
+                channel.channel_number, "_on_channel_close", exception_callback
             )
             future.set_result(value)
         return set_result
@@ -85,10 +87,17 @@ def make_future(func, *args, **kwargs):
     else:
         callback_kw = "callback"
 
+    """
+    Check if the function being wrapped by make_future is a method bound to
+    pika.channel.Channel. To do this first check it's a bound method by checking
+    if it has a __self__ attribute, then check whether self is a Channel. We
+    need to check because make_future also wraps methods bound to Connection.
+    """
     channel = func.__self__ if hasattr(func, "__self__") else None
     if channel and isinstance(channel, pika.channel.Channel):
-        channel.add_on_close_callback(lambda x, err : future.set_exception(err))
-        kwargs[callback_kw] = set_result_wrapper(channel)
+        exception_callback = lambda x, err : future.set_exception(err)
+        channel.add_on_close_callback(exception_callback)
+        kwargs[callback_kw] = set_result_wrapper(channel, exception_callback)
     else:
         kwargs[callback_kw] = lambda value : future.set_result(value)
 

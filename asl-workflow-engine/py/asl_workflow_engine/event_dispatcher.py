@@ -41,6 +41,8 @@ class EventDispatcher(object):
         self.logger = init_logging(log_name="asl_workflow_engine")
         self.logger.info("Creating EventDispatcher, using {} JSON parser".format(json.__name__))
 
+        self.session = None  # Make session an attribute so it's visible from REST API
+
         self.queue_config = config["event_queue"]  # TODO Handle missing config
         self.notifier_config = config["notifier"]  # TODO Handle missing config
         # TODO validate that config contains the keys we need.
@@ -145,14 +147,14 @@ class EventDispatcher(object):
 
         try:
             connection.open()
-            session = connection.session()
+            self.session = connection.session()
 
             """
             Share messaging session with state_engine.task_dispatcher. This
             is to allow rpcmessage invocations that share the same message
             fabric instance as the event queue to reuse connections etc.
             """
-            self.state_engine.task_dispatcher.start(session)
+            self.state_engine.task_dispatcher.start(self.session)
 
             """
             The event_queue_producer is used to publish events corresponding
@@ -161,7 +163,7 @@ class EventDispatcher(object):
             the per-instance queues of each instance. The Message subject is
             used to select which queue the Message should be published to.
             """
-            self.event_queue_producer = session.producer(self.queue_name)
+            self.event_queue_producer = self.session.producer(self.queue_name)
 
             """
             The topic_producer specifies the topic that notification events
@@ -169,7 +171,7 @@ class EventDispatcher(object):
             CloudWatch events and the JSON format of the notification Messages
             is the same as that used by CloudWatch.
             """
-            self.topic_producer = session.producer(self.notifier_config["topic"])
+            self.topic_producer = self.session.producer(self.notifier_config["topic"])
 
             """
             The asl_workflow_events queue is a shared event queue, that is to
@@ -179,7 +181,7 @@ class EventDispatcher(object):
             it and will thus load-balance executions across multiple instances.
             """
             shared_queue = self.queue_name + '; {"node": {"durable": true}}'
-            shared_event_consumer = session.consumer(shared_queue)
+            shared_event_consumer = self.session.consumer(shared_queue)
             # Enable consumer prefetch
             self.logger.info("Setting shared_event_consumer.capacity to {}".format(
                 self.shared_event_consumer_capacity)
@@ -201,7 +203,7 @@ class EventDispatcher(object):
             would like each branch to notify the same instance when complete.
             """
             instance_queue = self.instance_queue_name + '; {"node": {"durable": true}, "link": {"x-subscribe": {"exclusive": true}}}'
-            instance_event_consumer = session.consumer(instance_queue)
+            instance_event_consumer = self.session.consumer(instance_queue)
             # Enable consumer prefetch
             self.logger.info("Setting instance_event_consumer.capacity to {}".format(
                 self.instance_event_consumer_capacity)
@@ -248,14 +250,14 @@ class EventDispatcher(object):
 
         try:
             await connection.open()
-            session = await connection.session()
+            self.session = await connection.session()
 
             """
             Share messaging session with state_engine.task_dispatcher. This
             is to allow rpcmessage invocations that share the same message
             fabric instance as the event queue to reuse connections etc.
             """
-            await self.state_engine.task_dispatcher.start_asyncio(session)
+            await self.state_engine.task_dispatcher.start_asyncio(self.session)
 
             """
             The event_queue_producer is used to publish events corresponding
@@ -264,7 +266,7 @@ class EventDispatcher(object):
             the per-instance queues of each instance. The Message subject is
             used to select which queue the Message should be published to.
             """
-            self.event_queue_producer = await session.producer(self.queue_name)
+            self.event_queue_producer = await self.session.producer(self.queue_name)
 
             """
             The topic_producer specifies the topic that notification events
@@ -272,7 +274,7 @@ class EventDispatcher(object):
             CloudWatch events and the JSON format of the notification Messages
             is the same as that used by CloudWatch.
             """
-            self.topic_producer = await session.producer(self.notifier_config["topic"])
+            self.topic_producer = await self.session.producer(self.notifier_config["topic"])
 
             """
             The asl_workflow_events queue is a shared event queue, that is to
@@ -282,7 +284,7 @@ class EventDispatcher(object):
             it and will thus load-balance executions across multiple instances.
             """
             shared_queue = self.queue_name + '; {"node": {"durable": true}}'
-            shared_event_consumer = await session.consumer(shared_queue)
+            shared_event_consumer = await self.session.consumer(shared_queue)
             # Enable consumer prefetch
             self.logger.info("Setting shared_event_consumer.capacity to {}".format(
                 self.shared_event_consumer_capacity)
@@ -304,7 +306,7 @@ class EventDispatcher(object):
             would like each branch to notify the same instance when complete.
             """
             instance_queue = self.instance_queue_name + '; {"node": {"durable": true}, "link": {"x-subscribe": {"exclusive": true}}}'
-            instance_event_consumer = await session.consumer(instance_queue)
+            instance_event_consumer = await self.session.consumer(instance_queue)
             # Enable consumer prefetch
             self.logger.info("Setting instance_event_consumer.capacity to {}".format(
                 self.instance_event_consumer_capacity)
@@ -331,7 +333,7 @@ class EventDispatcher(object):
                 self.logger.error(messsage)
                 sys.exit(1)
 
-            session.channel.add_on_close_callback(on_close_callback)
+            self.session.channel.add_on_close_callback(on_close_callback)
 
             await connection.start()  # Blocks until event loop exits.
         except MessagingError as e:
