@@ -29,6 +29,7 @@ assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 
 import os, logging
+import logging.config
 from logging.handlers import RotatingFileHandler
 import structlog
 
