@@ -24,6 +24,7 @@ stream. It should not attempt to write to or manage logfiles. Instead, each
 running process writes its event stream, unbuffered, to stdout (or stderr).
 """
 
+import json
 import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
@@ -32,7 +33,6 @@ import os, logging
 import logging.config
 from logging.handlers import RotatingFileHandler
 import structlog
-
 
 def inject_context(logger, method_name, event_dict):
     # inject current structlog context to stdlib logger calls from dependencies
@@ -71,14 +71,25 @@ def configure_structlog():
         cache_logger_on_first_use=True,
     )
 
+def get_structlog_formatter(*args, **kwargs):
+    """ 
+     The relevant docs for this aren't particularly clear, but it's possible 
+     to specify a function that can return a Formatter object in a python 
+     logging config file, instead of one of the built-in offerings. 
+     
+     In this case the arguments to that function default to () and {} 
+     (ie. an empty tuple and dict), and so this function should have a 
+     signature like def formatter_func(*args, **kwargs). We use the 
+     get_structlog_formatter function like this to ensure that we can use
+     structlog when configuring via a file and when not.
+     
+     Link to the relevant docs, I had to infer the above about the default arguments - 
+     https://docs.python.org/3/library/logging.config.html#configuration-file-format
+    """
 
-def get_structlog_formatter():
-    
-    try:  # Attempt to use ujson if available https://pypi.org/project/ujson/
-        import ujson as json
-    except:  # Fall back to standard library json
-        import json        
-
+    # Intentionally using stdlib JSON here as ujson.dumps doesn't accept all the 
+    # named arguments that structlog expects. This is fine as the ASL Engine doesn't
+    # log overly much anyway
     formatter = structlog.stdlib.ProcessorFormatter(
         processor=structlog.processors.JSONRenderer(json.dumps),
         foreign_pre_chain=shared_processors,

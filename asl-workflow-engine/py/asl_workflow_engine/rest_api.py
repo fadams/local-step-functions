@@ -77,7 +77,6 @@ aws stepfunctions --endpoint http://localhost:4584 get-execution-history --execu
 import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
-
 import re, time, uuid, logging, opentracing
 from datetime import datetime, timezone
 from flask import Flask, escape, request, jsonify, abort
@@ -888,5 +887,14 @@ class RestAPI(object):
                 )
                 return "InternalError", 500
 
-        return app
+        # Have an endpoint to check the health of the ASL engine
+        @app.route("/health")
+        def health_check():
+            # Check if the session channel is open (alike session.channel.is_open())
+            # Give response dependent on outcome of session
+            if self.event_dispatcher.session.is_open():
+                return "Ok", 200
+            else:
+                return "Service Unavailable: Service liveness probe failed due to an internal error.", 503
 
+        return app

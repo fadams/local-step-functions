@@ -89,7 +89,6 @@ from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.open_tracing_factory import span_context, inject_span
 from asl_workflow_engine.arn import *
 from asl_workflow_engine.state_engine import MAX_DATA_LENGTH, MAX_STATE_MACHINE_LENGTH
-
 try:  # Attempt to use ujson if available https://pypi.org/project/ujson/
     import ujson as json
 except:  # Fall back to standard library json
@@ -204,6 +203,16 @@ class RestAPI(object):
             )
             return content, http_headers
 
+        # Have an endpoint to check the health of the ASL engine
+        @app.route("/health")
+        async def health_check():
+            # Check if the session channel is open (alike session.channel.is_open())
+            # Give response dependent on outcome of session
+            if self.event_dispatcher.session.is_open():
+                return "Ok", 200
+            else:
+                return "Service Unavailable: Service liveness probe failed due to an internal error.", 503
+        
         """
         Flask/Quart "catch-all" URL
         see https://gist.github.com/fitiavana07/bf4eb97b20bbe3853681e153073c0e5e
