@@ -45,19 +45,18 @@ from asl_workflow_engine.open_tracing_factory import create_tracer
 
 iterate2_ASL = """{
     "Comment": "State Machine to illustrate iterating an array and passing each array item to a child Step Function",
-    "StartAt": "IsEmptyArray",
+    "StartAt": "HasIndexZero",
     "States": {
-        "IsEmptyArray": {
-            "Comment": "This Choice state checks for an empty array. Note that it relies on the JSONPath engine explicitly returning False if the path fails to match. As it happens the Python jsonpath library does this but I've not checked the behaviour of AWS StepFunctions for this edge case yet. It is possible that a Task state may be required to return an explicit value for an empty array but it depends on the JSONPath implementation and returning False for ths case is reasonable behaviour though the JSONPath specification is unclear about what should happen in this case.",
+        "HasIndexZero": {
             "Type": "Choice",
             "Choices": [
                 {
                     "Variable": "$[0]",
-                    "BooleanEquals": false,
-                    "Next": "EndState"
+                    "IsPresent": true,
+                    "Next": "StepFunctionLauncher"
                 }
             ],
-            "Default": "StepFunctionLauncher"
+            "Default": "EndState"
         },
         "StepFunctionLauncher": {
             "Comment": "Launch the child Step Function. In the Parameters section we extract the first item from the array passed as input to the state and use that as the input to the child Step Function. The ResultPath of null causes the input to be passed to the output.",
@@ -68,15 +67,28 @@ iterate2_ASL = """{
                 "StateMachineArn": "arn:aws:states:local:0123456789:stateMachine:child_state_machine"
             },
             "ResultPath": null,
-            "Next": "RemoveFirstItemFromArray"
+            "Next": "HasMultipleElements"
+        },
+        "HasMultipleElements": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$[1:]",
+                    "IsPresent": true,
+                    "Next": "RemoveFirstItemFromArray"
+                }
+            ],
+            "Default": "EndState"
         },
         "RemoveFirstItemFromArray": {
             "Type": "Pass",
             "InputPath": "$[1:]",
-            "Next": "IsEmptyArray"
+            "Next": "StepFunctionLauncher"
         },
         "EndState": {
-            "Type": "Succeed"
+            "Type": "Pass",
+            "End": true,
+            "Parameters": []
         }
     }
 }"""

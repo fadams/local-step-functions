@@ -515,12 +515,17 @@ class StateEngine(object):
         context = event["context"]
         state = context["State"]
         execution_arn = context["Execution"]["Id"]
-        self.update_execution_history(
-            state_machine_type,
-            execution_arn,
-            state_type + "StateExited",
-            {"output": output_as_string, "name": state["Name"]},
-        )
+
+        execution_failed = isinstance(data, dict) and data.get("Error")
+
+        # Stepfunctions don't transition to StateExited if the execution fails.
+        if not execution_failed:
+            self.update_execution_history(
+                state_machine_type,
+                execution_arn,
+                state_type + "StateExited",
+                {"output": output_as_string, "name": state["Name"]},
+            )
 
         if state_machine_type == "STANDARD":
             execution_detail = self.executions[execution_arn]
@@ -563,7 +568,7 @@ class StateEngine(object):
                 "execution_arn": execution_arn
             }
         ) as scope:
-            if isinstance(data, dict) and data.get("Error"):
+            if execution_failed:
                 opentracing.tracer.active_span.set_tag("error", True)
                 opentracing.tracer.active_span.log_kv(
                     {
@@ -897,8 +902,30 @@ class StateEngine(object):
             retry_matched = False
             catch_matched = False
 
+            if state_machine_type == "STANDARD":
+                execution_arn = context["Execution"]["Id"]
+                id = len(self.execution_history[execution_arn])
+                boiler_plate = (
+                    "An error occurred while executing the state "
+                    "'{}' (entered at the event id #{}). "
+                ).format(current_state, id)
+            else:
+                boiler_plate = (
+                    "An error occurred while executing the state '{}'. "
+                ).format(current_state)
+
+            """
+            An execution failed due to some exception that could not be
+            processed. Often these are caused by errors at runtime, such
+            as attempting to apply InputPath or OutputPath on a null
+            JSON payload. A States.Runtime error is not retriable, and
+            will always cause the execution to fail.
+            A retry or catch on States.ALL will not catch States.Runtime errors. 
+            """
+            runtime_error = (error_type == "States.Runtime")
+
             retry = state.get("Retry")
-            if retry and isinstance(retry, list):
+            if not runtime_error and retry and isinstance(retry, list):
                 for retrier in retry:
                     """
                     Each Retrier MUST contain a field named “ErrorEquals”
@@ -975,7 +1002,7 @@ class StateEngine(object):
             Catcher transition if the retry policy fails to resolve the error.
             """
             catch = state.get("Catch")
-            if not retry_matched and catch and isinstance(catch, list):
+            if not runtime_error and not retry_matched and catch and isinstance(catch, list):
                 for catcher in catch:
                     """
                     Each Catcher MUST contain a field named “ErrorEquals”,
@@ -1011,7 +1038,7 @@ class StateEngine(object):
                         """
                         result = {"Error": error_type}
                         if error_message:
-                            result["Cause"] = error_message
+                            result["Cause"] = boiler_plate + error_message
 
                         """
                         A Catcher MAY have an “ResultPath” field, which works
@@ -1040,7 +1067,7 @@ class StateEngine(object):
             if not retry_matched and not catch_matched:
                 result = {"Error": error_type}
                 if error_message:
-                    result["Cause"] = error_message
+                    result["Cause"] = boiler_plate + error_message
 
                 event["data"] = result
                 self.end_execution(state_machine_type, state_type, event)
@@ -1082,37 +1109,33 @@ class StateEngine(object):
             to its output, performing no work. Pass States are useful when
             constructing and debugging state machines.
             """
-            input = apply_path(data, context, state.get("InputPath", "$"))
-
-            """
-            https://states-language.net/spec.html#using-paths
-
-            If the “Parameters” field is provided, its value, after the
-            extraction and embedding, becomes the effective input.
-            """
             try:
+                input = apply_path(data, context, state.get("InputPath", "$"))
+
+                """
+                https://states-language.net/spec.html#using-paths
+
+                If the “Parameters” field is provided, its value, after the
+                extraction and embedding, becomes the effective input.
+                """
                 parameters = evaluate_payload_template(
                     input, context, state.get("Parameters")
                 )
-            except IntrinsicFailure as e:
-                handle_error("States.IntrinsicFailure", str(e))
-                self.event_dispatcher.acknowledge(id)
-                return
 
-            """
-            A Pass State MAY have a field named “Result”. If present, its value
-            is treated as the output of a virtual task, and placed as prescribed
-            by the “ResultPath” field, if any, to be passed on to the next state.
+                """
+                A Pass State MAY have a field named “Result”. If present, its
+                value is treated as the output of a virtual task, and placed as
+                prescribed by the “ResultPath” field, if any, to be passed on
+                to the next state.
 
-            If “Result” is not provided, the output is the input. Thus if neither
-            neither “Result” nor “ResultPath” are provided, the Pass state
-            copies its input through to its output.
-            """
-            result = state.get(
-                "Result", parameters
-            ) # Default is the "effective input" as per ASL spec.
+                If “Result” is not provided, the output is the input. Thus if
+                neither “Result” nor “ResultPath” are provided, the Pass state
+                copies its input through to its output.
+                """
+                result = state.get(
+                    "Result", parameters
+                ) # Default is the "effective input" as per ASL spec.
 
-            try:
                 # Pass state applies ResultPath to "raw input"
                 event["data"] = merge_result(data, context, result, state)
 
@@ -1126,6 +1149,12 @@ class StateEngine(object):
                         event
                     )
                     self.event_dispatcher.acknowledge(id)
+            except IntrinsicFailure as e:
+                handle_error("States.IntrinsicFailure", str(e))
+                self.event_dispatcher.acknowledge(id)
+            except PathMatchFailure as e:
+                handle_error("States.Runtime", str(e))
+                self.event_dispatcher.acknowledge(id)
             except ResultPathMatchFailure as e:
                 handle_error("States.ResultPathMatchFailure", str(e))
                 self.event_dispatcher.acknowledge(id)
@@ -1193,91 +1222,98 @@ class StateEngine(object):
                                 event
                             )
                             self.event_dispatcher.acknowledge(id)
-                    except ResultPathMatchFailure as e:
-                        handle_error("States.ResultPathMatchFailure", str(e))
-                        self.event_dispatcher.acknowledge(id)
                     except IntrinsicFailure as e:
                         handle_error("States.IntrinsicFailure", str(e))
                         self.event_dispatcher.acknowledge(id)
+                    except PathMatchFailure as e:
+                        handle_error("States.Runtime", str(e))
+                        self.event_dispatcher.acknowledge(id)
+                    except ResultPathMatchFailure as e:
+                        handle_error("States.ResultPathMatchFailure", str(e))
+                        self.event_dispatcher.acknowledge(id)
 
 
-            input = apply_path(data, context, state.get("InputPath", "$"))
-
-            """
-            The Task State (identified by "Type":"Task") causes the interpreter
-            to execute the work identified by the state’s “Resource” field.
-
-            A Task State MUST include a “Resource” field, whose value MUST be a
-            URI that uniquely identifies the specific task to execute. The
-            States language does not constrain the URI scheme nor any other part
-            of the URI.
-            """
-            resource_arn = state.get("Resource")
-
-            """
-            https://states-language.net/spec.html#using-paths
-
-            If the “Parameters” field is provided, its value, after the
-            extraction and embedding, becomes the effective input.
-            """
             try:
+                input = apply_path(data, context, state.get("InputPath", "$"))
+
+                """
+                The Task State (identified by "Type":"Task") causes the interpreter
+                to execute the work identified by the state’s “Resource” field.
+
+                A Task State MUST include a “Resource” field, whose value MUST
+                be a URI that uniquely identifies the specific task to execute.
+                The States language does not constrain the URI scheme nor any
+                other part of the URI.
+                """
+                resource_arn = state.get("Resource")
+
+                """
+                https://states-language.net/spec.html#using-paths
+
+                If the “Parameters” field is provided, its value, after the
+                extraction and embedding, becomes the effective input.
+                """
                 parameters = evaluate_payload_template(
                     input, context, state.get("Parameters")
+                )
+
+                """
+                Tasks can optionally specify timeouts. Timeouts (the
+                “TimeoutSeconds” and “HeartbeatSeconds” fields) are specified
+                in seconds and MUST be positive integers. If provided, the
+                “HeartbeatSeconds” interval MUST be smaller than the
+                “TimeoutSeconds” value.
+
+                If the state runs longer than the specified timeout, or if
+                more time than the specified heartbeat elapses between
+                heartbeats from the task, then the interpreter fails the state
+                with a States.Timeout Error Name.
+
+                Get the execution and state entry timestamps and the execution
+                and state timeout values (if present) and use those to compute
+                the Task expiry time that will be checked against the current
+                time each heartbeat and will eventually result in the Task
+                returning a States.Timeout Error if it expires before it
+                completes. The default State Machine execution timeout is
+                1 year 60*60*24*365 = 31536000
+                https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
+                The default Task state timeout is more confusing as this document
+                https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-task-state.html says: "If not provided, the default value is 99999999" whereas
+                https://states-language.net/spec.html#task-state says "If not
+                provided, the default value of “TimeoutSeconds” is 60."
+                """
+                current_timestamp = time.time()
+
+                start_time = context["Execution"].get("StartTime")
+                execution_timestamp = parse_rfc3339_datetime(start_time).timestamp()
+                execution_timeout = ASL.get("TimeoutSeconds", 31536000)
+                t1 = (execution_timestamp + execution_timeout - current_timestamp) * 1000
+
+                entered_time = context["State"].get("EnteredTime")
+                state_timestamp = parse_rfc3339_datetime(entered_time).timestamp()
+
+                state_timeout = state.get("TimeoutSecondsPath")
+                if state_timeout:
+                    state_timeout = apply_path(data, context, state_timeout)
+                    state_timeout = state_timeout if isinstance(state_timeout, int) else 0
+                else:
+                    state_timeout = state.get("TimeoutSeconds", 99999999)
+                    #state_timeout = state.get("TimeoutSeconds", 60)  # 60s default
+                    #state_timeout = state.get("TimeoutSeconds", 10)  # 10s default
+
+                t2 = (state_timestamp + state_timeout - current_timestamp) * 1000
+
+                timeout = t1 if t1 < t2 else t2
+
+                self.task_dispatcher.execute_task(
+                    resource_arn, parameters, on_response, timeout, context
                 )
             except IntrinsicFailure as e:
                 handle_error("States.IntrinsicFailure", str(e))
                 self.event_dispatcher.acknowledge(id)
-                return
-
-            """
-            Tasks can optionally specify timeouts. Timeouts (the “TimeoutSeconds”
-            and “HeartbeatSeconds” fields) are specified in seconds and MUST be
-            positive integers. If provided, the “HeartbeatSeconds” interval MUST
-            be smaller than the “TimeoutSeconds” value.
-
-            If the state runs longer than the specified timeout, or if more time
-            than the specified heartbeat elapses between heartbeats from the task,
-            then the interpreter fails the state with a States.Timeout Error Name.
-
-            Get the execution and state entry timestamps and the execution and
-            state timeout values (if present) and use those to compute the
-            Task expiry time that will be checked against the current time each
-            heartbeat and will eventually result in the Task returning a
-            States.Timeout Error if it expires before it completes. The default
-            State Machine execution timeout is 1 year 60*60*24*365 = 31536000
-            https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
-            The default Task state timeout is more confusing as this document
-            https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-task-state.html says: "If not provided, the default value is 99999999" whereas
-            https://states-language.net/spec.html#task-state says "If not
-            provided, the default value of “TimeoutSeconds” is 60."
-            """
-            current_timestamp = time.time()
-
-            start_time = context["Execution"].get("StartTime")
-            execution_timestamp = parse_rfc3339_datetime(start_time).timestamp()
-            execution_timeout = ASL.get("TimeoutSeconds", 31536000)
-            t1 = (execution_timestamp + execution_timeout - current_timestamp) * 1000
-
-            entered_time = context["State"].get("EnteredTime")
-            state_timestamp = parse_rfc3339_datetime(entered_time).timestamp()
-
-
-            state_timeout = state.get("TimeoutSecondsPath")
-            if state_timeout:
-                state_timeout = apply_path(data, context, state_timeout)
-                state_timeout = state_timeout if isinstance(state_timeout, int) else 0
-            else:
-                state_timeout = state.get("TimeoutSeconds", 99999999)
-                #state_timeout = state.get("TimeoutSeconds", 60)  # 60s default
-                #state_timeout = state.get("TimeoutSeconds", 10)  # 10s default
-
-            t2 = (state_timestamp + state_timeout - current_timestamp) * 1000
-
-            timeout = t1 if t1 < t2 else t2
-
-            self.task_dispatcher.execute_task(
-                resource_arn, parameters, on_response, timeout, context
-            )
+            except PathMatchFailure as e:
+                handle_error("States.Runtime", str(e))
+                self.event_dispatcher.acknowledge(id)
 
         def asl_state_Task():
             """
@@ -1303,7 +1339,12 @@ class StateEngine(object):
             InputPath & OutputPath are allowed (but unusual) in Choice states.
             https://states-language.net/spec.html#statetypes
             """
-            input = apply_path(data, context, state.get("InputPath", "$"))
+            try:
+                input = apply_path(data, context, state.get("InputPath", "$"))
+            except PathMatchFailure as e:
+                handle_error("States.Runtime", str(e))
+                self.event_dispatcher.acknowledge(id)
+                return
 
             """
             The choose function implements the actual choice logic. We must
@@ -1517,7 +1558,13 @@ class StateEngine(object):
             """
             next_state = next_state if next_state else state.get("Default")
 
-            event["data"] = apply_path(input, context, state.get("OutputPath", "$"))
+            try:
+                event["data"] = apply_path(input, context, state.get("OutputPath", "$"))
+            except PathMatchFailure as e:
+                handle_error("States.Runtime", str(e))
+                self.event_dispatcher.acknowledge(id)
+                return
+
             """
             The interpreter will raise a run-time States.NoChoiceMatched error
             if a “Choice” state fails to match a Choice Rule and no “Default”
@@ -1549,7 +1596,12 @@ class StateEngine(object):
             https://states-language.net/spec.html#statetypes. This is defined
             before on_timeout() so that input is captured in its closure.
             """
-            input = apply_path(data, context, state.get("InputPath", "$"))
+            try:
+                input = apply_path(data, context, state.get("InputPath", "$"))
+            except PathMatchFailure as e:
+                handle_error("States.Runtime", str(e))
+                self.event_dispatcher.acknowledge(id)
+                return
 
             """
             It's important for this function to be nested as we want the event,
@@ -1557,16 +1609,20 @@ class StateEngine(object):
             timeout actually fires.
             """
             def on_timeout():
-                event["data"] = apply_path(input, context, state.get("OutputPath", "$"))
-                if state.get("End"):
-                    handle_terminal_state(state_type, event, id)
-                else:
-                    self.change_state(
-                        state_machine_type,
-                        state_type,
-                        state.get("Next"),
-                        event
-                    )
+                try:
+                    event["data"] = apply_path(input, context, state.get("OutputPath", "$"))
+                    if state.get("End"):
+                        handle_terminal_state(state_type, event, id)
+                    else:
+                        self.change_state(
+                            state_machine_type,
+                            state_type,
+                            state.get("Next"),
+                            event
+                        )
+                        self.event_dispatcher.acknowledge(id)
+                except PathMatchFailure as e:
+                    handle_error("States.Runtime", str(e))
                     self.event_dispatcher.acknowledge(id)
 
             """
@@ -1616,29 +1672,33 @@ class StateEngine(object):
             entered_time = context["State"].get("EnteredTime")
             state_timestamp = parse_rfc3339_datetime(entered_time).timestamp()
 
-            timeout = 0
-            if seconds:
-                current_timestamp = time.time()
-                timeout = (state_timestamp + seconds - current_timestamp) * 1000
-            elif seconds_path:
-                seconds = apply_path(input, context, seconds_path)
+            try:
+                timeout = 0
                 if seconds:
                     current_timestamp = time.time()
                     timeout = (state_timestamp + seconds - current_timestamp) * 1000
-            elif timestamp:
-                timeout = get_timeout_from_rfc3339_datetime(timestamp)
-            elif timestamp_path:
-                timestamp = apply_path(input, context, timestamp_path)
-                if timestamp:
+                elif seconds_path:
+                    seconds = apply_path(input, context, seconds_path)
+                    if seconds:
+                        current_timestamp = time.time()
+                        timeout = (state_timestamp + seconds - current_timestamp) * 1000
+                elif timestamp:
                     timeout = get_timeout_from_rfc3339_datetime(timestamp)
+                elif timestamp_path:
+                    timestamp = apply_path(input, context, timestamp_path)
+                    if timestamp:
+                        timeout = get_timeout_from_rfc3339_datetime(timestamp)
 
-            """
-            Schedule the timeout. This is slightly subtle, the idea is that
-            the event instance, state and id for this call are wrapped in the
-            on_timeout function's closure, so when the timeout fires the correct
-            event should be published and the correct id acknowledged.
-            """
-            self.event_dispatcher.set_timeout(on_timeout, timeout)
+                """
+                Schedule the timeout. This is slightly subtle, the idea is that
+                the event instance, state and id for this call are wrapped in
+                the on_timeout function's closure, so when the timeout fires the
+                correct event should be published and the correct id acknowledged.
+                """
+                self.event_dispatcher.set_timeout(on_timeout, timeout)
+            except PathMatchFailure as e:
+                handle_error("States.Runtime", str(e))
+                self.event_dispatcher.acknowledge(id)
 
         def asl_state_Succeed():
             """
@@ -1654,9 +1714,13 @@ class StateEngine(object):
             InputPath & OutputPath are allowed (but unusual) in Succeed states.
             https://states-language.net/spec.html#statetypes
             """
-            input = apply_path(data, context, state.get("InputPath", "$"))
-            event["data"] = apply_path(input, context, state.get("OutputPath", "$"))
-            handle_terminal_state(state_type, event, id)
+            try:
+                input = apply_path(data, context, state.get("InputPath", "$"))
+                event["data"] = apply_path(input, context, state.get("OutputPath", "$"))
+                handle_terminal_state(state_type, event, id)
+            except PathMatchFailure as e:
+                handle_error("States.Runtime", str(e))
+                self.event_dispatcher.acknowledge(id)
 
         def asl_state_Fail():
             """
@@ -1698,63 +1762,66 @@ class StateEngine(object):
             The Parallel state passes its input (potentially as filtered by the
             “InputPath” field) as the input to each branch’s “StartAt” state.
             """
-            input = apply_path(data, context, state.get("InputPath", "$"))
-
-            """
-            https://states-language.net/spec.html#using-paths
-
-            If the “Parameters” field is provided, its value, after the
-            extraction and embedding, becomes the effective input.
-            """
             try:
+                input = apply_path(data, context, state.get("InputPath", "$"))
+
+                """
+                https://states-language.net/spec.html#using-paths
+
+                If the “Parameters” field is provided, its value, after the
+                extraction and embedding, becomes the effective input.
+                """
                 parameters = evaluate_payload_template(
                     input, context, state.get("Parameters")
                 )
+
+                """
+                A Parallel State MUST contain a field named “Branches” which
+                is an array whose elements MUST be objects. Each object MUST
+                contain fields named “States” and “StartAt” whose meanings are
+                exactly like those in the top level of a State Machine.
+
+                Iterate through the branches and launch each branch State Machine.
+    
+                The index of each branch and the Parallel state's raw input is
+                needed to create the final result, so we have to store those
+                in the context of the events traversing the branch state
+                machines. Moreover, it is possible that we could have Parallel
+                or Map states nested in the branch state machines. To cater for
+                this we add a "Branch" field to the "State" object in the
+                context. The "Branch" field is a list of objects holding Input
+                and Index as necessary. Each nested Map or Parallel state can
+                append to that list, which behaves like a stack.
+                """
+                context_state = context["State"]
+                if not "Branch" in context_state:
+                    context_state["Branch"] = []
+                context_state["Branch"].append({})
+
+                branches = state.get("Branches", [])
+                for index, branch in enumerate(branches):
+                    event["data"] = parameters
+                    branch_info = {
+                        "Parent": current_state,
+                        "Input": data,  # Save the raw input to the Parallel state
+                        "Index": index, # Index of the current branch
+                    }
+
+                    context_state["Name"] = branch.get("StartAt")
+                    context_state["EnteredTime"] = (
+                        datetime.now(timezone.utc).astimezone().isoformat()
+                    )
+                    context_state["Branch"][-1] = branch_info
+
+                    self.event_dispatcher.publish(event)
+
+                self.event_dispatcher.acknowledge(id)
             except IntrinsicFailure as e:
                 handle_error("States.IntrinsicFailure", str(e))
                 self.event_dispatcher.acknowledge(id)
-                return
-
-            """
-            A Parallel State MUST contain a field named “Branches” which is an
-            array whose elements MUST be objects. Each object MUST contain fields
-            named “States” and “StartAt” whose meanings are exactly like those
-            in the top level of a State Machine.
-
-            Iterate through the branches and launch each branch State Machine.
-
-            The index of each branch and the Parallel state's raw input is
-            needed to create the final result, so we have to store those in the
-            context of the events traversing the branch state machines. Moreover,
-            it is possible that we could have Parallel or Map states nested in
-            the branch state machines. To cater for this we add a "Branch" field
-            to the "State" object in the context. The "Branch" field is a list
-            of objects holding Input and Index as necessary. Each nested Map or
-            Parallel state can append to that list, which behaves like a stack.
-            """
-            context_state = context["State"]
-            if not "Branch" in context_state:
-                context_state["Branch"] = []
-            context_state["Branch"].append({})
-
-            branches = state.get("Branches", [])
-            for index, branch in enumerate(branches):
-                event["data"] = parameters
-                branch_info = {
-                    "Parent": current_state,
-                    "Input": data,  # Save the raw input to the Parallel state
-                    "Index": index, # Index of the current branch
-                }
-
-                context_state["Name"] = branch.get("StartAt")
-                context_state["EnteredTime"] = (
-                    datetime.now(timezone.utc).astimezone().isoformat()
-                )
-                context_state["Branch"][-1] = branch_info
-
-                self.event_dispatcher.publish(event)
-
-            self.event_dispatcher.acknowledge(id)
+            except PathMatchFailure as e:
+                handle_error("States.Runtime", str(e))
+                self.event_dispatcher.acknowledge(id)
 
         def get_start_index(context):
             """
@@ -1789,179 +1856,181 @@ class StateEngine(object):
 
             The “InputPath” field operates as usual, selecting part of the raw input .
             """
-            input = apply_path(data, context, state.get("InputPath", "$"))
+            try:
+                input = apply_path(data, context, state.get("InputPath", "$"))
 
-            """
-            The “ItemsPath” field’s value is a reference path identifying where
-            in the effective input the array field is found.
-
-            The default value of “ItemsPath” is “$”, which is to say the whole
-            effective input. So, if a Map State has neither an “InputPath” nor a
-            “ItemsPath” field, it is assuming that the raw input to the state
-            will be a JSON array.
-            """
-            items_path = apply_path(input, context, state.get("ItemsPath", "$"))
-            if not isinstance(items_path, list):
-                items_path = []
-
-            length = len(items_path)
-
-            """
-            A Map State MUST contain an object field named “Iterator” which MUST
-            contain fields named “States” and “StartAt”, whose meanings are
-            exactly like those in the top level of a State Machine.
-
-            The “Iterator” field’s value is an object that defines a state
-            machine which will process each element of the array.
-            """
-            iterator = state.get("Iterator", {})
-
-            """
-            The “MaxConcurrency” field’s value is an integer that provides an
-            upper bound on how many invocations of the Iterator may run in parallel.
-            """
-            max_concurrency = state.get("MaxConcurrency", 0)
-            if max_concurrency == 0:
-                max_concurrency = length
-
-            """
-            Save these values from the Map state. We want to use these values
-            in the context evaluated by the parameter evaluation.
-            """
-            context_state = context["State"]
-            map_state_name = context_state["Name"]
-            map_state_entered = context_state["EnteredTime"]
-
-            """
-            Iterate through the items_path and launch each item's State Machine.
-            The index and value of each item is needed to evaluate the parameter,
-            so we store it in the "Map" field of the context as described in the
-            AWS documentation for the context object.
-            https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
-
-            Also, like the Parallel state, the index of each branch and the Map
-            state's raw input is needed to create the final result, so we again
-            add a "Branch" field to the "State" object in the context.
-
-            The start variable is used with MaxConcurrency. We collect results
-            for each "block" of MaxConcurrency results and when all have been
-            returned we publish a new event to re-enter the Map state, with a
-            start incremented by MaxConcurrency. We carry on collecting
-            blocks of MaxConcurrency and re-entering the Map state with updated
-            start until we have finished processing all items in items_path.
-            """
-            if length and not "Branch" in context_state:
-                context_state["Branch"] = []
-
-            start = get_start_index(context)
-            if length and start == 0:
-                context_state["Branch"].append({})
-
-            end = min(start + max_concurrency, length)
-
-            """
-            Need to iterate through the items_path list between start and end
-            indices and also retrieve the current index. This is quite fiddly
-            in Python when compared to doing similar in lower level languages. 
-            https://stackoverflow.com/questions/34384523/how-can-loop-through-a-list-from-a-certain-index
-            """
-            for index, item in enumerate(items_path[start:end], start=start):
                 """
-                Ensure the context evaluated by the parameter evaluation is
-                that of the parent Map state not the new Iterator StartAt state.
+                The “ItemsPath” field’s value is a reference path identifying
+                where in the effective input the array field is found.
+
+                The default value of “ItemsPath” is “$”, which is to say the
+                whole effective input. So, if a Map State has neither an
+                “InputPath” nor a “ItemsPath” field, it is assuming that the
+                raw input to the state will be a JSON array.
                 """
-                context_state["Name"] = map_state_name
-                context_state["EnteredTime"] = map_state_entered
+                items_path = apply_path(input, context, state.get("ItemsPath", "$"))
+                if not isinstance(items_path, list):
+                    items_path = []
 
-                params = state.get("Parameters")
-                if params:
-                    # Store the index and value in the context as described above.
-                    context["Map"] = {
-                        "Item": {
-                            "Index": index,
-                            "Value": item,
-                        },
-                    }
+                length = len(items_path)
 
+                """
+                A Map State MUST contain an object field named “Iterator” which
+                MUST contain fields named “States” and “StartAt”, whose meanings
+                are exactly like those in the top level of a State Machine.
+
+                The “Iterator” field’s value is an object that defines a state
+                machine which will process each element of the array.
+                """
+                iterator = state.get("Iterator", {})
+
+                """
+                The “MaxConcurrency” field’s value is an integer that provides
+                an upper bound on how many invocations of the Iterator may run
+                in parallel.
+                """
+                max_concurrency = state.get("MaxConcurrency", 0)
+                if max_concurrency == 0:
+                    max_concurrency = length
+
+                """
+                Save these values from the Map state. We want to use these
+                values in the context evaluated by the parameter evaluation.
+                """
+                context_state = context["State"]
+                map_state_name = context_state["Name"]
+                map_state_entered = context_state["EnteredTime"]
+
+                """
+                Iterate through the items_path and launch each item's State
+                Machine. The index and value of each item is needed to evaluate
+                the parameter, so we store it in the "Map" field of the context
+                as described in the AWS documentation for the context object.
+                https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
+
+                Also, like the Parallel state, the index of each branch and the
+                Map state's raw input is needed to create the final result, so
+                we again add a "Branch" field to the "State" object in the context.
+
+                The start variable is used with MaxConcurrency. We collect
+                results for each "block" of MaxConcurrency results and when all
+                have been returned we publish a new event to re-enter the Map
+                state, with a start incremented by MaxConcurrency. We carry on
+                collecting blocks of MaxConcurrency and re-entering the Map
+                state with updated start until we have finished processing
+                all items in items_path.
+                """
+                if length and not "Branch" in context_state:
+                    context_state["Branch"] = []
+
+                start = get_start_index(context)
+                if length and start == 0:
+                    context_state["Branch"].append({})
+
+                end = min(start + max_concurrency, length)
+
+                """
+                Need to iterate through the items_path list between start and
+                end indices and also retrieve the current index. This is quite
+                fiddly in Python when compared to doing similar in lower level
+                languages. 
+                https://stackoverflow.com/questions/34384523/how-can-loop-through-a-list-from-a-certain-index
+                """
+                for index, item in enumerate(items_path[start:end], start=start):
                     """
-                    https://states-language.net/spec.html#using-paths
-
-                    If the “Parameters” field is provided, its value, after the
-                    extraction and embedding, becomes the effective input.
+                    Ensure the context evaluated by parameter evaluation is that
+                    of the parent Map state not the new Iterator StartAt state.
                     """
-                    try:
+                    context_state["Name"] = map_state_name
+                    context_state["EnteredTime"] = map_state_entered
+
+                    params = state.get("Parameters")
+                    if params:
+                        # Store the index and value in the context as described above.
+                        context["Map"] = {
+                            "Item": {
+                                "Index": index,
+                                "Value": item,
+                            },
+                        }
+
+                        """
+                        https://states-language.net/spec.html#using-paths
+
+                        If the “Parameters” field is provided, its value, after
+                        extraction and embedding, becomes the effective input.
+                        """
                         parameters = evaluate_payload_template(
                             input, context, params
                         )
-                    except IntrinsicFailure as e:
-                        handle_error("States.IntrinsicFailure", str(e))
-                        self.event_dispatcher.acknowledge(id)
-                        return
 
-                    del context["Map"]  # Delete after parameters have been processed
+                        del context["Map"]  # Delete after parameters have been processed
+                    else:
+                        """
+                        If no parameters are supplied the effective input to the
+                        iteration is the current item i.e $$.Map.Item.Value
+                        """
+                        parameters = item
+
+                    event["data"] = parameters
+                    branch_info = {
+                        "Parent": current_state,
+                        "Input": data,     # Save the raw input to the Map state
+                        "Index": index,    # Index of the current branch
+                        "Length": length,  # Number of branches/Iterator instances
+                    }
+                    if start:
+                        branch_info["Start"] = start
+
+                    context_state["Name"] = iterator.get("StartAt")
+                    context_state["EnteredTime"] = (
+                        datetime.now(timezone.utc).astimezone().isoformat()
+                    )
+                    context_state["Branch"][-1] = branch_info
+
+                    self.event_dispatcher.publish(event)
+
+                """
+                It's not clear what the correct course of action is when the
+                effective input is empty, none of the documentation covers this.
+                Most likely the result is just an empty array, need to check...
+                """
+                if length:
+                    self.event_dispatcher.acknowledge(id)
                 else:
                     """
-                    If no parameters are supplied the effective input to the
-                    iteration is the current item i.e $$.Map.Item.Value
+                    https://states-language.net/spec.html#using-paths
+
+                    The value of "ResultSelector" MUST be a Payload Template,
+                    whose input is the result, and whose payload replaces and
+                    becomes the effective result.
                     """
-                    parameters = item
-
-                event["data"] = parameters
-                branch_info = {
-                    "Parent": current_state,
-                    "Input": data,     # Save the raw input to the Map state
-                    "Index": index,    # Index of the current branch
-                    "Length": length,  # Number of branches/Iterator instances
-                }
-                if start:
-                    branch_info["Start"] = start
-
-                context_state["Name"] = iterator.get("StartAt")
-                context_state["EnteredTime"] = (
-                    datetime.now(timezone.utc).astimezone().isoformat()
-                )
-                context_state["Branch"][-1] = branch_info
-
-                self.event_dispatcher.publish(event)
-
-            """
-            It's not clear what the correct course of action is when the
-            effective input is empty, as none of the documentation covers this.
-            Most likely the result is just an empty array, need to check though.
-            """
-            if length:
-                self.event_dispatcher.acknowledge(id)
-            else:
-                """
-                https://states-language.net/spec.html#using-paths
-
-                The value of "ResultSelector" MUST be a Payload Template, whose
-                input is the result, and whose payload replaces and becomes the
-                effective result.
-                """
-                try:
                     result = evaluate_payload_template(
                         [], context, state.get("ResultSelector")
                     )
-                except IntrinsicFailure as e:
-                    handle_error("States.IntrinsicFailure", str(e))
-                    self.event_dispatcher.acknowledge(id)
-                    return
 
-                # Parallel and Map states apply ResultPath to "raw input"
-                event["data"] = merge_result(data, context, result, state)
+                    # Parallel and Map states apply ResultPath to "raw input"
+                    event["data"] = merge_result(data, context, result, state)
 
-                if state.get("End"):
-                    handle_terminal_state(state_type, event, id)
-                else:
-                    self.change_state(
-                        state_machine_type,
-                        state_type,
-                        state.get("Next"),
-                        event
-                    )
-                    self.event_dispatcher.acknowledge(id)
-
+                    if state.get("End"):
+                        handle_terminal_state(state_type, event, id)
+                    else:
+                        self.change_state(
+                            state_machine_type,
+                            state_type,
+                            state.get("Next"),
+                            event
+                        )
+                        self.event_dispatcher.acknowledge(id)
+            except IntrinsicFailure as e:
+                handle_error("States.IntrinsicFailure", str(e))
+                self.event_dispatcher.acknowledge(id)
+            except PathMatchFailure as e:
+                handle_error("States.Runtime", str(e))
+                self.event_dispatcher.acknowledge(id)
+            except ResultPathMatchFailure as e:
+                handle_error("States.ResultPathMatchFailure", str(e))
+                self.event_dispatcher.acknowledge(id)
 
         def asl_state_collect_results(state_type):
             """
@@ -2072,6 +2141,8 @@ class StateEngine(object):
                 result = evaluate_payload_template(
                     result, context, state.get("ResultSelector")
                 )
+
+                event["data"] = merge_result(data, context, result, state)
             except IntrinsicFailure as e:
                 handle_error("States.IntrinsicFailure", str(e))
                 # Acknowledge the events for each branch's terminal state
@@ -2079,8 +2150,20 @@ class StateEngine(object):
                     if event_id:
                         self.event_dispatcher.acknowledge(event_id)
                 return
-
-            event["data"] = merge_result(data, context, result, state)
+            except PathMatchFailure as e:
+                handle_error("States.Runtime", str(e))
+                # Acknowledge the events for each branch's terminal state
+                for event_id in event_ids:
+                    if event_id:
+                        self.event_dispatcher.acknowledge(event_id)
+                return
+            except ResultPathMatchFailure as e:
+                handle_error("States.ResultPathMatchFailure", str(e))
+                # Acknowledge the events for each branch's terminal state
+                for event_id in event_ids:
+                    if event_id:
+                        self.event_dispatcher.acknowledge(event_id)
+                return
 
             """
             Publish any new state change before acknowledging the events.

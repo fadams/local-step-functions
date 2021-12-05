@@ -27,6 +27,7 @@ import unittest
 import json
 
 from asl_workflow_engine.state_engine_paths import apply_jsonpath
+from asl_workflow_engine.asl_exceptions import *
 
 """
 JSON document for use by examples from https://goessner.net/articles/JsonPath/
@@ -64,6 +65,14 @@ goessner = { "store": {
       "price": 19.95
     }
   }
+}
+
+simple_array = {
+    "inputs": ["index 0", "index 1"]
+}
+
+empty_array = {
+    "inputs": []
 }
 
 
@@ -154,6 +163,24 @@ class TestStateEnginePaths(unittest.TestCase):
         the returned list will potentially reflect that ordering. Comparing
         correctly is therefore long and rather tedious.
         """
+
+    def test_index_out_of_bounds(self):
+        print("Apply path with index out of bounds")
+
+        result = None
+        try:
+            result = apply_jsonpath(simple_array, "$.inputs[2]")
+        except PathMatchFailure as e:
+            print("Correctly caught exception PathMatchFailure")
+
+        self.assertEqual(result, None)
+
+        try:
+            result = apply_jsonpath(empty_array, "$.inputs[0]")
+        except PathMatchFailure as e:
+            print("Correctly caught exception PathMatchFailure")
+
+        self.assertEqual(result, None)
 
 if __name__ == "__main__":
     unittest.main()

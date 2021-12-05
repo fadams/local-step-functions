@@ -36,13 +36,13 @@ assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 import re
 
 """
-ASL paths use JSONPath
+ASL paths use JSONPath.
 https://goessner.net/articles/JsonPath/
 http://www.ultimate.com/phil/python/#jsonpath
 Tested using jsonpath 0.82. Note jsponpath_rw was tried but doesn't seem to
-correctly support many of the test cases from the goessner link above
+correctly support many of the test cases from the goessner link above.
 """
-from jsonpath import jsonpath  # sudo pip3 install jsonpath
+from jsonpath import jsonpath  # pip3 install jsonpath
 
 from asl_workflow_engine.asl_exceptions import *
 
@@ -52,7 +52,8 @@ except:  # Fall back to standard library json
     import json
 
 
-def apply_jsonpath(input, path="$", throw_exception_on_failed_match=False):
+#def apply_jsonpath(input, path="$", throw_exception_on_failed_match=False):
+def apply_jsonpath(input, path="$", throw_exception_on_failed_match=True):
     """
     Performs the InputPath and OutputPath logic described in the ASL spec.
     https://states-language.net/spec.html#filters
@@ -60,17 +61,16 @@ def apply_jsonpath(input, path="$", throw_exception_on_failed_match=False):
 
     The throw_exception_on_failed_match parameter allows callers to select
     whether a failed JSONPath match will throw an exception or just return {}.
-    This is because it's a little unclear what the best/most useful behaviour
-    is in this circumstance. The default is currently to return an empty object
+    This is because it's a little unclear what the most useful behaviour is
+    in this circumstance. The default was originally to return an empty object
     this is because the behaviour of InputPath and OutputPath being null is to
-    return an empty JSON object and a null JSONPath result is somewhat
-    consistent with this. OTOH throwing an exception on match failure
-    is also useful especially in the Choice state Variable field as that allows
-    us to match a BooleanEquals False Choice for the case of no JSONPath match.
-    TODO need to check what AWS StepFunctions actually do with these cases
-    'cause it's a bit poorly specified and I suspect that it also largely
-    depends on the underlying JSONPath engine - and what to do in this case
-    doesn't seem obvious from the JSONPath specification either.
+    return an empty JSON object and a null JSONPath result is consistent with
+    this. OTOH throwing an exception on a match failure is also useful....
+    AWS StepFunctions appears to fail executions in these cases, but it's a
+    bit poorly specified and largely depends on the underlying JSONPath engine. 
+    What to do in this case isn't obvious from the JSONPath specification either.
+    https://goessner.net/articles/JsonPath/
+    https://www.tbray.org/ongoing/When/201x/2017/04/14/JsonPath-Needs-Work
     """
     if input == None or path == None:
         return {}
@@ -80,7 +80,9 @@ def apply_jsonpath(input, path="$", throw_exception_on_failed_match=False):
 
     if result == False:
         if throw_exception_on_failed_match:
-            raise PathMatchFailure("JSONPath {} failed to match".format(path))
+            raise PathMatchFailure(
+                "Invalid path '{}' applied to input '{}'".format(path, input)
+            )
         else:
             return {}
 
@@ -102,7 +104,8 @@ def apply_jsonpath(input, path="$", throw_exception_on_failed_match=False):
 
     return result
 
-def apply_path(input, context, path="$", throw_exception_on_failed_match=False):
+#def apply_path(input, context, path="$", throw_exception_on_failed_match=False):
+def apply_path(input, context, path="$", throw_exception_on_failed_match=True):
     """
     https://states-language.net/spec.html#path
 
