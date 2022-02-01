@@ -757,6 +757,17 @@ class Producer(Destination):
             subject = message.subject
             routing_key = subject if subject else self.subject
 
+            # If message.expiration is set to an invalid value (like a
+            # non-numeric or a negative value) we "clamp" it to a "0"
+            clamped_expiration = None
+            if message.expiration is not None:
+                try:
+                    clamped_expiration=str(int(float(message.expiration)))
+                    if clamped_expiration.startswith("-"):
+                        clamped_expiration = "0"
+                except ValueError as e:
+                    clamped_expiration = "0"
+
             properties = pika.BasicProperties(
                 headers=message.properties,
                 content_type=message.content_type,
@@ -765,7 +776,7 @@ class Producer(Destination):
                 priority=message.priority,
                 correlation_id=message.correlation_id,
                 reply_to=message.reply_to,
-                expiration=str(int(float(message.expiration))) if message.expiration is not None else None,
+                expiration=clamped_expiration,
                 message_id=message.message_id,
                 timestamp=message.timestamp,
                 type=message.type,
