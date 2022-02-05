@@ -1288,6 +1288,9 @@ class StateEngine(object):
                 execution_timestamp = parse_rfc3339_datetime(start_time).timestamp()
                 execution_timeout = ASL.get("TimeoutSeconds", 31536000)
                 t1 = (execution_timestamp + execution_timeout - current_timestamp) * 1000
+                # Negative timeouts could occur if messages are redelivered or
+                # backlogged so we set them to 0 if that happens.
+                t1 = t1 if t1 > 0 else 0
 
                 entered_time = context["State"].get("EnteredTime")
                 state_timestamp = parse_rfc3339_datetime(entered_time).timestamp()
@@ -1302,7 +1305,12 @@ class StateEngine(object):
                     #state_timeout = state.get("TimeoutSeconds", 10)  # 10s default
 
                 t2 = (state_timestamp + state_timeout - current_timestamp) * 1000
+                # Negative timeouts could occur if messages are redelivered or
+                # backlogged so we set them to 0 if that happens.
+                t2 = t2 if t2 > 0 else 0
 
+                # The computed timeout is the lowest of the Execution timeout
+                # (t1) or the State timeout (t2). 
                 timeout = t1 if t1 < t2 else t2
 
                 self.task_dispatcher.execute_task(
@@ -1688,6 +1696,10 @@ class StateEngine(object):
                     timestamp = apply_path(input, context, timestamp_path)
                     if timestamp:
                         timeout = get_timeout_from_rfc3339_datetime(timestamp)
+
+                # Negative timeouts could occur if messages are redelivered or
+                # backlogged so we set them to 0 if that happens.
+                timeout = timeout if timeout > 0 else 0
 
                 """
                 Schedule the timeout. This is slightly subtle, the idea is that
