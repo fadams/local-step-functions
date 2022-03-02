@@ -277,7 +277,7 @@ class Session(object):
             callback_kw="on_open_callback"
         )
 
-    def acknowledge(self, message=None):
+    def acknowledge(self, message=None, threadsafe=False):
         """
         Acknowledge the given Message. If message is None, then all 
         unacknowledged messages on the session are acknowledged.
@@ -296,9 +296,23 @@ class Session(object):
         indicates acknowledgement of all outstanding messages.
         """
         if message == None:
-            self.channel.basic_ack(delivery_tag=0, multiple=True)
+            def ack():
+                """
+                The main purpose of this nested function is to make it fairly easy
+                to either directly call the underlying pika basic_ack or defer
+                to connection._adapter_add_callback_threadsafe as a callback.
+                """
+                self.channel.basic_ack(delivery_tag=0, multiple=True)
+
+            if threadsafe:
+                # If called from a foreign thread add ack to the event queue
+                # as this is the only thread safe Pika API call.
+                self.channel.connection._adapter_add_callback_threadsafe(ack)
+            else:
+                ack()
         else:
-            message.acknowledge(False)  # Only acknowledge the specific message.
+            # Only acknowledge the specific message.
+            message.acknowledge(multiple=False, threadsafe=threadsafe)
 
     def recover(self, requeue=False):
         """
@@ -1138,7 +1152,7 @@ class Message(object):
             self.properties["x-amqp-0-9-1.subject"] = subject
             # print(self.properties)
 
-    def acknowledge(self, multiple=True):
+    def acknowledge(self, multiple=True, threadsafe=False):
         """
         Acknowledge this Message.
 
@@ -1153,15 +1167,28 @@ class Message(object):
         indicates acknowledgement of all outstanding messages.
         """
         if hasattr(self, "_channel"):
-            if multiple:
+            def ack():
                 """
-                The multiple == True branch behaves like JMS Message.acknowledge()
-                https://docs.oracle.com/javaee/7/api/javax/jms/Message.html#acknowledge--
-                By invoking acknowledge on a consumed message, a client
-                acknowledges all messages consumed by the session that the
-                message was delivered to. 
+                The main purpose of this nested function is to make it fairly easy
+                to either directly call the underlying pika basic_ack or defer
+                to connection._adapter_add_callback_threadsafe as a callback.
                 """
-                self._channel.basic_ack(delivery_tag=0, multiple=True)
+                if multiple:
+                    """
+                    The multiple == True branch behaves like JMS Message.acknowledge()
+                    https://docs.oracle.com/javaee/7/api/javax/jms/Message.html#acknowledge--
+                    By invoking acknowledge on a consumed message, a client
+                    acknowledges all messages consumed by the session that the
+                    message was delivered to. 
+                    """
+                    self._channel.basic_ack(delivery_tag=0, multiple=True)
+                else:
+                    self._channel.basic_ack(delivery_tag=self._delivery_tag)
+
+            if threadsafe:
+                # If called from a foreign thread add ack to the event queue
+                # as this is the only thread safe Pika API call.
+                self._channel.connection._adapter_add_callback_threadsafe(ack)
             else:
-                self._channel.basic_ack(delivery_tag=self._delivery_tag)
+                ack()
 
