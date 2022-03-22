@@ -466,20 +466,39 @@ class StateEngine(object):
         state = context["State"]
 
         """
-        First check if the State's aggregate output has exceeded the 262144
+        First check next_state is not None. This shouldn't be the case as it is
+        invalid ASL, however in the absence of an effective ASL validity checker
+        in the ASL Engine at the moment this defensive logic will terminate
+        the execution should this situation occur.
+        """
+        if next_state == None:
+            error_message = ("An error occurred while executing the state '{}'. "
+                             "Mandatory \"Next\" field is missing."
+                             ).format(state["Name"])
+            event["data"] = {
+                "Error": "States.Runtime",
+                "Cause": error_message,
+            }
+            self.logger.error("States.Runtime: {}".format(error_message))
+            self.end_execution(state_machine_type, state_type, event)
+            return
+
+        """
+        Check if the State's aggregate output has exceeded the 262144
         character quota described in Stepfunction Quotas page.
         https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
         If so then we fail the execution.
         """
         if len(output_as_string) > MAX_DATA_LENGTH:
-            error_message = ("The state/task '{}' returned a result with a size "
-                             "exceeding the maximum number of characters "
-                             "service limit.").format(state["Name"])
+            error_message = ("An error occurred while executing the state '{}'. "
+                             "A result with a size exceeding the maximum "
+                             "number of characters service limit "
+                             "was returned.").format(state["Name"])
             event["data"] = {
                 "Error": "States.DataLimitExceeded",
                 "Cause": error_message,
             }
-            self.logger.warning("States.DataLimitExceeded: {}".format(error_message))
+            self.logger.error("States.DataLimitExceeded: {}".format(error_message))
             self.end_execution(state_machine_type, state_type, event)
             return
 
@@ -1193,7 +1212,7 @@ class StateEngine(object):
                                          )
                     else:
                         error_message = result.get("errorMessage", "")
-                    self.logger.warning("{}: {}".format(error_type, error_message))
+                    self.logger.error("{}: {}".format(error_type, error_message))
                     handle_error(error_type, error_message)
                     self.event_dispatcher.acknowledge(id)
                 else:  # No error
@@ -1587,7 +1606,7 @@ class StateEngine(object):
                 )
             else:
                 message = "Choice state {} failed to find a match for the condition field extracted from its input".format(current_state)
-                self.logger.warning("States.NoChoiceMatched {}".format(message))
+                self.logger.error("States.NoChoiceMatched {}".format(message))
                 handle_error("States.NoChoiceMatched", message)
 
             self.event_dispatcher.acknowledge(id)
@@ -2250,7 +2269,7 @@ class StateEngine(object):
                            "exceeded the maximum execution history size.").format(
                             execution_arn, execution_history_length
                           )
-                self.logger.info(message)
+                self.logger.error(message)
                 handle_error("States.ExecutionHistoryLimitExceeded", message)
                 self.event_dispatcher.acknowledge(id)
                 return
