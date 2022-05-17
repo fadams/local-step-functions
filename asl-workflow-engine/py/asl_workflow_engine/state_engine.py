@@ -592,6 +592,7 @@ class StateEngine(object):
                 opentracing.tracer.active_span.log_kv(
                     {
                         "message": "ExecutionFailed",
+                        "detail": output_as_string,
                     }
                 )
                 opentracing.tracer.active_span.set_tag("status", "FAILED")
