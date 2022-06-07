@@ -351,10 +351,47 @@ class RestAPI(object):
 
                 # TODO ASL Validator??
 
+                """
+                Handle the configuration describing where execution history
+                events are logged and their log level.
+                https://docs.aws.amazon.com/step-functions/latest/apireference/API_LoggingConfiguration.html
+                https://docs.aws.amazon.com/step-functions/latest/dg/cloudwatch-log-level.html
+                https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/iam-access-control-overview-cwl.html
+                """
+                logging_configuration = params.get("loggingConfiguration", {})
+                # Explicitly set default to OFF if not present in request.
+                logging_level = logging_configuration.get("level", "OFF")
+                logging_configuration["level"] = logging_level
+
+                if logging_level not in {"OFF", "ALL", "ERROR", "FATAL"}:
+                    self.logger.error(
+                        "RestAPI CreateStateMachine: Invalid logging configuration for State Machine '{}'.".format(name)
+                    )
+                    return aws_error("InvalidLoggingConfiguration"), 400
+
+                """
+                If level is not set to OFF the destinations field is required.
+                It is an array of objects that describes where execution
+                history events will be logged. Limited to size 1.
+                N.B. At present although destinations field is required for
+                levels other than OFF its value is currently ignored by the
+                ASL Engine.
+                """
+                if logging_level != "OFF":
+                    destinations = logging_configuration.get("destinations")
+                    if not (destinations and
+                            isinstance(destinations , list) and
+                            len(destinations) == 1):
+                        self.logger.error(
+                            "RestAPI CreateStateMachine: Invalid logging configuration for State Machine '{}'.".format(name)
+                        )
+                        return aws_error("InvalidLoggingConfiguration"), 400
+
                 creation_date = time.time()
                 self.asl_store[state_machine_arn] = {
                     "creationDate": creation_date,
                     "definition": definition,
+                    "loggingConfiguration": logging_configuration,
                     "name": name,
                     "roleArn": role_arn,
                     "stateMachineArn": state_machine_arn,
@@ -582,6 +619,45 @@ class RestAPI(object):
 
                 update_date = time.time()
                 state_machine["updateDate"] = update_date
+
+                """
+                Handle the configuration describing where execution history
+                events are logged and their log level.
+                https://docs.aws.amazon.com/step-functions/latest/apireference/API_LoggingConfiguration.html
+                https://docs.aws.amazon.com/step-functions/latest/dg/cloudwatch-log-level.html
+                https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/iam-access-control-overview-cwl.html
+                """
+                logging_configuration = params.get("loggingConfiguration", {})
+                if logging_configuration:
+                    # Explicitly set default to OFF if not present in request.
+                    logging_level = logging_configuration.get("level", "OFF")
+                    logging_configuration["level"] = logging_level
+
+                    if logging_level not in {"OFF", "ALL", "ERROR", "FATAL"}:
+                        self.logger.error(
+                            "RestAPI CreateStateMachine: Invalid logging configuration for State Machine '{}'.".format(name)
+                        )
+                        return aws_error("InvalidLoggingConfiguration"), 400
+
+                    """
+                    If level is not set to OFF the destinations field is required.
+                    It is an array of objects that describes where execution
+                    history events will be logged. Limited to size 1.
+                    N.B. At present although destinations field is required for
+                    levels other than OFF its value is currently ignored by the
+                    ASL Engine.
+                    """
+                    if logging_level != "OFF":
+                        destinations = logging_configuration.get("destinations")
+                        if not (destinations and
+                                isinstance(destinations , list) and
+                                len(destinations) == 1):
+                            self.logger.error(
+                                "RestAPI CreateStateMachine: Invalid logging configuration for State Machine '{}'.".format(name)
+                            )
+                            return aws_error("InvalidLoggingConfiguration"), 400
+
+                    state_machine["loggingConfiguration"] = logging_configuration
 
                 self.asl_store[state_machine_arn] = state_machine
 

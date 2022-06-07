@@ -63,7 +63,7 @@ ASL = """{
         },
         "SuccessLambda": {
             "Type": "Task",
-            "Resource": "arn:aws:rpcmessage:local::function:SuccessLambda",
+            "Resource": "arn:aws:rpcmessage:local::function:NonExistentLambda",
             "Next": "WaitState",
             "TimeoutSecondsPath": "$.timeout"
         },
@@ -93,22 +93,44 @@ if __name__ == '__main__':
     # ASL Workflow Engine
     # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html#boto3.session.Session.client
     sfn = boto3.client("stepfunctions", endpoint_url="http://localhost:4584")
-    state_machine_arn = "arn:aws:states:local:0123456789:stateMachine:error_handling_state_machine2"
+    state_machine_arn = "arn:aws:states:local:0123456789:stateMachine:error_handling3_state_machine"
 
     def create_state_machines():
         # Create state machine using a dummy roleArn. If it already exists an
         # exception will be thrown, we ignore that but raise other exceptions.
         try:
+            """
+            The Log group ARN format is described here:
+            https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/iam-access-control-overview-cwl.html
+            See also:
+            https://stackoverflow.com/questions/50273662/amazon-cloudwatch-how-to-find-arn-of-cloudwatch-log-group
+            N.B. This is purely for illustration, destinations is a required
+            field for logging levels other than OFF, but the contents of
+            the destinations field is currently ignored by the ASL engine
+            and only the level itself is actually used.
+            """
             response = sfn.create_state_machine(
-                name="error_handling_state_machine2", definition=ASL,
-                roleArn="arn:aws:iam::0123456789:role/service-role/MyRole"
+                name="error_handling3_state_machine", definition=ASL,
+                roleArn="arn:aws:iam::0123456789:role/service-role/MyRole",
+                loggingConfiguration={
+                    "level": "ALL",
+                    "destinations": [
+                        {"cloudWatchLogsLogGroup": {"logGroupArn": "arn:aws:logs:eu-west-2:0123456789:log-group:log_group_name"}}
+                    ]
+                }
             )
         except sfn.exceptions.StateMachineAlreadyExists as e:
             #print(e.response)
 
             response = sfn.update_state_machine(
                 stateMachineArn=state_machine_arn,
-                definition=ASL
+                definition=ASL,
+                loggingConfiguration={
+                    "level": "ALL",
+                    "destinations": [
+                        {"cloudWatchLogsLogGroup": {"logGroupArn": "arn:aws:logs:eu-west-2:0123456789:log-group:log_group_name"}}
+                    ]
+                }
             )
         except ClientError as e:
             logger.error(e)

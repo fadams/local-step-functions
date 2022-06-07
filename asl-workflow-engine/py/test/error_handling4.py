@@ -58,11 +58,11 @@ items = ['{"lambda":"Success"}']
 
 if __name__ == '__main__':
     # Initialise logger
-    logger = init_logging(log_name='error_handling4_state_machine')
+    logger = init_logging(log_name='error_handling4')
 
     # Initialising OpenTracing. It's important to do this before the boto3.client
     # call as create_tracer "patches" boto3 to add the OpenTracing hooks.
-    create_tracer("error_handling4_state_machine", {"implementation": "Jaeger"})
+    create_tracer("error_handling4", {"implementation": "Jaeger"})
 
     # Initialise the boto3 client setting the endpoint_url to our local
     # ASL Workflow Engine
@@ -74,16 +74,38 @@ if __name__ == '__main__':
         # Create state machine using a dummy roleArn. If it already exists an
         # exception will be thrown, we ignore that but raise other exceptions.
         try:
+            """
+            The Log group ARN format is described here:
+            https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/iam-access-control-overview-cwl.html
+            See also:
+            https://stackoverflow.com/questions/50273662/amazon-cloudwatch-how-to-find-arn-of-cloudwatch-log-group
+            N.B. This is purely for illustration, destinations is a required
+            field for logging levels other than OFF, but the contents of
+            the destinations field is currently ignored by the ASL engine
+            and only the level itself is actually used.
+            """
             response = sfn.create_state_machine(
                 name="error_handling4_state_machine", definition=ASL,
-                roleArn="arn:aws:iam::0123456789:role/service-role/MyRole"
+                roleArn="arn:aws:iam::0123456789:role/service-role/MyRole",
+                loggingConfiguration={
+                    "level": "ALL",
+                    "destinations": [
+                        {"cloudWatchLogsLogGroup": {"logGroupArn": "arn:aws:logs:eu-west-2:0123456789:log-group:log_group_name"}}
+                    ]
+                }
             )
         except sfn.exceptions.StateMachineAlreadyExists as e:
             #print(e.response)
 
             response = sfn.update_state_machine(
                 stateMachineArn=state_machine_arn,
-                definition=ASL
+                definition=ASL,
+                loggingConfiguration={
+                    "level": "ALL",
+                    "destinations": [
+                        {"cloudWatchLogsLogGroup": {"logGroupArn": "arn:aws:logs:eu-west-2:0123456789:log-group:log_group_name"}}
+                    ]
+                }
             )
         except ClientError as e:
             logger.error(e)

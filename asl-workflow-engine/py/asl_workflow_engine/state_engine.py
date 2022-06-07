@@ -328,7 +328,7 @@ class StateEngine(object):
         execution_detail["startDate"] = saved_startDate
         execution_detail["stopDate"] = saved_stopDate
 
-    def start_execution(self, state_machine_type, start_state, event):
+    def start_execution(self, state_machine, start_state, event):
         """
         Initialise the state machine execution's state, in particular this will
         set any context metadata that hasn't previously been set elsewhere.
@@ -380,8 +380,7 @@ class StateEngine(object):
             the asl_store "database" has been manually edited because when
             it is updated via the API the roleArn field gets populated.
             """
-            asl_item = self.asl_store.get_cached_view(state_machine_arn, {})
-            execution["RoleArn"] = asl_item.get(
+            execution["RoleArn"] = state_machine.get(
                 "roleArn", "arn:aws:iam:::role/dummy-role/dummy"
             )
 
@@ -425,6 +424,7 @@ class StateEngine(object):
         Only store execution metadata/history for "STANDARD" not "EXPRESS"
         State Machine workflows.
         """
+        state_machine_type = state_machine.get("type")
         if state_machine_type == "STANDARD":
             self.executions[execution_arn] = execution_detail
             self.executions.set_ttl(execution_arn, self.execution_ttl)
@@ -437,7 +437,7 @@ class StateEngine(object):
         return immediately for "EXPRESS" workflows, but we may do extra logging.
         """
         self.update_execution_history(
-            state_machine_type,
+            state_machine,
             execution_arn,
             "ExecutionStarted",
             {"input": input_as_string, "roleArn": execution["RoleArn"]},
@@ -450,7 +450,7 @@ class StateEngine(object):
 
         self.broadcast_notification(execution_arn, execution_detail, context)
 
-    def change_state(self, state_machine_type, state_type, next_state, event):
+    def change_state(self, state_machine, state_type, next_state, event):
         """
         Set event's new current state in $$.State.Name to Next state.
         """
@@ -480,7 +480,7 @@ class StateEngine(object):
                 "Cause": error_message,
             }
             self.logger.error("States.Runtime: {}".format(error_message))
-            self.end_execution(state_machine_type, state_type, event)
+            self.end_execution(state_machine, state_type, event)
             return
 
         """
@@ -499,11 +499,11 @@ class StateEngine(object):
                 "Cause": error_message,
             }
             self.logger.error("States.DataLimitExceeded: {}".format(error_message))
-            self.end_execution(state_machine_type, state_type, event)
+            self.end_execution(state_machine, state_type, event)
             return
 
         self.update_execution_history(
-            state_machine_type,
+            state_machine,
             context["Execution"]["Id"],
             state_type + "StateExited",
             {"output": output_as_string, "name": state["Name"]},
@@ -519,7 +519,7 @@ class StateEngine(object):
         state["EnteredTime"] = datetime.now(timezone.utc).astimezone().isoformat()
         self.event_dispatcher.publish(event)
 
-    def end_execution(self, state_machine_type, state_type, event):
+    def end_execution(self, state_machine, state_type, event):
         """
         End the state machine execution and update execution metadata.
         """
@@ -540,12 +540,13 @@ class StateEngine(object):
         # Stepfunctions don't transition to StateExited if the execution fails.
         if not execution_failed:
             self.update_execution_history(
-                state_machine_type,
+                state_machine,
                 execution_arn,
                 state_type + "StateExited",
                 {"output": output_as_string, "name": state["Name"]},
             )
 
+        state_machine_type = state_machine.get("type")
         if state_machine_type == "STANDARD":
             execution_detail = self.executions[execution_arn]
             state_machine_arn = execution_detail["stateMachineArn"]
@@ -604,7 +605,7 @@ class StateEngine(object):
                 """
                 execution_detail["output"] = None
                 self.update_execution_history(
-                    state_machine_type,
+                    state_machine,
                     execution_arn,
                     "ExecutionFailed",
                     {"cause": data.get("Cause"), "error": data.get("Error")}
@@ -624,7 +625,7 @@ class StateEngine(object):
                 execution_detail["status"] = "SUCCEEDED"
                 execution_detail["output"] = output_as_string
                 self.update_execution_history(
-                    state_machine_type,
+                    state_machine,
                     execution_arn,
                     "ExecutionSucceeded",
                     {"output": output_as_string}
@@ -649,29 +650,93 @@ class StateEngine(object):
         self.broadcast_notification(execution_arn, execution_detail, context)
 
     def update_execution_history(
-            self, state_machine_type, execution_arn, update_type, details
+            self, state_machine, execution_arn, update_type, details
         ):
-
-        """
-        TODO For "EXPRESS" State Machines we might actually want to log with a
-        higher level than debug. "STANDARD" State Machines store execution
-        history and other execution metadata but "EXPRESS" State Machines don't.
-        However Express Workflows send execution history to CloudWatch Logs.
-        https://aws.amazon.com/blogs/compute/new-express-workflows-for-aws-step-functions/
-        """
-        if state_machine_type == "EXPRESS":
-            self.logger.debug("{} {} {}".format(execution_arn, update_type, details))
-            return
-
         """
         Store the execution history information in a way that will be accessible
         to the REST API.
 
-        Only do DEBUG logging, as the details object is likely to be expensive
-        and in any case the idea is to get execution history via the REST API
-        https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html
+        "STANDARD" State Machines store execution history and other execution
+        metadata, but "EXPRESS" State Machines don't.
+        However "EXPRESS" Workflows can log execution history to CloudWatch Logs.
+        https://aws.amazon.com/blogs/compute/new-express-workflows-for-aws-step-functions/
+
+        For the logging we first need to retrieve the loggingConfiguration
+        that is associated with the State Machine used by the execution.
         """
-        self.logger.debug("{} {} {}".format(execution_arn, update_type, details))
+
+        # A dict mapping event types with the set of log levels.
+        # https://docs.aws.amazon.com/step-functions/latest/dg/cloudwatch-log-level.html
+        log_dict = {
+            "ChoiceStateEntered":           {"ALL"},
+            "ChoiceStateExited":            {"ALL"},
+            "ExecutionAborted":             {"ALL", "ERROR", "FATAL"},
+            "ExecutionFailed":              {"ALL", "ERROR", "FATAL"},
+            "ExecutionStarted":             {"ALL"},
+            "ExecutionSucceeded":           {"ALL"},
+            "ExecutionTimedOut":            {"ALL", "ERROR", "FATAL"},
+            "FailStateEntered":             {"ALL", "ERROR"},
+            "LambdaFunctionFailed":         {"ALL", "ERROR"},
+            "LambdaFunctionScheduled":      {"ALL"},
+            "LambdaFunctionScheduleFailed": {"ALL", "ERROR"},
+            "LambdaFunctionStarted":        {"ALL"},
+            "LambdaFunctionStartFailed":    {"ALL", "ERROR"},
+            "LambdaFunctionSucceeded":      {"ALL"},
+            "LambdaFunctionTimedOut":       {"ALL", "ERROR"},
+            "MapIterationAborted":          {"ALL", "ERROR"},
+            "MapIterationFailed":           {"ALL", "ERROR"},
+            "MapIterationStarted":          {"ALL"},
+            "MapIterationSucceeded":        {"ALL"},
+            "MapStateAborted":              {"ALL", "ERROR"},
+            "MapStateEntered":              {"ALL"},
+            "MapStateExited":               {"ALL"},
+            "MapStateFailed":               {"ALL", "ERROR"},
+            "MapStateStarted":              {"ALL"},
+            "MapStateSucceeded":            {"ALL"},
+            "ParallelStateAborted":         {"ALL", "ERROR"},
+            "ParallelStateEntered":         {"ALL"},
+            "ParallelStateExited":          {"ALL"},
+            "ParallelStateFailed":          {"ALL", "ERROR"},
+            "ParallelStateStarted":         {"ALL"},
+            "ParallelStateSucceeded":       {"ALL"},
+            "PassStateEntered":             {"ALL"},
+            "PassStateExited":              {"ALL"},
+            "SucceedStateEntered":          {"ALL"},
+            "SucceedStateExited":           {"ALL"},
+            "TaskFailed":                   {"ALL", "ERROR"},
+            "TaskScheduled":                {"ALL"},
+            "TaskStarted":                  {"ALL"},
+            "TaskStartFailed":              {"ALL", "ERROR"},
+            "TaskStateAborted":             {"ALL", "ERROR"},
+            "TaskStateEntered":             {"ALL"},
+            "TaskStateExited":              {"ALL"},
+            "TaskSubmitFailed":             {"ALL", "ERROR"},
+            "TaskSubmitted":                {"ALL"},
+            "TaskSucceeded":                {"ALL"},
+            "TaskTimedOut":                 {"ALL", "ERROR"},
+            "WaitStateAborted":             {"ALL", "ERROR"},
+            "WaitStateEntered":             {"ALL"},
+            "WaitStateExited":              {"ALL"},
+        }
+
+        logging_configuration = state_machine.get("loggingConfiguration", {})
+        logging_level = logging_configuration.get("level", "OFF")
+        # Retrieve the set of levels that may apply to a particular event type.
+        level_set = log_dict.get(update_type)
+
+        if logging_level in level_set:
+            self.logger.info("{} {} {}".format(execution_arn, update_type, details))
+        else:  # If DEBUG is set log irrespective of the loggingConfiguration.
+            self.logger.debug("{} {} {}".format(execution_arn, update_type, details))
+
+        """
+        For "EXPRESS" State Machines we only do logging (at a level configured
+        by the loggingConfiguration parameter of Create/Update StateMachine)
+        so we return before actually updating the execution history.
+        """
+        state_machine_type = state_machine.get("type")
+        if state_machine_type == "EXPRESS":
+            return
 
         """
         self.executions.get(execution_arn) == None should only really happen if
@@ -789,32 +854,32 @@ class StateEngine(object):
             self.log_and_drop("event {} has no $.context field", event, id)
             return
 
-        state_machine = context.get("StateMachine")
-        if state_machine == None:
+        ctx_state_machine = context.get("StateMachine")
+        if ctx_state_machine == None:
             self.log_and_drop("event {} has no $.context.StateMachine field", event, id)
             return
 
-        state_machine_arn = state_machine.get("Id")
+        state_machine_arn = ctx_state_machine.get("Id")
         if not state_machine_arn:
             self.log_and_drop("event {} has no $.context.StateMachine.Id field", event, id)
             return
 
         """
-        If ASL is present in optional state_machine["Definition"] store that as
+        If ASL is present in optional ctx_state_machine["Definition"] store that as
         if it were a CreateStateMachine API call. TODO the roleArn added here is
         not a valid IAM role ARN. This way of adding State Nachines "by value"
         embedded in the context was mainly added to enable development of some
         features prior to the addition of the REST API, so it might eventually
         be deprecated, alternatively the approach could be enhanced to allow
         a valid roleArn to be added from config or indeed be embedded in the
-        context in a similar way to how state_machine["Definition"] is.
+        context in a similar way to how ctx_state_machine["Definition"] is.
         """
-        if "Definition" in state_machine:
+        if "Definition" in ctx_state_machine:
             arn = parse_arn(state_machine_arn)
             creation_date = time.time()
             self.asl_store[state_machine_arn] = {
                 "creationDate": creation_date,
-                "definition": state_machine["Definition"],
+                "definition": ctx_state_machine["Definition"],
                 "name": arn["resource"],
                 "roleArn": "arn:aws:iam:::role/dummy-role/dummy",
                 "stateMachineArn": state_machine_arn,
@@ -822,11 +887,11 @@ class StateEngine(object):
                 "status": "ACTIVE",
                 "type": "STANDARD",
             }
-            del state_machine["Definition"]
+            del ctx_state_machine["Definition"]
 
 
-        asl_item = self.asl_store.get_cached_view(state_machine_arn, {})
-        ASL = asl_item.get("definition")
+        state_machine = self.asl_store.get_cached_view(state_machine_arn, {})
+        ASL = state_machine.get("definition")
         if not ASL:
             """
             Dropping the message is possibly not the right thing to do in this
@@ -841,7 +906,7 @@ class StateEngine(object):
         If "EXPRESS" certain features, like recording execution descriptions and
         history, will be disabled as per the Stepfunction API.
         """
-        state_machine_type = asl_item.get("type")
+        state_machine_type = state_machine.get("type")
 
         """
         https://states-language.net/spec.html#data
@@ -875,7 +940,7 @@ class StateEngine(object):
             If so initialise unset context fields and start OpenTracing span.
             """
             current_state = ASL["StartAt"]
-            self.start_execution(state_machine_type, current_state, event)
+            self.start_execution(state_machine, current_state, event)
 
             with opentracing.tracer.start_active_span(
                 operation_name="StartExecution:ExecutionStarting",
@@ -1072,7 +1137,7 @@ class StateEngine(object):
                         event["data"] = merge_result(data, context, result, catcher, "$")
 
                         self.change_state(
-                            state_machine_type,
+                            state_machine,
                             state_type,
                             catcher.get("Next"),
                             event
@@ -1090,7 +1155,7 @@ class StateEngine(object):
                     result["Cause"] = boiler_plate + error_message
 
                 event["data"] = result
-                self.end_execution(state_machine_type, state_type, event)
+                self.end_execution(state_machine, state_type, event)
 
         # ----------------------------------------------------------------------
 
@@ -1102,14 +1167,14 @@ class StateEngine(object):
             if "Branch" in context["State"]:
                 execution_arn = context["Execution"]["Id"]
                 self.update_execution_history(
-                    state_machine_type,
+                    state_machine,
                     execution_arn,
                     state_type + "StateExited",
                     {"output": json.dumps(event["data"]), "name": current_state},
                 )
                 asl_state_collect_results(state_type)
             else:
-                self.end_execution(state_machine_type, state_type, event)
+                self.end_execution(state_machine, state_type, event)
                 if id != None:
                     self.event_dispatcher.acknowledge(id)
 
@@ -1163,7 +1228,7 @@ class StateEngine(object):
                     handle_terminal_state(state_type, event, id)
                 else:
                     self.change_state(
-                        state_machine_type,
+                        state_machine,
                         state_type,
                         state.get("Next"),
                         event
@@ -1236,7 +1301,7 @@ class StateEngine(object):
                             handle_terminal_state(state_type, event, id)
                         else:
                             self.change_state(
-                                state_machine_type,
+                                state_machine,
                                 state_type,
                                 state.get("Next"),
                                 event
@@ -1600,7 +1665,7 @@ class StateEngine(object):
             """
             if next_state:
                 self.change_state(
-                    state_machine_type,
+                    state_machine,
                     state_type,
                     next_state,
                     event
@@ -1643,7 +1708,7 @@ class StateEngine(object):
                         handle_terminal_state(state_type, event, id)
                     else:
                         self.change_state(
-                            state_machine_type,
+                            state_machine,
                             state_type,
                             state.get("Next"),
                             event
@@ -2048,7 +2113,7 @@ class StateEngine(object):
                         handle_terminal_state(state_type, event, id)
                     else:
                         self.change_state(
-                            state_machine_type,
+                            state_machine,
                             state_type,
                             state.get("Next"),
                             event
@@ -2202,7 +2267,7 @@ class StateEngine(object):
             """
             if not state.get("End"):
                 self.change_state(
-                    state_machine_type,
+                    state_machine,
                     state_type,
                     state.get("Next"),
                     event
@@ -2241,7 +2306,7 @@ class StateEngine(object):
         reentered_map = state_type == "Map" and get_start_index(context) != 0
         if not context["State"].get("RetryCount") and not reentered_map:
             self.update_execution_history(
-                state_machine_type,
+                state_machine,
                 execution_arn,
                 state_type + "StateEntered",
                 {"input": json.dumps(data), "name": current_state},
