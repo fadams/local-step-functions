@@ -1278,7 +1278,9 @@ class StateEngine(object):
                                          )
                     else:
                         error_message = result.get("errorMessage", "")
-                    self.logger.error("{}: {}".format(error_type, error_message))
+
+                    execution_arn = context["Execution"]["Id"]
+                    self.logger.error("{} TaskState '{}' received an error response from the invoked Task: {{'errorType': {}, 'errorMessage': {}}}".format(execution_arn, current_state, error_type, error_message))
                     handle_error(error_type, error_message)
                     self.event_dispatcher.acknowledge(id)
                 else:  # No error
