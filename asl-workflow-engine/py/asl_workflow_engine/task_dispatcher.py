@@ -21,7 +21,7 @@ import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 
-import os, time, uuid, opentracing, urllib.parse
+import math, os, time, uuid, opentracing, urllib.parse
 from datetime import datetime, timezone
 from aioprometheus import Counter, Histogram
 
@@ -224,7 +224,7 @@ class TaskDispatcher(object):
         if request:
             try:
                 del self.pending_requests[correlation_id]
-                callback, resource_arn, sched_time, timeout_id, rpcmessage_task_span = request
+                state_machine, execution_arn, resource_arn, callback, sched_time, timeout_id, rpcmessage_task_span = request
                 with opentracing.tracer.scope_manager.activate(
                     span=rpcmessage_task_span,
                     finish_on_close=True
@@ -242,16 +242,29 @@ class TaskDispatcher(object):
                         if len(message_body) > MAX_DATA_LENGTH:
                             result = {"errorType": "States.DataLimitExceeded"}
                         else:
-                            result = json.loads(message_body.decode("utf8"))
+                            message_body_as_string = message_body.decode("utf8")
+                            result = json.loads(message_body_as_string)
                         error_type = result.get("errorType")
                         if error_type:
+                            error_message = result.get("errorMessage", "")
                             opentracing.tracer.active_span.set_tag("error", True)
                             opentracing.tracer.active_span.log_kv(
                                 {
                                     "event": error_type,
-                                    "message": result.get("errorMessage", ""),
+                                    "message": error_message,
                                 }
                             )
+
+                            self.state_engine.update_execution_history(
+                                state_machine,
+                                execution_arn,
+                                "LambdaFunctionFailed",
+                                {
+                                    "error": error_type,
+                                    "cause": error_message,
+                                },
+                            )
+
                             if self.task_metrics:
                                 """
                                 When Lambda times out it returns JSON including
@@ -262,15 +275,35 @@ class TaskDispatcher(object):
                                 convention so we can trap processor timeout
                                 errors and provide metrics on these.
                                 """
+
+                                """
+                                The following is commented out because although
+                                the documentation in https://docs.aws.amazon.com/step-functions/latest/dg/procedure-cw-metrics.html for LambdaFunctionsTimedOut says: 
+                                "The number of Lambda functions that time out
+                                on close." it seems that real AWS Stepfunctions
+                                actually use the LambdaFunctionsTimedOut metric
+                                to record the count of timed out Task states
+                                """
+                                """
                                 if error_type == "TimeoutError":
                                     self.task_metrics["LambdaFunctionsTimedOut"].inc(
                                         {"LambdaFunctionArn": resource_arn}
                                     )
+                                """
 
                                 self.task_metrics["LambdaFunctionsFailed"].inc(
                                     {"LambdaFunctionArn": resource_arn}
                                 )
                         else:
+                            self.state_engine.update_execution_history(
+                                state_machine,
+                                execution_arn,
+                                "LambdaFunctionSucceeded",
+                                {
+                                    "output": message_body_as_string,
+                                },
+                            )
+
                             if self.task_metrics:
                                 self.task_metrics["LambdaFunctionsSucceeded"].inc(
                                     {"LambdaFunctionArn": resource_arn}
@@ -311,6 +344,14 @@ class TaskDispatcher(object):
         message.acknowledge(multiple=False)
 
     def execute_task(self, resource_arn, parameters, callback, timeout, context):
+        """
+        Look up stateMachineArn to get State Machine as we need that later to
+        call state_engine.update_execution_history. We do it here to capture
+        in the execute_task closure, so it may be used in error_callback too.
+        """
+        state_machine_arn = context["StateMachine"]["Id"]
+        state_machine = self.state_engine.asl_store.get_cached_view(state_machine_arn)
+
         """
         In the EventDispatcher constructor we have a "Connection Factory" for
         the event queue that lets the messaging implementation used be set
@@ -382,7 +423,7 @@ class TaskDispatcher(object):
 
         def error_callback(carrier, error, callback):
             """
-            A wrapper for for use when returning errors to the calling Task.
+            A wrapper for use when returning errors to the calling Task.
             The wrapper is mainly to provide OpenTracing boilerplate.
             The carrier should be provided in the case where we don't have the
             original span relating to the request. In that case we create a new
@@ -412,6 +453,30 @@ class TaskDispatcher(object):
                         "message": error["errorMessage"],
                     }
                 )
+
+                if error["errorType"] == "States.Timeout":
+                    execution_arn = context["Execution"]["Id"]
+                    self.state_engine.update_execution_history(
+                        state_machine,
+                        execution_arn,
+                        "LambdaFunctionTimedOut",
+                        {
+                            "error": error["errorType"],
+                            "cause": error["errorMessage"],
+                        },
+                    )
+
+                    """
+                    It appears that real AWS Stepfunctions use the
+                    LambdaFunctionsTimedOut metric to record the count of Task
+                    State timeouts and record actual Lambda timeouts using the
+                    LambdaFunctionsFailed metric.
+                    """
+                    if self.task_metrics:
+                        self.task_metrics["LambdaFunctionsTimedOut"].inc(
+                            {"LambdaFunctionArn": resource_arn}
+                        )
+
                 if callable(callback):
                     callback(error)
 
@@ -479,7 +544,7 @@ class TaskDispatcher(object):
                 request = self.pending_requests.get(correlation_id)
                 if request:
                     del self.pending_requests[correlation_id]
-                    callback, resource_arn, sched_time, timeout_id, task_span = request
+                    state_machine, execution_arn, resource_arn, callback, sched_time, timeout_id, task_span = request
                     error = {
                         "errorType": "States.Timeout",
                         "errorMessage": "State or Execution ran for longer " +
@@ -496,6 +561,7 @@ class TaskDispatcher(object):
             https://opentracing.io/guides/python/tracers/ standard tags are from
             https://opentracing.io/specification/conventions/
             """
+            execution_arn = context["Execution"]["Id"]
             with opentracing.tracer.start_active_span(
                 operation_name="Task",
                 child_of=span_context("text_map", context.get("Tracer", {}), self.logger),
@@ -505,17 +571,18 @@ class TaskDispatcher(object):
                     "message_bus.destination": resource,
                     "span.kind": "producer",
                     "peer.address": self.peer_address,
-                    "execution_arn": context["Execution"]["Id"]
+                    "execution_arn": execution_arn
                 },
                 finish_on_close=False
             ) as scope:
+                parameters_as_string = json.dumps(parameters)
                 """
                 We also pass the span to pending_requests so we can use
                 it when receiving a response, and in case of a timeout.
                 """
                 carrier = inject_span("text_map", scope.span, self.logger)
                 message = Message(
-                    json.dumps(parameters),
+                    parameters_as_string,
                     properties=carrier,
                     content_type="application/json",
                     subject=resource,
@@ -539,11 +606,38 @@ class TaskDispatcher(object):
                 timeout occurs we can raise an error on the request span.
                 """
                 self.pending_requests[correlation_id] = (
-                    callback, resource_arn, time.time() * 1000, timeout_id, scope.span
+                    state_machine,
+                    execution_arn,
+                    resource_arn,
+                    callback,
+                    time.time() * 1000,
+                    timeout_id,
+                    scope.span
                 )
                 self.producer.send(message)
 
+                self.state_engine.update_execution_history(
+                    state_machine,
+                    execution_arn,
+                    "LambdaFunctionScheduled",
+                    {
+                        "input": parameters_as_string,
+                        "resource": resource_arn,
+                        "timeoutInSeconds": math.ceil(timeout/1000)
+                    },
+                )
+
                 if self.task_metrics:
+                    """
+                    https://docs.aws.amazon.com/step-functions/latest/dg/procedure-cw-metrics.html
+                    It's not totally clear what LambdaFunctionsScheduled and
+                    LambdaFunctionsStarted *actually* mean from the AWS docs.
+                    With the ASL Engine we are using an AMQP RPC pattern so
+                    requests are queued and the ASL Engine can't really tell
+                    whether the worker/processor has actually started, so it is
+                    most truthful just to use the LambdaFunctionsScheduled
+                    metric as we can't know LambdaFunctionsStarted.
+                    """
                     self.task_metrics["LambdaFunctionsScheduled"].inc(
                         {"LambdaFunctionArn": resource_arn}
                     )
@@ -615,33 +709,38 @@ class TaskDispatcher(object):
             an accidental omission that was missed when implementing the
             stepfunctions integration and will be added IDC.
             """
-            execution_name = parameters.get("Name", str(uuid.uuid4()))
+            child_execution_name = parameters.get("Name", str(uuid.uuid4()))
 
-            state_machine_arn = parameters.get("StateMachineArn")
-            if not state_machine_arn:
+            child_state_machine_arn = parameters.get("StateMachineArn")
+            if not child_state_machine_arn:
                 message = "TaskDispatcher asl_service_states_startExecution: " \
                           "StateMachineArn must be specified"
                 error = {"errorType": "MissingRequiredParameter", "errorMessage": message}
                 error_callback(context.get("Tracer", {}), error, callback)
                 return
 
-            arn = parse_arn(state_machine_arn)
-            state_machine_name = arn["resource"]
+            arn = parse_arn(child_state_machine_arn)
+            region = arn.get("region", "local")
+            child_state_machine_name = arn["resource"]
 
-            execution_arn = create_arn(
+            execution_arn = context["Execution"]["Id"]
+
+            child_execution_arn = create_arn(
                 service="states",
-                region=arn.get("region", "local"),
+                region=region,
                 account=arn["account"],
                 resource_type="execution",
-                resource=state_machine_name + ":" + execution_name,
+                resource=child_state_machine_name + ":" + child_execution_name,
             )
 
-            # Look up stateMachineArn
-            state_machine = self.state_engine.asl_store.get_cached_view(state_machine_arn)
-            if not state_machine:
+            # Look up stateMachineArn to get child State Machine
+            child_state_machine = self.state_engine.asl_store.get_cached_view(
+                child_state_machine_arn
+            )
+            if not child_state_machine:
                 message = "TaskDispatcher asl_service_states_startExecution: " \
                           "State Machine {} does not exist".format(
-                    state_machine_arn
+                    child_state_machine_arn
                 )
                 error = {"errorType": "StateMachineDoesNotExist", "errorMessage": message}
                 error_callback(context.get("Tracer", {}), error, callback)
@@ -658,8 +757,8 @@ class TaskDispatcher(object):
                 tags={
                     "component": "task_dispatcher",
                     "resource_arn": resource_arn,
-                    "execution_arn": context["Execution"]["Id"],
-                    "child_execution_arn": execution_arn,
+                    "execution_arn": execution_arn,
+                    "child_execution_arn": child_execution_arn,
                 }
             ) as scope:
                 # Create the execution context and the event to publish to launch
@@ -669,19 +768,37 @@ class TaskDispatcher(object):
                 child_context = {
                     "Tracer": inject_span("text_map", scope.span, self.logger),
                     "Execution": {
-                        "Id": execution_arn,
+                        "Id": child_execution_arn,
                         "Input": parameters.get("Input", {}),
-                        "Name": execution_name,
-                        "RoleArn": state_machine.get("roleArn"),
+                        "Name": child_execution_name,
+                        "RoleArn": child_state_machine.get("roleArn"),
                         "StartTime": start_time,
                     },
                     "State": {"EnteredTime": start_time, "Name": ""},  # Start state
-                    "StateMachine": {"Id": state_machine_arn, "Name": state_machine_name},
+                    "StateMachine": {
+                        "Id": child_state_machine_arn,
+                        "Name": child_state_machine_name
+                    },
                 }
 
+                # Publish event that launches the new state machine execution.
                 event = {"data": parameters.get("Input", {}), "context": child_context}
                 self.state_engine.event_dispatcher.publish(
                     event, start_execution=True
+                )
+
+                parameters_as_string = json.dumps(parameters)
+                self.state_engine.update_execution_history(
+                    state_machine,
+                    execution_arn,
+                    "TaskScheduled",
+                    {
+                        "parameters": parameters_as_string,
+                        "region": region,
+                        "resource": resource_arn,
+                        "resourceType": "execution",
+                        "timeoutInSeconds": math.ceil(timeout/1000)
+                    },
                 )
 
                 """
@@ -698,7 +815,24 @@ class TaskDispatcher(object):
                         {"ServiceIntegrationResourceArn": resource_arn}
                     )
 
+
                 result = {"executionArn": execution_arn, "startDate": time.time()}
+
+                """
+                For "fire and forget" launching should this be TaskSubmitted?
+                https://docs.aws.amazon.com/step-functions/latest/apireference/API_TaskSubmittedEventDetails.html
+                """
+                result_as_string = json.dumps(result)
+                self.state_engine.update_execution_history(
+                    state_machine,
+                    execution_arn,
+                    "TaskSucceeded",
+                    {
+                        "output": result_as_string,
+                        "resource": resource_arn,
+                        "resourceType": "execution",
+                    },
+                )
 
                 """
                 For now we only support "fire and forget" launching of child

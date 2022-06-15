@@ -719,14 +719,26 @@ class StateEngine(object):
             "WaitStateExited":              {"ALL"},
         }
 
+        # https://docs.aws.amazon.com/step-functions/latest/apireference/API_LoggingConfiguration.html
         logging_configuration = state_machine.get("loggingConfiguration", {})
         logging_level = logging_configuration.get("level", "OFF")
+        include_data = logging_configuration.get("includeExecutionData", False)
+
         # Retrieve the set of levels that may apply to a particular event type.
         level_set = log_dict.get(update_type)
 
         if logging_level in level_set:
-            self.logger.info("{} {} {}".format(execution_arn, update_type, details))
-        else:  # If DEBUG is set log irrespective of the loggingConfiguration.
+            # The set of fields to be redacted if includeExecutionData is false.
+            data_fields = {"input", "output", "parameters"}
+
+            # Modified dict based on details but with data_fields redacted
+            # unless the loggingConfiguration has includeExecutionData set True.
+            logged_details = {
+                k: v for k, v in details.items() if include_data or k not in data_fields
+            }
+
+            self.logger.info("{} {} {}".format(execution_arn, update_type, logged_details))
+        else:  # If DEBUG is set then log irrespective of loggingConfiguration.
             self.logger.debug("{} {} {}".format(execution_arn, update_type, details))
 
         """
