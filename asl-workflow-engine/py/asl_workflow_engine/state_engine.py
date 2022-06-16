@@ -1292,7 +1292,26 @@ class StateEngine(object):
                         error_message = result.get("errorMessage", "")
 
                     execution_arn = context["Execution"]["Id"]
-                    self.logger.error("{} TaskState '{}' received an error response from the invoked Task: {{'errorType': {}, 'errorMessage': {}}}".format(execution_arn, current_state, error_type, error_message))
+
+                    # Original updated, but less verbose log.
+                    #self.logger.warn("{} TaskState '{}' received an error response from the invoked Task: {{'errorType': {}, 'errorMessage': {}}}".format(execution_arn, current_state, error_type, error_message))
+                    # Experimental more verbose log.
+                    """
+                    Note that the resource_arn and parameters values are in
+                    scope here because they are captured by the surrounding
+                    asl_state_Task_delegate closure prior to calling
+                    self.task_dispatcher.execute_task, which will ultimately
+                    lead to this on_response function being called.
+                    """
+                    # TODO respect loggingConfiguration includeExecutionData
+                    # to include/redact parameters if this message proves useful.
+                    logging_configuration = state_machine.get("loggingConfiguration", {})
+                    include_data = logging_configuration.get("includeExecutionData", False)
+                    # Log message with parameters info
+                    self.logger.warn("{} Task State: {} using Resource: {} received an error response:\n{{'errorType': {}, 'errorMessage': {}}}\nusing the request parameters:\n{}".format(execution_arn, current_state, resource_arn, error_type, error_message, parameters))
+                    # Log message without parameters info
+                    #self.logger.warn("{} Task State: {} using Resource: {} received an error response:\n{{'errorType': {}, 'errorMessage': {}}}".format(execution_arn, current_state, resource_arn, error_type, error_message))
+
                     handle_error(error_type, error_message)
                     self.event_dispatcher.acknowledge(id)
                 else:  # No error
