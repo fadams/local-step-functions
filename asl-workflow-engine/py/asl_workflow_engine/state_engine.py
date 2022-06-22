@@ -32,7 +32,7 @@ import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 
-import operator, time, uuid, fnmatch, opentracing
+import operator, time, traceback, uuid, fnmatch, opentracing
 
 from datetime import datetime, timezone, timedelta
 from aioprometheus import Counter, Histogram
@@ -366,6 +366,8 @@ class StateEngine(object):
 
         execution_arn = execution["Id"]  # The previous block ensures this is set.
 
+        #self.branch_results[execution_arn] = {}
+
         """
         execution["Input"] holds the initial Step Function input. As this is
         part of the Context Object the "Input" field here is a JSON object.
@@ -635,11 +637,15 @@ class StateEngine(object):
                     self.execution_metrics["ExecutionsSucceeded"].inc(
                         {"StateMachineArn": state_machine_arn}
                     )
-        
-        # Tidy up self.branch_results for current execution_arn.
-        if execution_arn in self.branch_results:
-            del self.branch_results[execution_arn]
 
+                """
+                Tidy up self.branch_results for current execution_arn.
+                If ExecutionSucceeded we just remove, as we don't have to cater
+                for outstanding terminated branch messages subsequently arriving.
+                """
+                if execution_arn in self.branch_results:
+                    del self.branch_results[execution_arn]
+        
         if self.execution_metrics:
             duration = (execution_detail["stopDate"] - 
                         execution_detail["startDate"]) * 1000.0
@@ -727,6 +733,11 @@ class StateEngine(object):
         # Retrieve the set of levels that may apply to a particular event type.
         level_set = log_dict.get(update_type)
 
+        # Only update history/log event for supported History Event types.
+        # https://docs.aws.amazon.com/step-functions/latest/apireference/API_HistoryEvent.html
+        if not level_set:
+            return
+
         if logging_level in level_set:
             # The set of fields to be redacted if includeExecutionData is false.
             data_fields = {"input", "output", "parameters"}
@@ -811,6 +822,56 @@ class StateEngine(object):
             in the execution_history store to associate the ttl with.
             """
             self.execution_history.set_ttl(execution_arn, self.execution_ttl)
+
+    def branch_has_terminated(self, context):
+        """
+        Check if the current execution or branch has been terminated.
+        """
+        execution_arn = context["Execution"]["Id"]
+        if execution_arn in self.branch_results:
+            # If the execution is still running check the branch info if present.
+            if "Branch" in context["State"]:
+                branch_info = context["State"]["Branch"][-1]  # Top of stack (last item)
+                current_id = branch_info["ID"]  # Get ID from "stack"
+
+                # Get branch results for current execution and current state
+                if current_id in self.branch_results[execution_arn]:
+                    branch_results = self.branch_results[execution_arn][current_id]
+                    # Check if the results have been set to terminated
+                    # due to a Map or Parallel State branch failure.
+                    terminated = branch_results.get("terminated")
+                    if terminated:
+                        index = branch_info["Index"]
+                        #print("Terminating branch {}".format(index))
+                        result = branch_results["results"]
+                        result[index] = "terminated"
+
+                        #print(self.branch_results)
+                        #print()
+
+                        terminated_range = terminated.split(":")
+                        start = int(terminated_range[0])
+                        end = int(terminated_range[1])
+                        partial = result[start:end]
+
+                        # Check if all outstanding branches have been terminated
+                        # if so remove results for the Map or Parallel state.
+                        if None not in partial:
+                            #print("---------- Terminated all outstanding branches")
+                            del self.branch_results[execution_arn][current_id]
+
+                        # Check if any Map or Parallel state has pending results.
+                        # If not tidy up self.branch_results for the execution.
+                        if len(self.branch_results[execution_arn]) == 0:
+                            del self.branch_results[execution_arn]
+
+                        #print("self.branch_result length:")
+                        #print(len(self.branch_results))
+
+                        return True
+
+        return False
+
 
     def notify(self, event, id):
         """
@@ -965,6 +1026,14 @@ class StateEngine(object):
                 context["Tracer"] = inject_span("text_map", scope.span, self.logger)
 
         """
+        Check if the current execution or branch has been terminated due to a
+        failure and if so prevent the terminated branch from progressing further.
+        """
+        if self.branch_has_terminated(context):
+            self.event_dispatcher.acknowledge(id)
+            return
+
+        """
         States in any given “States” field can transition only to each other,
         and no state outside of that “States” field can transition into it.
         That is to say a parent state machine cannot transition directly to
@@ -1005,11 +1074,11 @@ class StateEngine(object):
                 boiler_plate = (
                     "An error occurred while executing the state "
                     "'{}' (entered at the event id #{}). "
-                ).format(current_state, id)
+                ).format(context["State"]["Name"], id)
             else:
                 boiler_plate = (
                     "An error occurred while executing the state '{}'. "
-                ).format(current_state)
+                ).format(context["State"]["Name"])
 
             """
             An execution failed due to some exception that could not be
@@ -1178,6 +1247,7 @@ class StateEngine(object):
             """
             if "Branch" in context["State"]:
                 execution_arn = context["Execution"]["Id"]
+                current_state = context["State"]["Name"]
                 self.update_execution_history(
                     state_machine,
                     execution_arn,
@@ -1308,9 +1378,9 @@ class StateEngine(object):
                     logging_configuration = state_machine.get("loggingConfiguration", {})
                     include_data = logging_configuration.get("includeExecutionData", False)
                     # Log message with parameters info
-                    self.logger.warn("{} Task State: {} using Resource: {} received an error response:\n{{'errorType': {}, 'errorMessage': {}}}\nusing the request parameters:\n{}".format(execution_arn, current_state, resource_arn, error_type, error_message, parameters))
+                    self.logger.warn("{} Task State: {} using Resource: {} received an error response: {{'errorType': {}, 'errorMessage': {}}} using the request parameters: {}".format(execution_arn, current_state, resource_arn, error_type, error_message, parameters))
                     # Log message without parameters info
-                    #self.logger.warn("{} Task State: {} using Resource: {} received an error response:\n{{'errorType': {}, 'errorMessage': {}}}".format(execution_arn, current_state, resource_arn, error_type, error_message))
+                    #self.logger.warn("{} Task State: {} using Resource: {} received an error response: {{'errorType': {}, 'errorMessage': {}}}".format(execution_arn, current_state, resource_arn, error_type, error_message))
 
                     handle_error(error_type, error_message)
                     self.event_dispatcher.acknowledge(id)
@@ -1920,19 +1990,30 @@ class StateEngine(object):
                 or Map states nested in the branch state machines. To cater for
                 this we add a "Branch" field to the "State" object in the
                 context. The "Branch" field is a list of objects holding Input
-                and Index as necessary. Each nested Map or Parallel state can
-                append to that list, which behaves like a stack.
+                and Index as necessary plus a Parent field that represents the
+                name of the parent Map or Parallel State and an ID field that
+                represents a unique ID for the group of child state machines
+                launched by the Map/Parallel state. We use an ID rather than
+                just the Map/Parallel state name for uniqueness in case we
+                have a Retrier for the Map/Parallel state.
+
+                Each nested Map or Parallel state can append to the "Branch"
+                list, which behaves like a stack.
                 """
                 context_state = context["State"]
                 if not "Branch" in context_state:
                     context_state["Branch"] = []
                 context_state["Branch"].append({})
 
+                # Unique ID for this instance of this Parallel state
+                parallel_state_id = str(uuid.uuid4())
+
                 branches = state.get("Branches", [])
                 for index, branch in enumerate(branches):
                     event["data"] = parameters
                     branch_info = {
                         "Parent": current_state,
+                        "ID": parallel_state_id,
                         "Input": data,  # Save the raw input to the Parallel state
                         "Index": index, # Index of the current branch
                     }
@@ -2017,7 +2098,7 @@ class StateEngine(object):
                 """
                 The “MaxConcurrency” field’s value is an integer that provides
                 an upper bound on how many invocations of the Iterator may run
-                in parallel.
+                in parallel. A value of zero means unbounded.
                 """
                 max_concurrency = state.get("MaxConcurrency", 0)
                 if max_concurrency == 0:
@@ -2038,9 +2119,12 @@ class StateEngine(object):
                 as described in the AWS documentation for the context object.
                 https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
 
-                Also, like the Parallel state, the index of each branch and the
-                Map state's raw input is needed to create the final result, so
-                we again add a "Branch" field to the "State" object in the context.
+                Also, like the Parallel state described above, the index of
+                each branch and the Map state's raw input, plus the name of the
+                parent Map or Parallel State and an ID field that represents a
+                unique ID for the group of child state machines is needed to
+                create the final result, so we again add a "Branch" field to
+                the "State" object in the context.
 
                 The start variable is used with MaxConcurrency. We collect
                 results for each "block" of MaxConcurrency results and when all
@@ -2054,8 +2138,17 @@ class StateEngine(object):
                     context_state["Branch"] = []
 
                 start = get_start_index(context)
-                if length and start == 0:
-                    context_state["Branch"].append({})
+                if length:
+                    if start == 0:
+                        context_state["Branch"].append({})
+                        # Unique ID for this instance of this Parallel state
+                        map_state_id = str(uuid.uuid4())
+                    else:
+                        # If we've "re-entered" Map state due to MaxConcurrency
+                        # being set we retrieve the previously set ID
+                        map_state_id = context_state["Branch"][-1].get("ID", 0)
+                else:
+                    map_state_id = 0  # Default for edge case of empty input array.
 
                 end = min(start + max_concurrency, length)
 
@@ -2105,6 +2198,7 @@ class StateEngine(object):
                     event["data"] = parameters
                     branch_info = {
                         "Parent": current_state,
+                        "ID": map_state_id,
                         "Input": data,     # Save the raw input to the Map state
                         "Index": index,    # Index of the current branch
                         "Length": length,  # Number of branches/Iterator instances
@@ -2171,11 +2265,24 @@ class StateEngine(object):
             # Get data object from event again to ensure we have result not input.
             data = event["data"]
 
+            # Get error info from data object if it is present.
+            if isinstance(data, dict):
+                error = data.get("Error")
+                cause = data.get("Cause")
+            else:
+                error = None
+                cause = None
+
             # Retrieve the index, input, length, etc. info for the current branch.
             branch_info = context["State"]["Branch"][-1]  # Top of stack (last item)
             index = branch_info["Index"]
 
-            current_state = branch_info["Parent"]  # Get parent info from "stack"
+            """
+            Get Parent field from the top of the stack, which is the name of the
+            Map or Parallel State that we are collecting results for.
+            """
+            current_state = branch_info["Parent"]
+            current_id = branch_info["ID"]
 
             state, current_state_machine = find_state(ASL["States"], current_state)
             if state == None:  # state should be valid by this point
@@ -2186,16 +2293,31 @@ class StateEngine(object):
             state_type = state["Type"]
 
             execution_arn = context["Execution"]["Id"]
-            # Initialise branch_results if necessary
+
+            """
+            Initialise the branch_results dict for the current execution if
+            it doesn't already exist. We do it here rather than in the more
+            obvious place of self.start_execution() because we need to cater
+            for the case of a restart. If a restart occurs the published
+            branch states won't have been acknowledged so will be redelivered
+            and call asl_state_collect_results again, but the start_execution
+            obviously wouldn't be called again on restart for an existing
+            execution, so we can't rely on the dict being initialised there.
+            """
             if not execution_arn in self.branch_results:
                 self.branch_results[execution_arn] = {}
-            if not current_state in self.branch_results[execution_arn]:
+
+            """
+            Initialise the branch_results object for the Map or Parallel State
+            that we are collecting results for if it doesn't already exist.
+            """
+            if not current_id in self.branch_results[execution_arn]:
                 if "Branches" in state:  # Parallel
                     length = len(state["Branches"])
                 else:  # Map
                     length = branch_info["Length"]
 
-                self.branch_results[execution_arn][current_state] = {
+                self.branch_results[execution_arn][current_id] = {
                     "results": [None]*length,
                     "ids": [None]*length,
                 }
@@ -2204,8 +2326,9 @@ class StateEngine(object):
             Record the event id so we can acknowledge the event when the
             results from all branches have eventually been returned.
             """
-            branch_results = self.branch_results[execution_arn][current_state]
+            branch_results = self.branch_results[execution_arn][current_id]
             result = branch_results["results"]
+
             event_ids = branch_results["ids"]
             result[index] = data
             if previous_state_type != "Parallel" and previous_state_type != "Map":
@@ -2226,12 +2349,15 @@ class StateEngine(object):
             an event to re-enter the Map state with an updated "Start" index
             in order to process the next block of MaxConcurrency.
             """
-            if None in result:
-                max_concurrency = state.get("MaxConcurrency", 0)
-                if max_concurrency:
-                    start = branch_info.get("Start", 0)
-                    end = min(start + max_concurrency, len(result))
+            max_concurrency = state.get("MaxConcurrency", 0)
+            start = branch_info.get("Start", 0)
+            if max_concurrency:
+                end = min(start + max_concurrency, len(result))
+            else:
+                end = len(result)
 
+            if not error and None in result:
+                if max_concurrency:
                     partial = result[start:end]
                     if not None in partial:
                         """
@@ -2241,7 +2367,10 @@ class StateEngine(object):
                         """
                         event["data"] = branch_info["Input"]  # Get saved raw input
                         context["State"]["Name"] = current_state
-                        context["State"]["Branch"][-1] = {"Start": end}
+                        context["State"]["Branch"][-1] = {
+                            "Start": end,
+                            "ID": current_id
+                        }
 
                         self.event_dispatcher.publish(event)
 
@@ -2256,6 +2385,18 @@ class StateEngine(object):
                 del context["State"]["Branch"]
 
             context["State"]["Name"] = current_state
+
+            if error:
+                # Set range to terminate subsequent branches/iterations
+                branch_results["terminated"] = str(start) + ":" + str(end)
+
+                handle_error(error, cause)
+                # Acknowledge the events for each branch's terminal state
+                for event_id in event_ids:
+                    if event_id:
+                        self.event_dispatcher.acknowledge(event_id)
+                return
+
 
             # Parallel and Map states apply ResultPath to "raw input"
             data = branch_info["Input"]  # Get saved raw input
@@ -2378,10 +2519,26 @@ class StateEngine(object):
         appropriate ASL state handler given state type. The (Python) lambda
         provides a default handler in case of malformed ASL. 
         """
-        locals().get(
-            "asl_state_" + state_type,
-            lambda: self.logger.error(
-                "StateEngine illegal state transition: {}".format(state_type)
-            ),
-        )()
+        try:
+            locals().get(
+                "asl_state_" + state_type,
+                lambda: self.logger.error(
+                    "StateEngine illegal state transition: {}".format(state_type)
+                ),
+            )()
+        except Exception as e:
+            """
+            If state_engine.notify bombs out with an exception here it is likely
+            to be due to invalid data or the ASL not being handled correctly.
+            It's hard to know the best course of action, but for now catch the
+            Exception, log error, Fail the Execution then acknowledge the
+            "poison" message to prevent it from being endlessly redelivered.
+            """
+            message = ("Event {} caused the exception: {}:{} - "
+                       "dropping the message! {}").format(
+                        event, type(e).__name__, str(e), traceback.format_exc()
+                    )
+            self.logger.error(message)
+            handle_error("States.Runtime", message)
+            self.event_dispatcher.acknowledge(id)
 

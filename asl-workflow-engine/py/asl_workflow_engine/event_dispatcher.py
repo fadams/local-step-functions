@@ -386,7 +386,7 @@ class EventDispatcher(object):
             Exception, log error then acknowledge the "poison" message to
             prevent it from being endlessly redelivered.
             """
-            self.logger.error(
+            self.logger.exception(
                 "Message {} caused the exception: {}:{} - dropping the message!".format(
                     message.body, type(e).__name__, str(e)
                 )
