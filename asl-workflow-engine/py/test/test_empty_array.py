@@ -106,7 +106,7 @@ class EventDispatcherStub(object):
 This stubs out the real TaskDispatcher execute_task method which requires
 messaging infrastructure to run whereas this test is just a state machine test.
 """
-def execute_task_stub(resource_arn, parameters, callback):
+def execute_task_stub(resource_arn, parameters, callback, timeout, context, id):
     name = resource_arn.split(":")[-1]
     result = {"reply": name + " reply"}
     callback(result)
@@ -139,6 +139,7 @@ class TestEmptyArray(unittest.TestCase):
         print(status)
 
         self.assertEqual(status, "FAILED")
+        print("FAILED is the expected result")
 
 if __name__ == '__main__':
     unittest.main()

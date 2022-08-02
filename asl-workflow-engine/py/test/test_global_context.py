@@ -50,6 +50,7 @@ import unittest
 import json
 from datetime import datetime, timezone, timedelta
 from threading import Timer
+from concurrent.futures import Future
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.state_engine import StateEngine
 
@@ -128,7 +129,12 @@ class EventDispatcherStub(object):
         self.state_engine = state_engine
         self.state_engine.event_dispatcher = self
         self.message_count = -1
-        self.output_event = None # Retain last event so test can check its value
+
+        """
+        Retain last event so test can check its value. We use a Future here
+        to allow the test to block until the result is available.
+        """
+        self.output_event = Future()
 
     """
     This simple threaded timeout should work OK, the real timeout is actually
@@ -160,13 +166,14 @@ class EventDispatcherStub(object):
         self.dispatch(json.dumps(item))
     
     def broadcast(self, subject, message, carrier_properties=None):
-        self.output_event = message
+        if message["detail"]["status"] == "SUCCEEDED":
+            self.output_event.set_result(message)
 
 """
 This stubs out the real TaskDispatcher execute_task method which requires
 messaging infrastructure to run whereas this test is just a state machine test.
 """
-def execute_task_stub(resource_arn, parameters, callback):
+def execute_task_stub(resource_arn, parameters, callback, timeout, context, id):
     name = resource_arn.split(":")[-1]
     result = {"reply": name + " reply"}
     callback(result)
@@ -191,10 +198,13 @@ class TestGlobalContext(unittest.TestCase):
     
     def test_global_context(self):
         self.event_dispatcher.dispatch('{"data": {"items": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]}, "context": ' + context + '}')
-        #self.event_dispatcher.dispatch('{"data": {}, "context": ' + context + '}')
 
-        #print(self.event_dispatcher.output_event)
-        output_event_detail = self.event_dispatcher.output_event["detail"]
+        try:
+            output_event = self.event_dispatcher.output_event.result(timeout=1)
+        except:
+            output_event = {"detail": {"status": "FAILED", "output": None}}
+        output_event_detail = output_event["detail"]
+
         status = output_event_detail["status"]
         output = output_event_detail["output"]
         print(status)

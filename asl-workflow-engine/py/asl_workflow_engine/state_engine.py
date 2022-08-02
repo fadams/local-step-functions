@@ -366,8 +366,6 @@ class StateEngine(object):
 
         execution_arn = execution["Id"]  # The previous block ensures this is set.
 
-        #self.branch_results[execution_arn] = {}
-
         """
         execution["Input"] holds the initial Step Function input. As this is
         part of the Context Object the "Input" field here is a JSON object.
@@ -622,6 +620,14 @@ class StateEngine(object):
                     self.execution_metrics["ExecutionsFailed"].inc(
                         {"StateMachineArn": state_machine_arn}
                     )
+
+                """
+                Tidy up self.branch_results for current execution_arn.
+                If ExecutionFailed we need to check for outstanding terminated
+                branch messages subsequently arriving.
+                """
+                if execution_arn in self.branch_results:
+                    self.check_pending_results(execution_arn)
             else:
                 opentracing.tracer.active_span.set_tag("status", "SUCCEEDED")
                 execution_detail["status"] = "SUCCEEDED"
@@ -823,57 +829,210 @@ class StateEngine(object):
             """
             self.execution_history.set_ttl(execution_arn, self.execution_ttl)
 
-    def branch_has_terminated(self, context):
+    def acknowledge_event_list(self, event_ids):
         """
-        Check if the current execution or branch has been terminated.
+        Boiler plate method to acknowledge all event IDs specified in the
+        supplied list and set each acknowledged ID to None in the list.
         """
-        execution_arn = context["Execution"]["Id"]
-        if execution_arn in self.branch_results:
-            # If the execution is still running check the branch info if present.
-            if "Branch" in context["State"]:
-                branch_info = context["State"]["Branch"][-1]  # Top of stack (last item)
-                current_id = branch_info["ID"]  # Get ID from "stack"
+        for i, event_id in enumerate(event_ids):
+            if event_id != None:
+                self.event_dispatcher.acknowledge(event_id)
+                event_ids[i] = None
 
-                # Get branch results for current execution and current state
-                if current_id in self.branch_results[execution_arn]:
-                    branch_results = self.branch_results[execution_arn][current_id]
-                    # Check if the results have been set to terminated
-                    # due to a Map or Parallel State branch failure.
-                    terminated = branch_results.get("terminated")
-                    if terminated:
-                        index = branch_info["Index"]
-                        #print("Terminating branch {}".format(index))
-                        result = branch_results["results"]
-                        result[index] = "terminated"
+    def check_pending_results(self, execution_arn):
+        """
+        Check the branch_results for the current execution. If any of them are
+        marked as terminated we cancel any pending Tasks, check whether any
+        results for any outstanding messages are pending and if not we tidy up
+        the branch_results.
+        """
 
-                        #print(self.branch_results)
-                        #print()
+        # Get the dict containing all the branch results for this execution
+        all_branch_results = self.branch_results[execution_arn]
 
-                        terminated_range = terminated.split(":")
-                        start = int(terminated_range[0])
-                        end = int(terminated_range[1])
-                        partial = result[start:end]
+        #print("check_pending_results:")
+        #print(all_branch_results)
+        #print()
 
-                        # Check if all outstanding branches have been terminated
-                        # if so remove results for the Map or Parallel state.
-                        if None not in partial:
-                            #print("---------- Terminated all outstanding branches")
-                            del self.branch_results[execution_arn][current_id]
+        """
+        Because we *could* have nested Map/Parallel states and Tasks could fail
+        at any depth (requiring cancellation of tasks of an earlier
+        branch_results item) we must first check for terminated results over
+        the *whole* set of results for all nested branches. This unfortunately
+        requires this extra loop, but deeply nested Map/Parallel states are
+        unusual, so len(all_branch_results.values()) is generally small.
+        """
+        has_terminated = any("terminated" in r for r in all_branch_results.values())
 
-                        # Check if any Map or Parallel state has pending results.
-                        # If not tidy up self.branch_results for the execution.
-                        if len(self.branch_results[execution_arn]) == 0:
-                            del self.branch_results[execution_arn]
+        results_pending = False
+        for results in all_branch_results.values():
+            if has_terminated:
+                result = results["results"]
+                event_ids = results["ids"]
 
-                        #print("self.branch_result length:")
-                        #print(len(self.branch_results))
+                terminated = results.get("terminated")
+                if terminated:
+                    terminated_range = terminated.split(":")
+                    start = int(terminated_range[0])
+                    end = int(terminated_range[1])
+                else:
+                    start = 0
+                    end = len(result)
 
-                        return True
+                # Check if all outstanding branches have been terminated
+                for i in range(start, end):
+                    if result[i] == None:
+                        """
+                        If there isn't a result for this branch check if there
+                        are pending Tasks, if there are then cancel the Task.
+                        """
+                        event_id = event_ids[i]
+                        if event_id in self.task_dispatcher.cancellers:
+                            self.task_dispatcher.cancel_task(event_id)
 
-        return False
+                            """
+                            Cancelling a Task causes its callback to be executed
+                            with a Task.Terminated result, which might result in
+                            another call to check_pending_results, so we check
+                            that hasn't resulted in branch_results being
+                            completed and cleared before continuing.
+                            """
+                            if execution_arn not in self.branch_results:
+                                return
+                        else:
+                            results_pending = True
+
+
+        if not results_pending:
+            #print("No results pending, deleting self.branch_results[execution_arn]")
+
+            for results in all_branch_results.values():
+                event_ids = results["ids"]
+                #print("Acknowledging event_ids:")
+                #print(event_ids)
+                self.acknowledge_event_list(event_ids)
+
+            del self.branch_results[execution_arn]
+
+            #print("self.branch_result length:")
+            #print(len(self.branch_results))
+
+    def branch_has_terminated(self, state_type, context, id):
+        """
+        Check if the current Map or Parallel branch has been terminated.
+        """
+        #print("-----")
+        #print("Checking branch_has_terminated")
+        #print(context)
+
+        has_terminated = False
+        """
+        First check if Branch info is present as the tests here are only relevant
+        to events that represent states in Map Iterators or Parallel Branches. 
+        """
+        if "Branch" in context["State"]:
+            execution_arn = context["Execution"]["Id"]
+
+            """
+            Initialise the branch_results dict for the current execution if
+            it doesn't already exist. We do it here rather than in the more
+            obvious place of self.start_execution() because we need to cater
+            for the case of a restart. If a restart occurs the published
+            branch states won't have been acknowledged, so will be redelivered.
+            """
+            if not execution_arn in self.branch_results:
+                #print("Initialise the branch_results dict")
+                self.branch_results[execution_arn] = {}
+
+            # Get the dict containing all the branch results for this execution
+            all_branch_results = self.branch_results[execution_arn]
+
+            """
+            Check if any parent Map or Parallel state has terminated, iterating
+            all_branch_results to cater for nested Map or Parallel states.
+            If any Map or Parallel state has terminated we set the has_terminated
+            flag which will be used later to force termination of any new items.
+
+            The any function returns True if at least one element in the
+            iterable passed to it is True.
+            """
+            has_terminated = any("terminated" in r for r in all_branch_results.values())
+
+            """
+            Iterate through the Branch "stack" held in the context of events
+            that represent states in Map Iterators or Parallel Branches.
+            """
+            branch_info_stack = context["State"]["Branch"]
+            last_index = len(branch_info_stack) - 1
+            for i, branch_info in enumerate(branch_info_stack):
+                current_id = branch_info["ID"]
+
+                """
+                Initialise the branch_results object for the Map or Parallel State
+                that we are collecting results for if it doesn't already exist.
+                """
+                if not current_id in all_branch_results:
+                    #print("Initialise the branch_results object")
+                    length = branch_info["Length"]
+                    all_branch_results[current_id] = {
+                        "results": [None]*length,
+                        "ids": [None]*length,    # Unacknowledged messages
+                    }
+
+                # Get the branch results for current execution and current state
+                branch_results = all_branch_results[current_id]
+
+                """
+                If the branch_info item represents the item at the top of the
+                stack get the branch index and store the event ID at that index
+                in the ids field of the results for the current branch ID.
+                """
+                if i == last_index and state_type != "Parallel" and state_type != "Map":
+                    index = branch_info["Index"]
+                    event_ids = branch_results["ids"]
+                    #print("---- Storing event id " + str(id))
+                    event_ids[index] = id
+
+                #print("branch_info:")
+                #print(branch_info)
+                #print("results:")
+                #print(all_branch_results)
+
+                if has_terminated:
+                    iterator_range = branch_info.get(
+                        "Range",
+                        "0:" + str(branch_info.get("Length"))
+                    )
+                    branch_results["terminated"] = iterator_range
+
+                #print("branch_results:")
+                #print(branch_results)
+                # Check if the results have been set to terminated
+                # due to a Map or Parallel State branch failure.
+                terminated = branch_results.get("terminated")
+                if terminated:
+                    has_terminated = True
+                    index = branch_info["Index"]
+                    #print("Terminating branch {}".format(index))
+
+                    result = branch_results["results"]
+                    result[index] = "terminated"
+
+                    #print(self.branch_results)
+                    #print()
+
+
+            if has_terminated:
+                #print("has_terminated")
+                self.check_pending_results(execution_arn)
+
+        #print("-----")
+
+        return has_terminated
 
 
     def notify(self, event, id):
+        #print("~~~~~ notify id = " + str(id))
         """
         ------------------------------------------------------------------------
         This method is the main entry point to the StateEngine. It is called by
@@ -1026,14 +1185,6 @@ class StateEngine(object):
                 context["Tracer"] = inject_span("text_map", scope.span, self.logger)
 
         """
-        Check if the current execution or branch has been terminated due to a
-        failure and if so prevent the terminated branch from progressing further.
-        """
-        if self.branch_has_terminated(context):
-            self.event_dispatcher.acknowledge(id)
-            return
-
-        """
         States in any given “States” field can transition only to each other,
         and no state outside of that “States” field can transition into it.
         That is to say a parent state machine cannot transition directly to
@@ -1051,6 +1202,13 @@ class StateEngine(object):
         state_type = state["Type"]
 
         """
+        Check if the current execution or branch has been terminated due to a
+        failure and if so prevent the terminated branch from progressing further.
+        """
+        if self.branch_has_terminated(state_type, context, id):
+            return
+
+        """
         print("state_machine_arn = " + state_machine_arn)
         print("current_state = " + current_state)
         print("state = " + str(state))
@@ -1059,17 +1217,32 @@ class StateEngine(object):
         """
 
         # ----------------------------------------------------------------------
-        def handle_error(error_type, error_message):
+        def handle_error(state, error_type, error_message):
             """
             https://states-language.net/spec.html#retrying-after-error Task
             States, Parallel States, and Map States MAY have a field named
             “Retry”, whose value MUST be an array of objects, called Retriers.
+
+            Added state to the arguments passed to handle_error. The original
+            intent was that the value of state could simply be captured from
+            the surrounding notify() closure and for most circumstances that is
+            true, however for the case of Map and Parallel states we trigger
+            asl_state_collect_results() from one of the Branch or Iterator
+            states and if all results have been returned (or an error has
+            occurred) we conceptually "change state" back to the parent Map or
+            Parallel state, whereas the captured state object remains that
+            of the the Branch or Iterator event that triggered collect_results.
+            We therefore have to cater for this edge case by passing the current
+            value rather than using the captured value of the state object.
+            Similarly we get the state_type from the passed state value rather
+            than relying on the previously captured value.
             """
+
             retry_matched = False
             catch_matched = False
+            execution_arn = context["Execution"]["Id"]
 
             if state_machine_type == "STANDARD":
-                execution_arn = context["Execution"]["Id"]
                 id = len(self.execution_history[execution_arn])
                 boiler_plate = (
                     "An error occurred while executing the state "
@@ -1089,6 +1262,18 @@ class StateEngine(object):
             A retry or catch on States.ALL will not catch States.Runtime errors. 
             """
             runtime_error = (error_type == "States.Runtime")
+
+            """
+            Get the state_type from the passed state value rather than relying
+            on the previously captured value.
+            """
+            state_type = state.get("Type")
+
+            """
+            Get event data again rather than relying on the previously captured
+            value, as it may have been replaced by subsequent processing.
+            """
+            data = event.get("data", {})
 
             retry = state.get("Retry")
             if not runtime_error and retry and isinstance(retry, list):
@@ -1127,7 +1312,6 @@ class StateEngine(object):
 
                         retries = context["State"].get("RetryCount", 0)
                         if retries < max_attempts:
-                            retry_matched = True
                             timeout = interval_seconds * (backoff_rate ** retries)
                             retries += 1
                             context["State"]["RetryCount"] = retries
@@ -1137,6 +1321,14 @@ class StateEngine(object):
                                     time.time() + timeout, timezone.utc
                                 ).astimezone().isoformat()
                             )
+
+                            """
+                            Tidy up self.branch_results for current execution_arn
+                            before republishing the Task state event.
+                            """
+                            if execution_arn in self.branch_results:
+                                self.check_pending_results(execution_arn)
+
                             """
                             Republish the Task state event with the new
                             RetryCount and RetryTimeout set. We also adjust
@@ -1152,6 +1344,7 @@ class StateEngine(object):
                             to see what they actually do in this scenario.
                             """
                             self.event_dispatcher.publish(event)
+                            retry_matched = True
 
                         break
 
@@ -1190,7 +1383,6 @@ class StateEngine(object):
                         or (len(error_equals) == 1
                             and error_equals[0] == "States.ALL")
                     ):
-                        catch_matched = True
                         """
                         When a state reports an error and it matches a
                         Catcher, causing a transfer to another state, the
@@ -1215,7 +1407,22 @@ class StateEngine(object):
                         “ResultPath” field is not provided, is “$”, meaning
                         that the output consists entirely of the Error Output. 
                         """
-                        event["data"] = merge_result(data, context, result, catcher, "$")
+                        try:
+                            event["data"] = merge_result(
+                                data, context, result, catcher, "$"
+                            )
+                        except IntrinsicFailure as e:
+                            error_type = "States.IntrinsicFailure"
+                            error_message = str(e)
+                            break
+                        except PathMatchFailure as e:
+                            error_type = "States.Runtime"
+                            error_message = str(e) + " " + str(data)
+                            break
+                        except ResultPathMatchFailure as e:
+                            error_type = "States.ResultPathMatchFailure"
+                            error_message = str(e) + " " + str(data)
+                            break
 
                         self.change_state(
                             state_machine,
@@ -1223,7 +1430,10 @@ class StateEngine(object):
                             catcher.get("Next"),
                             event
                         )
+
+                        catch_matched = True
                         break
+
 
             """
             When a state reports an error, the default course of action for the
@@ -1236,7 +1446,8 @@ class StateEngine(object):
                     result["Cause"] = boiler_plate + error_message
 
                 event["data"] = result
-                self.end_execution(state_machine, state_type, event)
+                handle_terminal_state(state_type, event)
+
 
         # ----------------------------------------------------------------------
 
@@ -1245,18 +1456,60 @@ class StateEngine(object):
             """
             This function handles the boilerplate needed for terminal states.
             """
+            #print("---- handle_terminal_state ----")
+            execution_arn = context["Execution"]["Id"]
+
+            data = event["data"]
+            #task_terminated = isinstance(data, dict) and data.get("Error") == "Task.Terminated"
+            error = isinstance(data, dict) and data.get("Error")
+            task_terminated = error == "Task.Terminated"
+
             if "Branch" in context["State"]:
-                execution_arn = context["Execution"]["Id"]
-                current_state = context["State"]["Name"]
-                self.update_execution_history(
-                    state_machine,
-                    execution_arn,
-                    state_type + "StateExited",
-                    {"output": json.dumps(event["data"]), "name": current_state},
-                )
-                asl_state_collect_results(state_type)
+                # Handle terminal states for Map Iterators and Parallel Branches.
+
+                # Suppress history update if terminal state due to Task termination.
+                #if not task_terminated:
+                # Suppress history update if terminal state due to error.
+                if not error:
+                    current_state = context["State"]["Name"]
+                    self.update_execution_history(
+                        state_machine,
+                        execution_arn,
+                        state_type + "StateExited",
+                        {"output": json.dumps(event["data"]), "name": current_state},
+                    )
+
+                """
+                This test caters for an edge case whereby a Map or Parallel
+                state could fail with say a PathMatchFailure *before* it gets
+                round to populating the full Branch info for the child states
+                it will publish to Branches/Iterators. In that case it will fail
+                before collecting results, as there are no results to collect.
+                """
+                if "Index" not in context["State"]["Branch"][-1]:
+                    """
+                    Remove last item from the "Branch" list, then if it becomes empty
+                    delete "Branch" from context as we've finished with it.
+                    """
+                    del context["State"]["Branch"][-1]
+                    if len(context["State"]["Branch"]) == 0:
+                        del context["State"]["Branch"]
+                        self.end_execution(state_machine, state_type, event)
+                    else:
+                        handle_error(state, data.get("Error"), data.get("Cause"))
+                else:
+                    asl_state_collect_results(state_type)
             else:
-                self.end_execution(state_machine, state_type, event)
+                """
+                If task_terminated just tidy up self.branch_results for current
+                execution_arn otherwise end the execution.
+                """
+                if task_terminated:
+                    if execution_arn in self.branch_results:
+                        self.check_pending_results(execution_arn)
+                else:
+                    self.end_execution(state_machine, state_type, event)
+
                 if id != None:
                     self.event_dispatcher.acknowledge(id)
 
@@ -1317,13 +1570,13 @@ class StateEngine(object):
                     )
                     self.event_dispatcher.acknowledge(id)
             except IntrinsicFailure as e:
-                handle_error("States.IntrinsicFailure", str(e))
+                handle_error(state, "States.IntrinsicFailure", str(e))
                 self.event_dispatcher.acknowledge(id)
             except PathMatchFailure as e:
-                handle_error("States.Runtime", str(e))
+                handle_error(state, "States.Runtime", str(e))
                 self.event_dispatcher.acknowledge(id)
             except ResultPathMatchFailure as e:
-                handle_error("States.ResultPathMatchFailure", str(e))
+                handle_error(state, "States.ResultPathMatchFailure", str(e))
                 self.event_dispatcher.acknowledge(id)
 
         def asl_state_Task_delegate():
@@ -1361,30 +1614,36 @@ class StateEngine(object):
                     else:
                         error_message = result.get("errorMessage", "")
 
-                    execution_arn = context["Execution"]["Id"]
+                    # Suppress log message if terminal state due to Task termination.
+                    if error_type != "Task.Terminated":
+                        execution_arn = context["Execution"]["Id"]
 
-                    # Original updated, but less verbose log.
-                    #self.logger.warn("{} TaskState '{}' received an error response from the invoked Task: {{'errorType': {}, 'errorMessage': {}}}".format(execution_arn, current_state, error_type, error_message))
-                    # Experimental more verbose log.
-                    """
-                    Note that the resource_arn and parameters values are in
-                    scope here because they are captured by the surrounding
-                    asl_state_Task_delegate closure prior to calling
-                    self.task_dispatcher.execute_task, which will ultimately
-                    lead to this on_response function being called.
-                    """
-                    # TODO respect loggingConfiguration includeExecutionData
-                    # to include/redact parameters if this message proves useful.
-                    logging_configuration = state_machine.get("loggingConfiguration", {})
-                    include_data = logging_configuration.get("includeExecutionData", False)
-                    # Log message with parameters info
-                    self.logger.warn("{} Task State: {} using Resource: {} received an error response: {{'errorType': {}, 'errorMessage': {}}} using the request parameters: {}".format(execution_arn, current_state, resource_arn, error_type, error_message, parameters))
-                    # Log message without parameters info
-                    #self.logger.warn("{} Task State: {} using Resource: {} received an error response: {{'errorType': {}, 'errorMessage': {}}}".format(execution_arn, current_state, resource_arn, error_type, error_message))
+                        # Original updated, but less verbose log.
+                        #self.logger.warn("{} TaskState '{}' received an error response from the invoked Task: {{'errorType': {}, 'errorMessage': {}}}".format(execution_arn, current_state, error_type, error_message))
+                        # Experimental more verbose log.
+                        """
+                        Note that the resource_arn and parameters values are in
+                        scope here because they are captured by the surrounding
+                        asl_state_Task_delegate closure prior to calling
+                        self.task_dispatcher.execute_task, which will ultimately
+                        lead to this on_response function being called.
+                        """
+                        # TODO respect loggingConfiguration includeExecutionData
+                        # to include/redact parameters if this message proves useful.
+                        logging_configuration = state_machine.get("loggingConfiguration", {})
+                        include_data = logging_configuration.get("includeExecutionData", False)
+                        # Log message with parameters info
+                        self.logger.warn("{} Task State: {} using Resource: {} received an error response: {{'errorType': {}, 'errorMessage': {}}} using the request parameters: {}".format(execution_arn, current_state, resource_arn, error_type, error_message, parameters))
+                        # Log message without parameters info
+                        #self.logger.warn("{} Task State: {} using Resource: {} received an error response: {{'errorType': {}, 'errorMessage': {}}}".format(execution_arn, current_state, resource_arn, error_type, error_message))
 
-                    handle_error(error_type, error_message)
+                        self.task_dispatcher.remove_canceller(id)
+
+                    handle_error(state, error_type, error_message)
                     self.event_dispatcher.acknowledge(id)
                 else:  # No error
+                    self.task_dispatcher.remove_canceller(id)
+
                     try:
                         """
                         https://states-language.net/spec.html#using-paths
@@ -1411,13 +1670,13 @@ class StateEngine(object):
                             )
                             self.event_dispatcher.acknowledge(id)
                     except IntrinsicFailure as e:
-                        handle_error("States.IntrinsicFailure", str(e))
+                        handle_error(state, "States.IntrinsicFailure", str(e))
                         self.event_dispatcher.acknowledge(id)
                     except PathMatchFailure as e:
-                        handle_error("States.Runtime", str(e))
+                        handle_error(state, "States.Runtime", str(e))
                         self.event_dispatcher.acknowledge(id)
                     except ResultPathMatchFailure as e:
-                        handle_error("States.ResultPathMatchFailure", str(e))
+                        handle_error(state, "States.ResultPathMatchFailure", str(e))
                         self.event_dispatcher.acknowledge(id)
 
 
@@ -1502,13 +1761,13 @@ class StateEngine(object):
                 timeout = t1 if t1 < t2 else t2
 
                 self.task_dispatcher.execute_task(
-                    resource_arn, parameters, on_response, timeout, context
+                    resource_arn, parameters, on_response, timeout, context, id
                 )
             except IntrinsicFailure as e:
-                handle_error("States.IntrinsicFailure", str(e))
+                handle_error(state, "States.IntrinsicFailure", str(e))
                 self.event_dispatcher.acknowledge(id)
             except PathMatchFailure as e:
-                handle_error("States.Runtime", str(e))
+                handle_error(state, "States.Runtime", str(e))
                 self.event_dispatcher.acknowledge(id)
 
         def asl_state_Task():
@@ -1538,7 +1797,7 @@ class StateEngine(object):
             try:
                 input = apply_path(data, context, state.get("InputPath", "$"))
             except PathMatchFailure as e:
-                handle_error("States.Runtime", str(e))
+                handle_error(state, "States.Runtime", str(e))
                 self.event_dispatcher.acknowledge(id)
                 return
 
@@ -1757,7 +2016,7 @@ class StateEngine(object):
             try:
                 event["data"] = apply_path(input, context, state.get("OutputPath", "$"))
             except PathMatchFailure as e:
-                handle_error("States.Runtime", str(e))
+                handle_error(state, "States.Runtime", str(e))
                 self.event_dispatcher.acknowledge(id)
                 return
 
@@ -1776,7 +2035,7 @@ class StateEngine(object):
             else:
                 message = "Choice state {} failed to find a match for the condition field extracted from its input".format(current_state)
                 self.logger.error("States.NoChoiceMatched {}".format(message))
-                handle_error("States.NoChoiceMatched", message)
+                handle_error(state, "States.NoChoiceMatched", message)
 
             self.event_dispatcher.acknowledge(id)
 
@@ -1795,7 +2054,7 @@ class StateEngine(object):
             try:
                 input = apply_path(data, context, state.get("InputPath", "$"))
             except PathMatchFailure as e:
-                handle_error("States.Runtime", str(e))
+                handle_error(state, "States.Runtime", str(e))
                 self.event_dispatcher.acknowledge(id)
                 return
 
@@ -1804,22 +2063,33 @@ class StateEngine(object):
             state and id to be wrapped in its closure, to be used when the
             timeout actually fires.
             """
-            def on_timeout():
-                try:
-                    event["data"] = apply_path(input, context, state.get("OutputPath", "$"))
-                    if state.get("End"):
-                        handle_terminal_state(state_type, event, id)
-                    else:
-                        self.change_state(
-                            state_machine,
-                            state_type,
-                            state.get("Next"),
-                            event
-                        )
-                        self.event_dispatcher.acknowledge(id)
-                except PathMatchFailure as e:
-                    handle_error("States.Runtime", str(e))
+            def on_timeout(error=None):
+                if error:  # Should be only happen on Task.Terminated
+                    error_type = error.get("errorType")
+                    error_message = error.get("errorMessage")
+
+                    handle_error(state, error_type, error_message)
                     self.event_dispatcher.acknowledge(id)
+                else:
+                    self.task_dispatcher.remove_canceller(id)
+                    try:
+                        event["data"] = apply_path(
+                            input, context, state.get("OutputPath", "$")
+                        )
+
+                        if state.get("End"):
+                            handle_terminal_state(state_type, event, id)
+                        else:
+                            self.change_state(
+                                state_machine,
+                                state_type,
+                                state.get("Next"),
+                                event
+                            )
+                            self.event_dispatcher.acknowledge(id)
+                    except PathMatchFailure as e:
+                        handle_error(state, "States.Runtime", str(e))
+                        self.event_dispatcher.acknowledge(id)
 
             """
             Calculate the difference between supplied rfc3339 and current time.
@@ -1895,9 +2165,10 @@ class StateEngine(object):
                 the on_timeout function's closure, so when the timeout fires the
                 correct event should be published and the correct id acknowledged.
                 """
-                self.event_dispatcher.set_timeout(on_timeout, timeout)
+                timeout_id = self.event_dispatcher.set_timeout(on_timeout, timeout)
+                self.task_dispatcher.set_timeout_canceller(id, on_timeout, timeout_id)
             except PathMatchFailure as e:
-                handle_error("States.Runtime", str(e))
+                handle_error(state, "States.Runtime", str(e))
                 self.event_dispatcher.acknowledge(id)
 
         def asl_state_Succeed():
@@ -1919,7 +2190,7 @@ class StateEngine(object):
                 event["data"] = apply_path(input, context, state.get("OutputPath", "$"))
                 handle_terminal_state(state_type, event, id)
             except PathMatchFailure as e:
-                handle_error("States.Runtime", str(e))
+                handle_error(state, "States.Runtime", str(e))
                 self.event_dispatcher.acknowledge(id)
 
         def asl_state_Fail():
@@ -1946,7 +2217,7 @@ class StateEngine(object):
 
             handle_terminal_state(state_type, event, id)
 
-        def asl_state_Parallel():
+        def asl_state_Parallel_delegate():
             """
             https://states-language.net/spec.html#parallel-state
             https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-parallel-state.html
@@ -2008,15 +2279,30 @@ class StateEngine(object):
                 # Unique ID for this instance of this Parallel state
                 parallel_state_id = str(uuid.uuid4())
 
+                retry_count = None
+                retry_timeout = None
+                if "RetryCount" in context_state:
+                    retry_count = context_state["RetryCount"]
+                    del context_state["RetryCount"]
+                if "RetryTimeout" in context_state:
+                    retry_timeout = context_state["RetryTimeout"]
+                    del context_state["RetryTimeout"]
+
                 branches = state.get("Branches", [])
+                length = len(branches)
                 for index, branch in enumerate(branches):
                     event["data"] = parameters
                     branch_info = {
                         "Parent": current_state,
                         "ID": parallel_state_id,
-                        "Input": data,  # Save the raw input to the Parallel state
-                        "Index": index, # Index of the current branch
+                        "Input": data,     # Save the raw input to the Parallel state
+                        "Index": index,    # Index of the current branch
+                        "Length": length,  # Number of branches/Iterator instances
                     }
+                    if retry_count != None:
+                        branch_info["RetryCount"] = retry_count
+                    if retry_timeout != None:
+                        branch_info["RetryTimeout"] = retry_timeout
 
                     context_state["Name"] = branch.get("StartAt")
                     context_state["EnteredTime"] = (
@@ -2028,19 +2314,27 @@ class StateEngine(object):
 
                 self.event_dispatcher.acknowledge(id)
             except IntrinsicFailure as e:
-                handle_error("States.IntrinsicFailure", str(e))
+                handle_error(state, "States.IntrinsicFailure", str(e))
                 self.event_dispatcher.acknowledge(id)
             except PathMatchFailure as e:
-                handle_error("States.Runtime", str(e))
+                handle_error(state, "States.Runtime", str(e))
                 self.event_dispatcher.acknowledge(id)
+
+        def asl_state_Parallel():
+            """
+            This function delegates to the real Parallel state implementation
+            asl_state_Parallel_delegate when any retry timeout has expired.
+            """
+            retry_timeout = context["State"].get("RetryTimeout", 0)
+            self.event_dispatcher.set_timeout(asl_state_Parallel_delegate, retry_timeout)
 
         def get_start_index(context):
             """
-            Boilerplate to retrieve the "Start" index of the Map Iterator. This
-            field is used in the implementation of MaxConcurrency. The idea is
-            when we process the Map state we launch MaxConcurrency child state
+            Boilerplate to retrieve the start index of the Map Iterator. This
+            is used in the implementation of MaxConcurrency. The idea is when
+            we process the Map state we launch MaxConcurrency child state
             machine executions and when those complete we re-enter the Map state
-            and process the next block of MaxConcurrency, and so on. The "Start"
+            and process the next block of MaxConcurrency, and so on. The "Range"
             field, if present, holds the index of the start of the next block
             to be processed. The "Branch" metadata is a list so we can handle
             the case of nested Map and Parallel states.
@@ -2048,10 +2342,12 @@ class StateEngine(object):
             start = 0
             context_state = context["State"]
             if "Branch" in context_state and len(context_state["Branch"]):
-                start = context_state["Branch"][-1].get("Start", 0)
+                iterator_range = context_state["Branch"][-1].get("Range", "0:0")
+                start = int(iterator_range.split(":")[0])
+
             return start
 
-        def asl_state_Map():
+        def asl_state_Map_delegate():
             """
             https://states-language.net/spec.html#map-state
             https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-map-state.html
@@ -2152,6 +2448,15 @@ class StateEngine(object):
 
                 end = min(start + max_concurrency, length)
 
+                retry_count = None
+                retry_timeout = None
+                if "RetryCount" in context_state:
+                    retry_count = context_state["RetryCount"]
+                    del context_state["RetryCount"]
+                if "RetryTimeout" in context_state:
+                    retry_timeout = context_state["RetryTimeout"]
+                    del context_state["RetryTimeout"]
+
                 """
                 Need to iterate through the items_path list between start and
                 end indices and also retrieve the current index. This is quite
@@ -2202,9 +2507,12 @@ class StateEngine(object):
                         "Input": data,     # Save the raw input to the Map state
                         "Index": index,    # Index of the current branch
                         "Length": length,  # Number of branches/Iterator instances
+                        "Range": str(start) + ":" + str(end),
                     }
-                    if start:
-                        branch_info["Start"] = start
+                    if retry_count != None:
+                        branch_info["RetryCount"] = retry_count
+                    if retry_timeout != None:
+                        branch_info["RetryTimeout"] = retry_timeout
 
                     context_state["Name"] = iterator.get("StartAt")
                     context_state["EnteredTime"] = (
@@ -2247,14 +2555,33 @@ class StateEngine(object):
                         )
                         self.event_dispatcher.acknowledge(id)
             except IntrinsicFailure as e:
-                handle_error("States.IntrinsicFailure", str(e))
+                handle_error(state, "States.IntrinsicFailure", str(e))
                 self.event_dispatcher.acknowledge(id)
             except PathMatchFailure as e:
-                handle_error("States.Runtime", str(e))
+                handle_error(state, "States.Runtime", str(e))
                 self.event_dispatcher.acknowledge(id)
             except ResultPathMatchFailure as e:
-                handle_error("States.ResultPathMatchFailure", str(e))
+                handle_error(state, "States.ResultPathMatchFailure", str(e))
                 self.event_dispatcher.acknowledge(id)
+
+        def asl_state_Map():
+            """
+            This function delegates to the real Map state implementation
+            asl_state_Map_delegate when any retry timeout has expired.
+
+            If MaxConcurrency has been set on a Map state then iterations are
+            handled in "batches" of size MaxConcurrency and when we've got all
+            results for a batch an event is sent to re-enter the Map state and
+            trigger processing of the next batch. To cater for this we check
+            the "start" index to ensure we only set the RetryTimeout for
+            the first "batch".
+            """
+            if get_start_index(context) == 0:
+                retry_timeout = context["State"].get("RetryTimeout", 0)
+            else:
+                retry_timeout = 0
+            
+            self.event_dispatcher.set_timeout(asl_state_Map_delegate, retry_timeout)
 
         def asl_state_collect_results(state_type):
             """
@@ -2284,6 +2611,13 @@ class StateEngine(object):
             current_state = branch_info["Parent"]
             current_id = branch_info["ID"]
 
+            retry_count = branch_info.get("RetryCount")  # None if not present
+            retry_timeout = branch_info.get("RetryTimeout")  # None if not present
+
+            """
+            Retrieve the full parent Map/Parallel state dict from the ASL given
+            the parent state name.
+            """
             state, current_state_machine = find_state(ASL["States"], current_state)
             if state == None:  # state should be valid by this point
                 self.log_and_drop("State {} does not exist", current_state, id)
@@ -2292,49 +2626,30 @@ class StateEngine(object):
             previous_state_type = state_type
             state_type = state["Type"]
 
+            """
+            Record the raw result for this branch, which will eventually be used
+            as part of the final result array for the Map/Parallel state.
+
+            We also record the event id for this branch so we can acknowledge
+            the event when the results from all branches have eventually been
+            returned.
+
+            Note that the branch_results dict for the current execution and the
+            branch_results object for the current Map or Parallel State that it
+            contains are now initialised in the branch_has_terminated method,
+            as we record that a branch has terminated as a "result" in order
+            to ignore and tidy up any pending events for terminated branches.
+            """
             execution_arn = context["Execution"]["Id"]
-
-            """
-            Initialise the branch_results dict for the current execution if
-            it doesn't already exist. We do it here rather than in the more
-            obvious place of self.start_execution() because we need to cater
-            for the case of a restart. If a restart occurs the published
-            branch states won't have been acknowledged so will be redelivered
-            and call asl_state_collect_results again, but the start_execution
-            obviously wouldn't be called again on restart for an existing
-            execution, so we can't rely on the dict being initialised there.
-            """
-            if not execution_arn in self.branch_results:
-                self.branch_results[execution_arn] = {}
-
-            """
-            Initialise the branch_results object for the Map or Parallel State
-            that we are collecting results for if it doesn't already exist.
-            """
-            if not current_id in self.branch_results[execution_arn]:
-                if "Branches" in state:  # Parallel
-                    length = len(state["Branches"])
-                else:  # Map
-                    length = branch_info["Length"]
-
-                self.branch_results[execution_arn][current_id] = {
-                    "results": [None]*length,
-                    "ids": [None]*length,
-                }
-
-            """
-            Record the event id so we can acknowledge the event when the
-            results from all branches have eventually been returned.
-            """
             branch_results = self.branch_results[execution_arn][current_id]
             result = branch_results["results"]
-
             event_ids = branch_results["ids"]
+
             result[index] = data
             if previous_state_type != "Parallel" and previous_state_type != "Map":
                 event_ids[index] = id
 
-            #print("asl_state_collect_results")
+            #print("----- asl_state_collect_results -----")
             #print(result)
             
             #print("----------")
@@ -2346,11 +2661,11 @@ class StateEngine(object):
             MaxConcurrency has been set and if it has check if we've received
             all of the results for the current block of MaxConcurrency. If we
             haven't then simply return, but if we have then create and publish
-            an event to re-enter the Map state with an updated "Start" index
+            an event to re-enter the Map state with an updated start index
             in order to process the next block of MaxConcurrency.
             """
             max_concurrency = state.get("MaxConcurrency", 0)
-            start = branch_info.get("Start", 0)
+            start = get_start_index(context)
             if max_concurrency:
                 end = min(start + max_concurrency, len(result))
             else:
@@ -2368,9 +2683,15 @@ class StateEngine(object):
                         event["data"] = branch_info["Input"]  # Get saved raw input
                         context["State"]["Name"] = current_state
                         context["State"]["Branch"][-1] = {
-                            "Start": end,
-                            "ID": current_id
+                            "ID": current_id,
+                            "Range": str(end) + ":" + 
+                                     str(min(end + max_concurrency, len(result))),
                         }
+
+                        if retry_count:
+                            context["State"]["RetryCount"] = retry_count
+                        if retry_timeout:
+                            context["State"]["RetryTimeout"] = retry_timeout
 
                         self.event_dispatcher.publish(event)
 
@@ -2386,20 +2707,39 @@ class StateEngine(object):
 
             context["State"]["Name"] = current_state
 
+            # Parallel and Map states apply ResultPath to "raw input"
+            data = branch_info["Input"]  # Get saved raw input
+
             if error:
                 # Set range to terminate subsequent branches/iterations
                 branch_results["terminated"] = str(start) + ":" + str(end)
 
-                handle_error(error, cause)
-                # Acknowledge the events for each branch's terminal state
-                for event_id in event_ids:
-                    if event_id:
-                        self.event_dispatcher.acknowledge(event_id)
+                """
+                If the error has been caused by a Task state failure we reset
+                the event ID in the results to None because the event will
+                get acknowledged by the Task state handler itself.
+                """
+                if previous_state_type == "Task" or previous_state_type == "Wait":
+                    event_ids[index] = None
+
+                """
+                Reset event data back to the original Map or Parallel state
+                input because handle_error could result in a Retry/Catch.
+                """
+                event["data"] = data
+
+                if retry_count:
+                    context["State"]["RetryCount"] = retry_count
+                if retry_timeout:
+                    context["State"]["RetryTimeout"] = retry_timeout
+
+                """
+                We defer acknowledging events for terminated branches/iterations
+                until there are no results pending in check_pending_results.
+                """
+                handle_error(state, error, cause)
                 return
 
-
-            # Parallel and Map states apply ResultPath to "raw input"
-            data = branch_info["Input"]  # Get saved raw input
 
             """
             https://states-language.net/spec.html#using-paths
@@ -2415,25 +2755,19 @@ class StateEngine(object):
 
                 event["data"] = merge_result(data, context, result, state)
             except IntrinsicFailure as e:
-                handle_error("States.IntrinsicFailure", str(e))
+                handle_error(state, "States.IntrinsicFailure", str(e))
                 # Acknowledge the events for each branch's terminal state
-                for event_id in event_ids:
-                    if event_id:
-                        self.event_dispatcher.acknowledge(event_id)
+                self.acknowledge_event_list(event_ids)
                 return
             except PathMatchFailure as e:
-                handle_error("States.Runtime", str(e))
+                handle_error(state, "States.Runtime", str(e))
                 # Acknowledge the events for each branch's terminal state
-                for event_id in event_ids:
-                    if event_id:
-                        self.event_dispatcher.acknowledge(event_id)
+                self.acknowledge_event_list(event_ids)
                 return
             except ResultPathMatchFailure as e:
-                handle_error("States.ResultPathMatchFailure", str(e))
+                handle_error(state, "States.ResultPathMatchFailure", str(e))
                 # Acknowledge the events for each branch's terminal state
-                for event_id in event_ids:
-                    if event_id:
-                        self.event_dispatcher.acknowledge(event_id)
+                self.acknowledge_event_list(event_ids)
                 return
 
             """
@@ -2448,9 +2782,9 @@ class StateEngine(object):
                 )
 
             # Acknowledge the events for each branch's terminal state
-            for event_id in event_ids:
-                if event_id:
-                    self.event_dispatcher.acknowledge(event_id)
+            #print("Result - event_ids:")
+            #print(event_ids)
+            self.acknowledge_event_list(event_ids)
 
             """
             Need to do this *after* acknowledging the events as it deletes the
@@ -2510,7 +2844,7 @@ class StateEngine(object):
                             execution_arn, execution_history_length
                           )
                 self.logger.error(message)
-                handle_error("States.ExecutionHistoryLimitExceeded", message)
+                handle_error(state, "States.ExecutionHistoryLimitExceeded", message)
                 self.event_dispatcher.acknowledge(id)
                 return
 
@@ -2539,6 +2873,6 @@ class StateEngine(object):
                         event, type(e).__name__, str(e), traceback.format_exc()
                     )
             self.logger.error(message)
-            handle_error("States.Runtime", message)
+            handle_error(state, "States.Runtime", message)
             self.event_dispatcher.acknowledge(id)
 

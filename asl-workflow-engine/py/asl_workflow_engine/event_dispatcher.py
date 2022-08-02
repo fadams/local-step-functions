@@ -399,18 +399,37 @@ class EventDispatcher(object):
         dictionary and acknowledge it, then remove the message from the
         dictionary. See the comment for unacknowledged_messages in constructor.
         """
-        message = self.unacknowledged_messages[id]
-        message.acknowledge(multiple=False)
-        del self.unacknowledged_messages[id]
+        #print("+++++")
+        #print("acknowledge " + str(id))
 
-        if message.subject == self.queue_name:
-            self.shared_event_consumer_unack_count -= 1
-            #print("self.shared_event_consumer_unack_count")
-            #print(self.shared_event_consumer_unack_count)
-        else:
-            self.instance_event_consumer_unack_count -= 1
-            #print("self.instance_event_consumer_unack_count")
-            #print(self.instance_event_consumer_unack_count)
+        try:
+            message = self.unacknowledged_messages[id]
+            message.acknowledge(multiple=False)
+            del self.unacknowledged_messages[id]
+
+            if message.subject == self.queue_name:
+                self.shared_event_consumer_unack_count -= 1
+                #print("self.shared_event_consumer_unack_count")
+                #print(self.shared_event_consumer_unack_count)
+            else:
+                self.instance_event_consumer_unack_count -= 1
+                #print("self.instance_event_consumer_unack_count")
+                #print(self.instance_event_consumer_unack_count)
+        except Exception as e:
+            """
+            This shouldn't generally occur, though can as a side effect of other
+            exceptions. The most likely exception is a KeyError and would occur
+            if the message had already been acknowledged, so it's better to just
+            log that it occurred than to propagate further.
+            """
+            self.logger.exception(
+                "Acknowledging message with ID {} caused the exception: {}:{}".format(
+                    id, type(e).__name__, str(e)
+                )
+            )
+
+        #print(self.unacknowledged_messages.keys())
+        #print("+++++")
 
     def publish(self, item, threadsafe=False, start_execution=False):
         """

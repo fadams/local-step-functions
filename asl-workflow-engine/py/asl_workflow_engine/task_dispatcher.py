@@ -95,6 +95,13 @@ class TaskDispatcher(object):
         self.pending_requests = {}
 
         """
+        In some cases we might wish to "cancel" pending requests, but the
+        State Engine generally indexes using the event ID. To cater for this
+        we also have the cancellers dict to map event ID to request ID
+        """
+        self.cancellers = {}
+
+        """
         Prometheus metrics intended to emulate Stepfunction CloudWatch metrics.
         https://docs.aws.amazon.com/step-functions/latest/dg/procedure-cw-metrics.html
         """
@@ -343,7 +350,48 @@ class TaskDispatcher(object):
 
         message.acknowledge(multiple=False)
 
-    def execute_task(self, resource_arn, parameters, callback, timeout, context):
+    def set_timeout_canceller(self, id, callback, timeout_id):
+        #print("set_timeout_canceller " + str(id))
+        self.cancellers[id] = (callback, timeout_id)
+
+    def remove_canceller(self, id):
+        #print("remove_canceller " + str(id))
+        if id in self.cancellers:
+            del self.cancellers[id]
+
+        #print(self.cancellers)
+
+    def cancel_task(self, id):
+        #print("cancel_task " + str(id))
+
+        task = self.cancellers.get(id)
+        if task:
+            del self.cancellers[id]
+            if isinstance(task, str):  # Represents Task correlation_id
+                # Do lookup in case timeout fires after a successful response.
+                request = self.pending_requests.get(task)
+                if request:
+                    del self.pending_requests[task]
+                    state_machine, execution_arn, resource_arn, callback, sched_time, timeout_id, task_span = request
+            else:  # Tuple representing Wait state cancellation information
+                callback, timeout_id = task
+
+                # Cancel the timeout previously set for this request.
+                self.state_engine.event_dispatcher.clear_timeout(timeout_id)
+
+            if callback and callable(callback):
+                error = {
+                    "errorType": "Task.Terminated",
+                    "errorMessage": "Task has been Terminated",
+                }
+
+                callback(error)
+
+        #print(self.cancellers)
+        #print()
+        #print(self.pending_requests.keys())
+
+    def execute_task(self, resource_arn, parameters, callback, timeout, context, id):
         """
         Look up stateMachineArn to get State Machine as we need that later to
         call state_engine.update_execution_history. We do it here to capture
@@ -531,8 +579,11 @@ class TaskDispatcher(object):
             # print(parameters)
             # TODO deal with the case of delivering to a different broker.
 
-            # Associate response callback with this request via correlation ID
+            # Associate response callback with this request via correlation ID.
             correlation_id = str(uuid.uuid4())
+
+            # Map the event ID for the Task to request ID.
+            self.cancellers[id] = correlation_id
 
             """
             Create a timeout in case the rpcmessage invocation fails.
@@ -641,6 +692,7 @@ class TaskDispatcher(object):
                     self.task_metrics["LambdaFunctionsScheduled"].inc(
                         {"LambdaFunctionArn": resource_arn}
                     )
+
 
         # def asl_service_openfaas():  # TODO
         #    print("asl_service_openfaas")

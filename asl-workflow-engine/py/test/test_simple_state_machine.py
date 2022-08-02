@@ -18,6 +18,7 @@
 #
 # Run with:
 # PYTHONPATH=.. python3 test_simple_state_machine.py
+# PYTHONPATH=.. LOG_LEVEL=DEBUG python3 test_simple_state_machine.py
 #
 """
 This test stubs out much of the EventDispatcher and TaskDispatcher so that
@@ -224,7 +225,7 @@ class EventDispatcherStub(object):
 This stubs out the real TaskDispatcher execute_task method which requires
 messaging infrastructure to run whereas this test is just a state machine test.
 """
-def execute_task_stub(resource_arn, parameters, callback, timeout, context):
+def execute_task_stub(resource_arn, parameters, callback, timeout, context, id):
     name = resource_arn.split(":")[-1]
     result = {"reply": name + " reply"}
     callback(result)
