@@ -1980,6 +1980,12 @@ class StateEngine(object):
                             key = key[:-4]
                             value = apply_path(data, context, value)
 
+                        """
+                        The "asl_choice_" prefix mitigates the risk of the key
+                        value executing an arbitrary function, so disable
+                        semgrep warning.
+                        """
+                        # nosemgrep
                         next_state = locals().get(key, lambda: None)(value)
                     except Exception:
                         next_state = None
@@ -2836,7 +2842,7 @@ class StateEngine(object):
         this failure unfortunately doesn't seem to be documented anywhere.
         """
         if state_machine_type == "STANDARD":
-            execution_history_length = len(self.execution_history[execution_arn])
+            execution_history_length = len(self.execution_history.get(execution_arn, []))
             #print(execution_history_length)
             if execution_history_length > MAX_EXECUTION_HISTORY_LENGTH:
                 message = ("Execution '{}' has a history of {} events and has "
@@ -2851,9 +2857,12 @@ class StateEngine(object):
         """
         Use the ASL state type of the current state to dynamically invoke the
         appropriate ASL state handler given state type. The (Python) lambda
-        provides a default handler in case of malformed ASL. 
+        provides a default handler in case of malformed ASL.
+        The "asl_state_" prefix mitigates the risk of the state_type value
+        executing an arbitrary function, so disable semgrep warning.
         """
         try:
+            # nosemgrep
             locals().get(
                 "asl_state_" + state_type,
                 lambda: self.logger.error(

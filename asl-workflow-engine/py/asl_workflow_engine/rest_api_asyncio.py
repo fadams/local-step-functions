@@ -1008,8 +1008,13 @@ class RestAPI(object):
 
             # ------------------------------------------------------------------
 
-            # Use the API action to dynamically invoke the appropriate handler.
+            """
+            Use the API action to dynamically invoke the appropriate handler.
+            The "aws_api_" prefix mitigates the risk of the action value
+            executing an arbitrary function, so disable semgrep warning.
+            """
             try:
+                # nosemgrep
                 value, code = locals().get("aws_api_" + action, aws_api_InvalidAction)()
                 return value, code
             except Exception as e:

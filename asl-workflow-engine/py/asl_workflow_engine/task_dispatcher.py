@@ -183,6 +183,9 @@ class TaskDispatcher(object):
         self.reply_to.set_message_listener(self.handle_rpcmessage_response)
         self.producer = session.producer()
 
+        # Handle non-existent AMQP rpcmessage processors - see callback comments.
+        self.producer.set_return_callback(self.handle_unroutable_rpcmessage)
+
         #print(self.reply_to.name)
         #print(self.producer.name)
 
@@ -213,8 +216,43 @@ class TaskDispatcher(object):
         await self.reply_to.set_message_listener(self.handle_rpcmessage_response)
         self.producer = await session.producer()
 
+        # Handle non-existent AMQP rpcmessage processors - see callback comments.
+        self.producer.set_return_callback(self.handle_unroutable_rpcmessage)
+
         #print(self.reply_to.name)
         #print(self.producer.name)
+
+    def handle_unroutable_rpcmessage(self, message):
+        """
+        It is possible that a Task Resource might specify an AMQP rpcmessage
+        processor that hasn't been started. It is impossible for the ASL Engine
+        to detect if the rpcmessage processor exists per se, however in general
+        the resource part of the Task's Resource ARN is the name of the
+        processor's queue and if the processor uses autodelete queues the queue
+        lifecycle should mirror the processor lifecycle.
+
+        We publish RPC messages with the mandatory flag set
+        https://www.rabbitmq.com/reliability.html#routing
+        and pass this method as the return_callback to handle AMQP Basic.Return.
+        """
+        error_message = "Specified Task Resource arn:aws:rpcmessage:local::function:{} is not currently available".format(message.subject)
+        error = {"errorType": "States.TaskFailed", "errorMessage": error_message}
+        error_as_bytes = json.dumps(error).encode('utf-8')
+
+        message.body = error_as_bytes
+
+        """
+        Delegate to "real" response handler as we should be able to handle this
+        like any other Task error given the error object we've just added.
+
+        We check the correlation_id is in self.pending_requests before
+        delegating, because an unroutable rpcmessage will result in immediate
+        cancellation of all Tasks in Map Iterators or Parallel Branches and this
+        check suppresses spurious info logs that are only really relevant where
+        we have *real* "orphaned" RPC responses coming from *actual* resources.
+        """
+        if message.correlation_id in self.pending_requests:
+            self.handle_rpcmessage_response(message)
 
     def handle_rpcmessage_response(self, message):
         """
@@ -642,6 +680,7 @@ class TaskDispatcher(object):
                             # Give the RPC Message a TTL equivalent to the ASL
                             # Task State (or Execution) timeout period. Both are ms.
                     expiration=timeout,
+                    mandatory=True,  # Ensure unroutable messages are returned
                 )
 
                 timeout_id = self.state_engine.event_dispatcher.set_timeout(
@@ -911,7 +950,10 @@ class TaskDispatcher(object):
 
         """
         Given the required service from the resource_arn dynamically invoke the
-        appropriate service handler. The lambda provides a default handler. 
+        appropriate service handler. The lambda provides a default handler.
+        The "asl_service_" prefix mitigates the risk of the service value
+        executing an arbitrary function, so disable semgrep warning.
         """
+        # nosemgrep
         locals().get("asl_service_" + service, asl_service_InvalidService)()
 

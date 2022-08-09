@@ -103,8 +103,13 @@ class EventDispatcher(object):
 
         self.logger.info("Loading messaging module {}".format(self.name))
 
-        # Load the module whose name is derived from the specified queue_type.
+        """
+        Load the module whose name is derived from the specified queue_type.
+        The "asl_workflow_engine." prefix and "_messaging" suffix mitigates the
+        risk of the name value loading arbitrary module, so disable semgrep warning.
+        """
         try:
+            # nosemgrep
             messaging = importlib.import_module(self.name)
             globals()["Connection"] = messaging.Connection
             globals()["Message"] = messaging.Message

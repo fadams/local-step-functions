@@ -623,6 +623,68 @@ class Producer(Destination):
         # print("name = " + self.name)
         # print("subject = " + self.subject)
 
+    def set_return_callback(self, return_callback):
+        """
+        Set a callback to be triggered when basic_publish is sent a Message
+        that has been rejected and returned by the server because, for example,
+        he Message is unroutable.
+
+        For RabbitMQ AMQP Channel documentation see:
+        https://pika.readthedocs.io/en/stable/modules/channel.html
+
+        add_on_return_callback(callback)
+        """
+        self._return_callback = return_callback
+        self._return_callback_is_coroutine = asyncio.iscoroutinefunction(return_callback)
+
+        """
+        Note that add_on_return_callback is a local method and does not need
+        to be wrapped in a Future to await success of actually *adding* the
+        callback. The callback itself, however, is invoked asynchronously by
+        the broker via the AMQP Basic.Returm.
+        """
+        self.session.channel.add_on_return_callback(self.return_callback)
+
+    def return_callback(self, channel, method, properties, body):
+        """
+        This is the callback function that will be called when basic_publish is
+        sent a message that has been rejected and returned by the server.
+
+        https://pika.readthedocs.io/en/stable/modules/spec.html#pika.spec.Basic.Return
+        """
+        if hasattr(self, "_return_callback"):
+            # Now call the registered return callback
+            message = Message(
+                body,
+                properties=properties.headers,
+                content_type=properties.content_type,
+                content_encoding=properties.content_encoding,
+                durable=(properties.delivery_mode == 2),
+                priority=properties.priority,
+                correlation_id=properties.correlation_id,
+                reply_to=properties.reply_to,
+                expiration=properties.expiration,
+                message_id=properties.message_id,
+                timestamp=properties.timestamp,
+                type=properties.type,
+                user_id=properties.user_id,
+                app_id=properties.app_id,
+                cluster_id=properties.cluster_id,
+            )
+            # These two private attributes are added to Message to enable
+            # Message's acknowledge() methods, note however that returned
+            # Messages should not be acknowledged.
+            message._channel = channel
+            message._delivery_tag = 0
+
+            # If return_callback is coroutine run as a task else call directly. 
+            if self._return_callback_is_coroutine:
+                asyncio.get_event_loop().create_task(
+                    self._return_callback(message)
+                )
+            else:
+                self._return_callback(message)
+
     def enable_exceptions(self, sync=False):
         """
         With JMS the spec tends towards implying a delivery guarantee, in
@@ -804,6 +866,7 @@ class Producer(Destination):
                 routing_key=routing_key,
                 body=message.body,
                 properties=properties,
+                mandatory=message.mandatory,
             )
 
 
@@ -1056,6 +1119,7 @@ class Message(object):
         content_encoding=None,
         redelivered=False,
         durable=True,
+        mandatory=False,
         priority=None,
         correlation_id=None,
         reply_to=None,
@@ -1084,6 +1148,7 @@ class Message(object):
         self.content_encoding = content_encoding
         self.redelivered = redelivered
         self.durable = durable
+        self.mandatory = mandatory
         self.priority = priority
         self.correlation_id = correlation_id
         self.reply_to = reply_to
@@ -1116,6 +1181,7 @@ class Message(object):
             "timestamp",
             "redelivered",
             "durable",
+            "mandatory",
             "properties",
         ]:
             value = self.__dict__[name]
@@ -1182,7 +1248,7 @@ class Message(object):
                     message was delivered to. 
                     """
                     self._channel.basic_ack(delivery_tag=0, multiple=True)
-                else:
+                elif self._delivery_tag:
                     self._channel.basic_ack(delivery_tag=self._delivery_tag)
 
             if threadsafe:

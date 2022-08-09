@@ -46,6 +46,10 @@ class Worker():
         self.logger = init_logging(log_name=name)
 
     def handler(self, message):
+        # Used to simulate a processor that doesn't respond and causes Timeout.
+        if self.name == "NonExistentLambda":
+            return
+
         print(self.name + " working")
         print(message)
 
@@ -122,6 +126,7 @@ if __name__ == '__main__':
                "TimeoutLambda",
                "InternalErrorHandledLambda",
                "InternalErrorNotHandledLambda",
+               "NonExistentLambda",
                "mime-id",]
     #workers = ["SuccessLambda"]
     loop = asyncio.get_event_loop()

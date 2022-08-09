@@ -360,6 +360,13 @@ def evaluate_payload_template(input, context, template):
                             "Intrinsic Function {}, Invalid argument {}.".format(func, arg)
                         )
 
+        """
+        We used
+        normalised_func = func.replace("States.", "asl_intrinsic_")
+        and the "asl_intrinsic_" prefix mitigates the risk of the supplied value
+        executing an arbitrary function, so disable semgrep warning.
+        """
+        # nosemgrep
         return locals().get(
             normalised_func,
             asl_intrinsic_Default,
