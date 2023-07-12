@@ -78,7 +78,7 @@ import sys
 assert sys.version_info >= (3, 6)  # Bomb out if not running Python3.6
 
 
-import re, time, uuid, logging, opentracing
+import asyncio, re, time, uuid, logging, opentracing
 from datetime import datetime, timezone
 from quart import Quart, escape, request, jsonify, abort
 from aioprometheus import Registry, render
@@ -161,6 +161,7 @@ class RestAPI(object):
         self.execution_metrics = state_engine.execution_metrics
         self.task_metrics = state_engine.task_dispatcher.task_metrics
         self.event_dispatcher = event_dispatcher
+        self.task_dispatcher = state_engine.task_dispatcher
 
         self.system_metrics = {}
         metrics_config = config.get("metrics", {})
@@ -266,7 +267,7 @@ class RestAPI(object):
             That the methods are prefixed with "aws_api_" is a mitigation against
             accidentally or deliberately placing an invalid action in the API.
             """
-            def aws_api_CreateStateMachine():
+            async def aws_api_CreateStateMachine():
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_CreateStateMachine.html
                 """
@@ -407,7 +408,7 @@ class RestAPI(object):
 
                 return jsonify(resp), 200
 
-            def aws_api_ListStateMachines():
+            async def aws_api_ListStateMachines():
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_ListStateMachines.html
                 """
@@ -435,7 +436,7 @@ class RestAPI(object):
 
                 return jsonify(resp), 200
 
-            def aws_api_DescribeStateMachine():
+            async def aws_api_DescribeStateMachine():
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeStateMachine.html
                 """
@@ -480,7 +481,7 @@ class RestAPI(object):
 
                 return jsonify(resp), 200
 
-            def aws_api_DescribeStateMachineForExecution():
+            async def aws_api_DescribeStateMachineForExecution():
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeStateMachineForExecution.html
                 """
@@ -541,7 +542,7 @@ class RestAPI(object):
 
                 return jsonify(resp), 200
 
-            def aws_api_UpdateStateMachine():
+            async def aws_api_UpdateStateMachine():
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_UpdateStateMachine.html
                 """
@@ -665,7 +666,7 @@ class RestAPI(object):
 
                 return jsonify(resp), 200
 
-            def aws_api_DeleteStateMachine():
+            async def aws_api_DeleteStateMachine():
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_DeleteStateMachine.html
                 TODO This should really mark the state machine for deletion and
@@ -701,7 +702,7 @@ class RestAPI(object):
 
                 return "", 200
 
-            def aws_api_StartExecution():
+            async def aws_api_StartExecution():
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_StartExecution.html
                 """
@@ -817,10 +818,13 @@ class RestAPI(object):
                     """
                     threadsafe=True is important here as the RestAPI runs in a
                     different thread to the main event_dispatcher loop.
+                    use_shared_queue=True publishes to a queue shared by all
+                    workflow engine instances which allows executions to be
+                    load-balanced across instances.
                     """
                     try:
                         self.event_dispatcher.publish(
-                            event, threadsafe=True, start_execution=True
+                            event, threadsafe=True, use_shared_queue=True
                         )
                     except:
                         message = ("RestAPI StartExecution: Internal messaging "
@@ -832,7 +836,208 @@ class RestAPI(object):
 
                     return jsonify(resp), 200
 
-            def aws_api_ListExecutions():
+            async def aws_api_StartSyncExecution():
+                """
+                https://docs.aws.amazon.com/step-functions/latest/apireference/API_StartSyncExecution.html
+                """
+                # print(params)
+                state_machine_arn = params.get("stateMachineArn")
+                if not state_machine_arn:
+                    self.logger.warning(
+                        "RestAPI StartSyncExecution: stateMachineArn must be specified"
+                    )
+                    return aws_error("MissingRequiredParameter"), 400
+
+                if not valid_state_machine_arn(state_machine_arn):
+                    self.logger.warning(
+                        "RestAPI StartSyncExecution: {} is an invalid "
+                        "State Machine ARN".format(
+                            state_machine_arn
+                        )
+                    )
+                    return aws_error("InvalidArn"), 400
+
+                """
+                If name isn't provided create one from a UUID. TODO names should
+                be unique within a 90 day period, at the moment there is no code
+                to check for uniqueness of provided names so client code that
+                doesn't honour this may currently succeed in this implementation
+                but fail if calling real AWS StepFunctions.
+                """
+                name = params.get("name", str(uuid.uuid4()))
+                if not valid_name(name):
+                    self.logger.warning(
+                        "RestAPI StartSyncExecution: {} is an invalid name".format(name)
+                    )
+                    return aws_error("InvalidName"), 400
+
+                input_as_string = params.get("input", "{}")
+                """
+                First check if the input length has exceeded the 262144 character
+                quota described in Stepfunction Quotas page.
+                https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
+                """
+                if len(input_as_string) > MAX_DATA_LENGTH:
+                    self.logger.error(
+                        "RestAPI StartSyncExecution: input size for execution "
+                        "'{}' exceeds the maximum number of characters "
+                        "service limit.".format(name)
+                    )
+                    return aws_error("InvalidExecutionInput"), 400
+
+                try:
+                    input = json.loads(input_as_string)
+                except TypeError as e:
+                    self.logger.error("RestAPI StartSyncExecution: "
+                                      "Invalid input, {}".format(e))
+                    return aws_error("InvalidExecutionInput"), 400
+                except ValueError as e:
+                    self.logger.error(
+                        "RestAPI StartSyncExecution: input {} does not "
+                        "contain valid JSON".format(
+                            input
+                        )
+                    )
+                    return aws_error("InvalidExecutionInput"), 400
+
+                # Look up stateMachineArn
+                state_machine = self.asl_store.get_cached_view(state_machine_arn)
+                if not state_machine:
+                    self.logger.info(
+                        "RestAPI StartSyncExecution: State Machine {} does "
+                        "not exist".format(
+                            state_machine_arn
+                        )
+                    )
+                    return aws_error("StateMachineDoesNotExist"), 400
+
+                if state_machine.get("type") != "EXPRESS":
+                    self.logger.error(
+                        "RestAPI StartSyncExecution: Method is only supported "
+                        "by EXPRESS workflows"
+                    )
+                    return aws_error("StateMachineTypeNotSupported"), 400
+
+                # Form executionArn from stateMachineArn and name
+                arn = parse_arn(state_machine_arn)
+                execution_arn = create_arn(
+                    service="states",
+                    region=arn.get("region", self.region),
+                    account=arn["account"],
+                    resource_type="execution",
+                    resource=arn["resource"] + ":" + name,
+                )
+
+                with opentracing.tracer.start_active_span(
+                    operation_name="StartSyncExecution:ExecutionLaunching",
+                    child_of=span_context("http_headers", request.headers, self.logger),
+                    tags={
+                        "component": "rest_api",
+                        "execution_arn": execution_arn
+                    }
+                ) as scope:
+                    """
+                    The application context is described in the AWS documentation:
+                    https://docs.aws.amazon.com/step-functions/latest/dg/input-output-contextobject.html
+                    """
+                    # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
+                    start_time = datetime.now(timezone.utc).astimezone().isoformat()
+                    context = {
+                        "Tracer": inject_span("text_map", scope.span, self.logger),
+                        "Execution": {
+                            "Id": execution_arn,
+                            "Input": input,
+                            "Name": name,
+                            "RoleArn": state_machine.get("roleArn"),
+                            "StartTime": start_time,
+                        },
+                        "State": {"EnteredTime": start_time, "Name": ""},  # Start state
+                        "StateMachine": {
+                            "Id": state_machine_arn,
+                            "Name": state_machine.get("name"),
+                        },
+                    }
+
+                    """
+                    Create a future that will allow us to await the result of
+                    the state machine that we will be launching. The result
+                    will eventually be set by end_execution() in StateMachine
+                    which will in turn call TaskDispatcher handle_sfn_response().
+                    We pass on_result() as the callback to handle_sfn_response()
+                    and use that to call future.set_result() to resolve the
+                    future. To avoid blocking forever we set a timeout and use
+                    that to call future.set_exception().
+                    """
+                    future = asyncio.get_event_loop().create_future()
+
+                    def on_result(result):
+                        future.set_result(result)  # result is execution_detail
+
+                    def on_timeout():
+                        if execution_arn in self.task_dispatcher.pending_requests:
+                            del self.task_dispatcher.pending_requests[execution_arn]
+                        future.set_exception(Exception("timeout"))
+
+                    """
+                    The value for timeout should really be 300000 as the
+                    EXPRESS workflow execution quota is 5 minutes. This has
+                    been "relaxed" to 30 minutes here because usage of the
+                    ASL Engine by the author has often used EXPRESS to avoid
+                    recording execution metadata and used the start/end
+                    execution AMQP broadcast that emulates CloudWatch Events.
+                    As CloudWatch Events aren't supported by AWS EXPRESS
+                    Stepfunctions we already have a bit of blurring of lines
+                    between EXPRESS and STANDARD. TODO maybe this timeout
+                    should be configurable so we can force limits closer to
+                    real AWS EXPRESS workflows.
+                    """
+                    timeout = 1800000
+                    timeout_id = self.event_dispatcher.set_timeout(
+                        on_timeout, timeout
+                    )
+
+                    """
+                    The service response message is handled by handle_sfn_response()
+                    If the response occurs before the timeout expires the timeout
+                    should be cancelled, so we store the timeout_id as well as the
+                    required callback in the dict keyed by correlation_id.
+                    """
+                    self.task_dispatcher.pending_requests[execution_arn] = (
+                        None,  # Unused by handle_sfn_response() on this path
+                        None,  # Unused by handle_sfn_response() on this path
+                        "aws_api_StartSyncExecution",  # Fake resource
+                        on_result,
+                        0,     # Unused by handle_sfn_response() on this path
+                        timeout_id,
+                        None   # Unused by handle_sfn_response() on this path
+                    )
+
+                    """
+                    threadsafe=True is important here as the RestAPI runs in a
+                    different thread to the main event_dispatcher loop.
+                    use_shared_queue=False publishes to the queue associated
+                    with this workflow engine instance. That is necessary for
+                    StartSyncExecution as we need to be able to correlate the
+                    child execution request and its subsequent completion.
+                    """
+                    event = {"data": input, "context": context}
+                    try:
+                        self.event_dispatcher.publish(
+                            event, threadsafe=True, use_shared_queue=False
+                        )
+                    except:
+                        message = ("RestAPI StartSyncExecution: Internal messaging "
+                                  "error, start message could not be published.")
+                        self.logger.error(message)
+                        return aws_error("InternalError", message), 500
+
+                    try:
+                        resp = await future
+                        return jsonify(resp), 200
+                    except Exception as e:
+                        return "Execution Timed Out", 408
+
+            async def aws_api_ListExecutions():
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_ListExecutions.html
                 """
@@ -909,7 +1114,7 @@ class RestAPI(object):
 
                 return jsonify(resp), 200
 
-            def aws_api_DescribeExecution():
+            async def aws_api_DescribeExecution():
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html
                 """
@@ -942,7 +1147,7 @@ class RestAPI(object):
                     execution = dict(execution)
                 return jsonify(execution), 200
 
-            def aws_api_GetExecutionHistory():
+            async def aws_api_GetExecutionHistory():
                 """
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionHistory.html
                 """
@@ -1002,7 +1207,7 @@ class RestAPI(object):
 
                 return jsonify(resp), 200
 
-            def aws_api_InvalidAction():
+            async def aws_api_InvalidAction():
                 self.logger.error("RestAPI invalid action: {}".format(action))
                 return "InvalidAction", 400
 
@@ -1015,7 +1220,7 @@ class RestAPI(object):
             """
             try:
                 # nosemgrep
-                value, code = locals().get("aws_api_" + action, aws_api_InvalidAction)()
+                value, code = await locals().get("aws_api_" + action, aws_api_InvalidAction)()
                 return value, code
             except Exception as e:
                 self.logger.error(

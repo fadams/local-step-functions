@@ -119,6 +119,9 @@ class WorkflowEngine(object):
         no["topic"] = os.environ.get(
             "NOTIFIER_TOPIC", no.get("topic")
         )
+        no["message_ttl"] = os.environ.get(
+            "NOTIFIER_MESSAGE_TTL", no.get("message_ttl", 0)
+        )
 
         se = config["state_engine"]
         se["store_url"] = os.environ.get("STATE_ENGINE_STORE_URL",

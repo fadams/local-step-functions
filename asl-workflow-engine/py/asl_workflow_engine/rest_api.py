@@ -684,10 +684,13 @@ class RestAPI(object):
                     """
                     threadsafe=True is important here as the RestAPI runs in a
                     different thread to the main event_dispatcher loop.
+                    use_shared_queue=True publishes to a queue shared by all
+                    workflow engine instances which allows executions to be
+                    load-balanced across instances.
                     """
                     try:
                         self.event_dispatcher.publish(
-                            event, threadsafe=True, start_execution=True
+                            event, threadsafe=True, use_shared_queue=True
                         )
                     except:
                         message = ("RestAPI StartExecution: Internal messaging "

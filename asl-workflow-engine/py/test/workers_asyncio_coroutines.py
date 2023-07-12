@@ -48,6 +48,7 @@ class Worker():
     def handler(self, message):
         # Used to simulate a processor that doesn't respond and causes Timeout.
         if self.name == "NonExistentLambda":
+            message.acknowledge() # Acknowledges the original request
             return
 
         print(self.name + " working")

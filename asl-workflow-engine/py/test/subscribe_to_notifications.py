@@ -116,8 +116,12 @@ class NotificationHandler(object):
 if __name__ == '__main__':
     # Subscribe to notification events from these State Machines
     state_machines = [
-        "arn:aws:states:local:0123456789:stateMachine:simple_state_machine.*",  
+        "arn:aws:states:local:0123456789:stateMachine:simple_state_machine.*",
+        "arn:aws:states:local:0123456789:stateMachine:simple_express_state_machine.*",
         "arn:aws:states:local:0123456789:stateMachine:caller_state_machine.*",
+        "arn:aws:states:local:0123456789:stateMachine:sync1_caller_state_machine.*",
+        "arn:aws:states:local:0123456789:stateMachine:sync2_caller_state_machine.*",
+        "arn:aws:states:local:0123456789:stateMachine:sync_express_caller_state_machine.*",
         "arn:aws:states:local:0123456789:stateMachine:parallel1.*",
         "arn:aws:states:local:0123456789:stateMachine:map1.*",
         "arn:aws:states:local:0123456789:stateMachine:iterate2_state_machine.*",

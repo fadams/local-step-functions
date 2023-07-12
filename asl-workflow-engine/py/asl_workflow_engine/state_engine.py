@@ -533,6 +533,7 @@ class StateEngine(object):
         output_as_string = json.dumps(data)
         context = event["context"]
         state = context["State"]
+        execution = context["Execution"]
         execution_arn = context["Execution"]["Id"]
 
         execution_failed = isinstance(data, dict) and data.get("Error")
@@ -564,7 +565,6 @@ class StateEngine(object):
             state_machine_arn = create_arn(arn)
             name = split[2]
 
-            execution = context["Execution"]
             start_date = parse_rfc3339_datetime(execution["StartTime"]).timestamp()
 
             execution_detail = {
@@ -600,15 +600,20 @@ class StateEngine(object):
                 execution_detail["status"] = "FAILED"
                 """
                 As per the DescribeExecution API, "output" is set only if the
-                execution succeeds. If the execution fails, this field is null. 
+                execution succeeds. If the execution fails, this field is null
+                and instead "error" and "cause" fields are set. 
                 https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html
                 """
+                error = data.get("Error")
+                cause = data.get("Cause")
+                execution_detail["error"] = error
+                execution_detail["cause"] = cause
                 execution_detail["output"] = None
                 self.update_execution_history(
                     state_machine,
                     execution_arn,
                     "ExecutionFailed",
-                    {"cause": data.get("Cause"), "error": data.get("Error")}
+                    {"error": error, "cause": cause}
                 )
 
                 if self.execution_metrics:
@@ -658,6 +663,11 @@ class StateEngine(object):
             self.execution_metrics["ExecutionTime"].observe(
                 {"StateMachineArn": state_machine_arn}, duration 
             )
+
+        # Handle any synchronously called child state machines.
+        self.task_dispatcher.handle_sfn_response(
+            execution_arn, execution["Input"], data, execution_detail
+        )
 
         self.broadcast_notification(execution_arn, execution_detail, context)
 
@@ -1242,7 +1252,9 @@ class StateEngine(object):
             catch_matched = False
             execution_arn = context["Execution"]["Id"]
 
-            if state_machine_type == "STANDARD":
+            if error_type == "States.TaskFailed":
+                boiler_plate = ""
+            elif state_machine_type == "STANDARD":
                 id = len(self.execution_history[execution_arn])
                 boiler_plate = (
                     "An error occurred while executing the state "
@@ -1415,12 +1427,12 @@ class StateEngine(object):
                             error_type = "States.IntrinsicFailure"
                             error_message = str(e)
                             break
-                        except PathMatchFailure as e:
-                            error_type = "States.Runtime"
-                            error_message = str(e) + " " + str(data)
-                            break
                         except ResultPathMatchFailure as e:
                             error_type = "States.ResultPathMatchFailure"
+                            error_message = str(e) + " " + str(data)
+                            break
+                        except (PathMatchFailure, Exception) as e:
+                            error_type = "States.Runtime"
                             error_message = str(e) + " " + str(data)
                             break
 
@@ -1460,7 +1472,6 @@ class StateEngine(object):
             execution_arn = context["Execution"]["Id"]
 
             data = event["data"]
-            #task_terminated = isinstance(data, dict) and data.get("Error") == "Task.Terminated"
             error = isinstance(data, dict) and data.get("Error")
             task_terminated = error == "Task.Terminated"
 
@@ -1572,11 +1583,11 @@ class StateEngine(object):
             except IntrinsicFailure as e:
                 handle_error(state, "States.IntrinsicFailure", str(e))
                 self.event_dispatcher.acknowledge(id)
-            except PathMatchFailure as e:
-                handle_error(state, "States.Runtime", str(e))
-                self.event_dispatcher.acknowledge(id)
             except ResultPathMatchFailure as e:
                 handle_error(state, "States.ResultPathMatchFailure", str(e))
+                self.event_dispatcher.acknowledge(id)
+            except (PathMatchFailure, Exception) as e:
+                handle_error(state, "States.Runtime", str(e))
                 self.event_dispatcher.acknowledge(id)
 
         def asl_state_Task_delegate():
@@ -1603,7 +1614,14 @@ class StateEngine(object):
                 https://docs.aws.amazon.com/lambda/latest/dg/nodejs-prog-mode-exceptions.html
                 https://docs.aws.amazon.com/lambda/latest/dg/java-exceptions.html
                 """
-                error_type = result.get("errorType")
+                error_type = None
+                # Ensure result is a dict before calling get() (it could be any JSON)
+                if isinstance(result, dict):
+                    if result.get("Error"):
+                        # If error is a failed child state machine
+                        error_type = "States.TaskFailed"
+                    else:
+                        error_type = result.get("errorType", "")
                 if error_type:
                     if error_type == "States.DataLimitExceeded":
                         error_message = ("The state/task '{}' returned a result "
@@ -1611,6 +1629,9 @@ class StateEngine(object):
                                          "number of characters service limit.").format(
                                             state.get("Resource")
                                          )
+                    elif error_type == "States.TaskFailed":
+                        # Failed child state machine execution detail
+                        error_message = json.dumps(result)
                     else:
                         error_message = result.get("errorMessage", "")
 
@@ -1672,11 +1693,11 @@ class StateEngine(object):
                     except IntrinsicFailure as e:
                         handle_error(state, "States.IntrinsicFailure", str(e))
                         self.event_dispatcher.acknowledge(id)
-                    except PathMatchFailure as e:
-                        handle_error(state, "States.Runtime", str(e))
-                        self.event_dispatcher.acknowledge(id)
                     except ResultPathMatchFailure as e:
                         handle_error(state, "States.ResultPathMatchFailure", str(e))
+                        self.event_dispatcher.acknowledge(id)
+                    except (PathMatchFailure, Exception) as e:
+                        handle_error(state, "States.Runtime", str(e))
                         self.event_dispatcher.acknowledge(id)
 
 
@@ -1766,7 +1787,7 @@ class StateEngine(object):
             except IntrinsicFailure as e:
                 handle_error(state, "States.IntrinsicFailure", str(e))
                 self.event_dispatcher.acknowledge(id)
-            except PathMatchFailure as e:
+            except (PathMatchFailure, Exception) as e:
                 handle_error(state, "States.Runtime", str(e))
                 self.event_dispatcher.acknowledge(id)
 
@@ -2563,11 +2584,11 @@ class StateEngine(object):
             except IntrinsicFailure as e:
                 handle_error(state, "States.IntrinsicFailure", str(e))
                 self.event_dispatcher.acknowledge(id)
-            except PathMatchFailure as e:
-                handle_error(state, "States.Runtime", str(e))
-                self.event_dispatcher.acknowledge(id)
             except ResultPathMatchFailure as e:
                 handle_error(state, "States.ResultPathMatchFailure", str(e))
+                self.event_dispatcher.acknowledge(id)
+            except (PathMatchFailure, Exception) as e:
+                handle_error(state, "States.Runtime", str(e))
                 self.event_dispatcher.acknowledge(id)
 
         def asl_state_Map():
@@ -2765,13 +2786,13 @@ class StateEngine(object):
                 # Acknowledge the events for each branch's terminal state
                 self.acknowledge_event_list(event_ids)
                 return
-            except PathMatchFailure as e:
-                handle_error(state, "States.Runtime", str(e))
+            except ResultPathMatchFailure as e:
+                handle_error(state, "States.ResultPathMatchFailure", str(e))
                 # Acknowledge the events for each branch's terminal state
                 self.acknowledge_event_list(event_ids)
                 return
-            except ResultPathMatchFailure as e:
-                handle_error(state, "States.ResultPathMatchFailure", str(e))
+            except (PathMatchFailure, Exception) as e:
+                handle_error(state, "States.Runtime", str(e))
                 # Acknowledge the events for each branch's terminal state
                 self.acknowledge_event_list(event_ids)
                 return

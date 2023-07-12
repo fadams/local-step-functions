@@ -436,21 +436,25 @@ class EventDispatcher(object):
         #print(self.unacknowledged_messages.keys())
         #print("+++++")
 
-    def publish(self, item, threadsafe=False, start_execution=False):
+    def publish(self, item, threadsafe=False, use_shared_queue=False):
         """
         Publish the supplied item to the event queue hosted on the underlying
         messaging fabric. This method is mainly here to abstract some of the
         implementation details from the state engine.
 
-        The start_execution field is used to select between publishing to the
+        The use_shared_queue field is used to select between publishing to the
         event queue that is shared by all instances of asl_workflow_engine and
-        the per instance queue.
+        the per instance queue. Publishing to the shared queue allows load
+        balancing of executions across instances of the ASL Engine but using
+        the per instance queue gives "affinity" for a given execution to a
+        given instance, which is needed for more "stateful" paths like
+        Map and Parallel states and waiting for StartSyncExecution to complete.
 
         Setting content_type to application/json isn't necessary for correct
         operation, however it is the correct thing to do:
         https://www.ietf.org/rfc/rfc4627.txt.
         """
-        if start_execution:
+        if use_shared_queue:
             subject = self.queue_name
         else:
             subject = self.instance_queue_name
@@ -472,7 +476,8 @@ class EventDispatcher(object):
         message = Message(
             json.dumps(item),
             content_type="application/json",
-            properties=carrier_properties
+            properties=carrier_properties,
+            expiration=self.notifier_config["message_ttl"]
         )
         message.subject = subject
         self.topic_producer.send(message)

@@ -133,15 +133,15 @@ class TaskDispatcher(object):
                     ns + "LambdaFunctionsTimedOut",
                     "The number of Lambda functions that time out on close."
                 ),
-                #"ServiceIntegrationTime": Summary(
-                #    ns + "ServiceIntegrationTime",
-                #    "The interval, in milliseconds, between the time the " +
-                #    "Service Task is scheduled and the time it closes."
-                #),
-                #"ServiceIntegrationsFailed": Counter(
-                #    ns + "ServiceIntegrationsFailed",
-                #    "The number of failed Service Tasks."
-                #),
+                "ServiceIntegrationTime": Summary(
+                    ns + "ServiceIntegrationTime",
+                    "The interval, in milliseconds, between the time the " +
+                    "Service Task is scheduled and the time it closes."
+                ),
+                "ServiceIntegrationsFailed": Counter(
+                    ns + "ServiceIntegrationsFailed",
+                    "The number of failed Service Tasks."
+                ),
                 "ServiceIntegrationsScheduled": Counter(
                     ns + "ServiceIntegrationsScheduled",
                     "The number of scheduled Service Tasks."
@@ -150,10 +150,10 @@ class TaskDispatcher(object):
                     ns + "ServiceIntegrationsSucceeded",
                     "The number of successfully completed Service Tasks."
                 ),
-                #"ServiceIntegrationsTimedOut": Counter(
-                #    ns + "ServiceIntegrationsTimedOut",
-                #    "The number of Service Tasks that time out on close."
-                #)
+                "ServiceIntegrationsTimedOut": Counter(
+                    ns + "ServiceIntegrationsTimedOut",
+                    "The number of Service Tasks that time out on close."
+                )
             }
 
 
@@ -267,104 +267,85 @@ class TaskDispatcher(object):
         correlation_id = message.correlation_id
         request = self.pending_requests.get(correlation_id)
         if request:
-            try:
-                del self.pending_requests[correlation_id]
-                state_machine, execution_arn, resource_arn, callback, sched_time, timeout_id, rpcmessage_task_span = request
-                with opentracing.tracer.scope_manager.activate(
-                    span=rpcmessage_task_span,
-                    finish_on_close=True
-                ) as scope:
-                    # Cancel the timeout previously set for this request.
-                    self.state_engine.event_dispatcher.clear_timeout(timeout_id)
-                    if callable(callback):
-                        message_body = message.body
-                        """
-                        First check if the response has exceeded the 262144
-                        character quota described in Stepfunction Quotas page.
-                        https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
-                        We do the test here as we have the raw JSON string handy.
-                        """
-                        if len(message_body) > MAX_DATA_LENGTH:
-                            result = {"errorType": "States.DataLimitExceeded"}
-                        else:
+            del self.pending_requests[correlation_id]
+            state_machine, execution_arn, resource_arn, callback, sched_time, timeout_id, task_span = request
+            with opentracing.tracer.scope_manager.activate(
+                span=task_span,
+                finish_on_close=True
+            ) as scope:
+                # Cancel the timeout previously set for this request.
+                self.state_engine.event_dispatcher.clear_timeout(timeout_id)
+                if callable(callback):
+                    message_body = message.body
+                    """
+                    First check if the response has exceeded the 262144
+                    character quota described in Stepfunction Quotas page.
+                    https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
+                    We do the test here as we have the raw JSON string handy.
+                    """
+                    if len(message_body) > MAX_DATA_LENGTH:
+                        result = {"errorType": "States.DataLimitExceeded"}
+                    else:
+                        try:
                             message_body_as_string = message_body.decode("utf8")
                             result = json.loads(message_body_as_string)
+                        except ValueError as e:
+                            error_message = ("Response {} does not contain "
+                                "valid JSON").format(message.body)
+                            result = {
+                                "errorType": "States.Runtime",
+                                "errorMessage": error_message
+                            }
+                            self.logger.error(error_message)
+
+                    error_type = None
+                    if isinstance(result, dict):
                         error_type = result.get("errorType")
-                        if error_type:
-                            error_message = result.get("errorMessage", "")
-                            opentracing.tracer.active_span.set_tag("error", True)
-                            opentracing.tracer.active_span.log_kv(
-                                {
-                                    "event": error_type,
-                                    "message": error_message,
-                                }
+                    if error_type:
+                        error_message = result.get("errorMessage", "")
+                        opentracing.tracer.active_span.set_tag("error", True)
+                        opentracing.tracer.active_span.log_kv(
+                            {
+                                "event": error_type,
+                                "message": error_message,
+                            }
+                        )
+
+                        self.state_engine.update_execution_history(
+                            state_machine, execution_arn,
+                            "LambdaFunctionFailed",
+                            {
+                                "error": error_type,
+                                "cause": error_message,
+                            },
+                        )
+
+                        if self.task_metrics: 
+                            self.task_metrics["LambdaFunctionsFailed"].inc(
+                                {"LambdaFunctionArn": resource_arn}
                             )
-
-                            self.state_engine.update_execution_history(
-                                state_machine,
-                                execution_arn,
-                                "LambdaFunctionFailed",
-                                {
-                                    "error": error_type,
-                                    "cause": error_message,
-                                },
-                            )
-
-                            if self.task_metrics:
-                                """
-                                When Lambda times out it returns JSON including
-                                "errorType": "TimeoutError"
-                                See the following for an example illustration
-                                https://stackoverflow.com/questions/65036533/my-lambda-is-throwing-a-invoke-error-timeout
-                                rpcmessage processors should follow the same
-                                convention so we can trap processor timeout
-                                errors and provide metrics on these.
-                                """
-
-                                """
-                                The following is commented out because although
-                                the documentation in https://docs.aws.amazon.com/step-functions/latest/dg/procedure-cw-metrics.html for LambdaFunctionsTimedOut says: 
-                                "The number of Lambda functions that time out
-                                on close." it seems that real AWS Stepfunctions
-                                actually use the LambdaFunctionsTimedOut metric
-                                to record the count of timed out Task states
-                                """
-                                """
-                                if error_type == "TimeoutError":
-                                    self.task_metrics["LambdaFunctionsTimedOut"].inc(
-                                        {"LambdaFunctionArn": resource_arn}
-                                    )
-                                """
-
-                                self.task_metrics["LambdaFunctionsFailed"].inc(
-                                    {"LambdaFunctionArn": resource_arn}
-                                )
-                        else:
-                            self.state_engine.update_execution_history(
-                                state_machine,
-                                execution_arn,
-                                "LambdaFunctionSucceeded",
-                                {
-                                    "output": message_body_as_string,
-                                },
-                            )
-
-                            if self.task_metrics:
-                                self.task_metrics["LambdaFunctionsSucceeded"].inc(
-                                    {"LambdaFunctionArn": resource_arn}
-                                )
+                    else:
+                        self.state_engine.update_execution_history(
+                            state_machine, execution_arn,
+                            "LambdaFunctionSucceeded",
+                            {
+                                "output": message_body_as_string,
+                            },
+                        )
 
                         if self.task_metrics:
-                            duration = (time.time()  * 1000.0) - sched_time
-                            self.task_metrics["LambdaFunctionTime"].observe(
-                                {"LambdaFunctionArn": resource_arn}, duration
+                            self.task_metrics["LambdaFunctionsSucceeded"].inc(
+                                {"LambdaFunctionArn": resource_arn}
                             )
 
-                        callback(result)
-            except ValueError as e:
-                self.logger.error(
-                    "Response {} does not contain valid JSON".format(message.body)
-                )
+                    if self.task_metrics:
+                        duration = (time.time()  * 1000.0) - sched_time
+                        self.task_metrics["LambdaFunctionTime"].observe(
+                            {"LambdaFunctionArn": resource_arn}, duration
+                        )
+
+                    callback(result)
+
         else:
             with opentracing.tracer.start_active_span(
                 operation_name="Task",
@@ -387,6 +368,121 @@ class TaskDispatcher(object):
 
 
         message.acknowledge(multiple=False)
+
+    def handle_sfn_response(self, correlation_id, input, output, execution_detail):
+        """
+        Called by state_engine.end_execution() to handle the responses (the
+        output from ExecutionsSucceeded or ExecutionFailed) for any
+        *synchronously* called child state machines.
+
+        A pending_request will only be present for the case of synchronously
+        executed child state machines, so the lookup of pending_requests might
+        legitimately more often than not return None.
+        """
+        request = self.pending_requests.get(correlation_id)
+        if request:
+            del self.pending_requests[correlation_id]
+            state_machine, execution_arn, resource_arn, callback, sched_time, timeout_id, task_span = request
+
+            # Cancel the timeout previously set for this request.
+            self.state_engine.event_dispatcher.clear_timeout(timeout_id)
+
+            if not isinstance(execution_detail , dict):  # May be (non JSON) RedisDict
+                execution_detail = dict(execution_detail)
+
+            """
+            In addition to using handle_sfn_response() to deal with responses
+            for synchronously launched child state functions we also use it
+            to handle the response to the StartSyncExecution API request. In
+            that case the behaviour is slightly different and handled by the
+            aws_api_StartSyncExecution method in RestAPI. We use the "fake"
+            Resource ARN aws_api_StartSyncExecution set in that method to
+            allow us to do a "short circuit" callback and return execution_detail.
+            """
+            if resource_arn == "aws_api_StartSyncExecution":
+                callback(execution_detail)
+                return
+
+            with opentracing.tracer.scope_manager.activate(
+                span=task_span,
+                finish_on_close=True
+            ) as scope:
+                if callable(callback):
+                    """
+                    The child stepfunction Task response is largely the same as
+                    https://docs.aws.amazon.com/step-functions/latest/apireference/API_DescribeExecution.html
+                    also known as the execution detail. One difference is that
+                    for the API response the keys are lowerCamelCase whereas
+                    for the internal stepfunction results the keys are Pascal
+                    Case so we need to clone execution_detail and capitalize.
+                    Also for the .sync:2 resource the Input and Output fields
+                    are JSON not String.
+                    """
+                    result = {
+                        k.capitalize(): v for k, v in execution_detail.items()
+                    }
+                    resource_type = "states"
+                    if resource_arn.endswith(".sync:2"):
+                        resource = "startExecution.sync:2"
+                        result["Input"] = input
+                        if "Output" in result:
+                            result["Output"] = output
+                    elif resource_arn.endswith(".sync"):
+                        resource = "startExecution.sync"
+                    else:
+                        resource = "sfn:startSyncExecution"
+                        resource_type = "aws-sdk"
+
+                    error_type = result.get("Error")
+                    result_as_string = json.dumps(result)
+                    if error_type:
+                        error_message = result.get("Cause")
+                        opentracing.tracer.active_span.set_tag("error", True)
+                        opentracing.tracer.active_span.log_kv(
+                            {
+                                "event": "States.TaskFailed",
+                                "message": result_as_string,
+                            }
+                        )
+
+                        self.state_engine.update_execution_history(
+                            state_machine, execution_arn,
+                            "TaskFailed",
+                            {
+                                "error": "States.TaskFailed",
+                                "cause": result_as_string,
+                                "resource": resource,
+                                "resourceType": resource_type,
+                            },
+                        )
+
+                        if self.task_metrics: 
+                            self.task_metrics["ServiceIntegrationsFailed"].inc(
+                                {"ServiceIntegrationResourceArn": resource_arn}
+                            )
+                    else:
+                        self.state_engine.update_execution_history(
+                            state_machine, execution_arn,
+                            "TaskSucceeded",
+                            {
+                                "output": result_as_string,
+                                "resource": resource,
+                                "resourceType": resource_type,
+                            },
+                        )
+
+                        if self.task_metrics:
+                            self.task_metrics["ServiceIntegrationsSucceeded"].inc(
+                                {"ServiceIntegrationResourceArn": resource_arn}
+                            )
+
+                    if self.task_metrics:
+                        duration = (time.time()  * 1000.0) - sched_time
+                        self.task_metrics["ServiceIntegrationTime"].observe(
+                            {"ServiceIntegrationResourceArn": resource_arn}, duration
+                        )
+
+                    callback(result)
 
     def set_timeout_canceller(self, id, callback, timeout_id):
         #print("set_timeout_canceller " + str(id))
@@ -432,8 +528,8 @@ class TaskDispatcher(object):
     def execute_task(self, resource_arn, parameters, callback, timeout, context, id):
         """
         Look up stateMachineArn to get State Machine as we need that later to
-        call state_engine.update_execution_history. We do it here to capture
-        in the execute_task closure, so it may be used in error_callback too.
+        call state_engine.update_execution_history. We do it here to capture in
+        the execute_task closure, so it may be used in send_error_callback too.
         """
         state_machine_arn = context["StateMachine"]["Id"]
         state_machine = self.state_engine.asl_store.get_cached_view(state_machine_arn)
@@ -507,7 +603,7 @@ class TaskDispatcher(object):
         Timeout is in ms as a floating point number.
         """
 
-        def error_callback(carrier, error, callback):
+        def send_error_callback(carrier, error):
             """
             A wrapper for use when returning errors to the calling Task.
             The wrapper is mainly to provide OpenTracing boilerplate.
@@ -517,10 +613,6 @@ class TaskDispatcher(object):
             carrier, which should be an OpenTracing Carrier. If we do have the
             original span then carrier should be None, and the span should be 
             managed in the code calling this function.
-            We pass in the callback to be used by this function as it may be
-            called from something asynchronous like a timeout, where the
-            callback may have been stored in pending_requests rather than using
-            the callback wrapped in the closure of execute_task.
             """
             scope = None
             if carrier:
@@ -542,10 +634,12 @@ class TaskDispatcher(object):
 
                 if error["errorType"] == "States.Timeout":
                     execution_arn = context["Execution"]["Id"]
+                    update_type = "TaskTimedOut"
+                    if service == "rpcmessage" or service == "lambda":
+                        update_type = "LambdaFunctionTimedOut"
                     self.state_engine.update_execution_history(
-                        state_machine,
-                        execution_arn,
-                        "LambdaFunctionTimedOut",
+                        state_machine, execution_arn,
+                        update_type,
                         {
                             "error": error["errorType"],
                             "cause": error["errorMessage"],
@@ -559,12 +653,44 @@ class TaskDispatcher(object):
                     LambdaFunctionsFailed metric.
                     """
                     if self.task_metrics:
-                        self.task_metrics["LambdaFunctionsTimedOut"].inc(
-                            {"LambdaFunctionArn": resource_arn}
-                        )
+                        if service == "rpcmessage" or service == "lambda":
+                            self.task_metrics["LambdaFunctionsTimedOut"].inc(
+                                {"LambdaFunctionArn": resource_arn}
+                            )
+                        else:
+                            self.task_metrics["ServiceIntegrationsTimedOut"].inc(
+                                {"ServiceIntegrationResourceArn": resource_arn}
+                            )
 
                 if callable(callback):
                     callback(error)
+
+
+        def timeout_callback(correlation_id):
+            """
+            If a Task timeout occurs when invoking rpcmessage or startExecution
+            retrieve the original request and generate an error message passing
+            that to send_error_callback. The actual timeout function is nested
+            in asl_service_rpcmessage or asl_service_states_startExecution in
+            order to capture the corelation id in a closure, it then delegates
+            here as to allow both rpcmessage and startExecution to use it.
+            """
+            # Do lookup in case timeout fires after a successful response.
+            request = self.pending_requests.get(correlation_id)
+            if request:
+                del self.pending_requests[correlation_id]
+                state_machine, execution_arn, resource_arn, callback, sched_time, timeout_id, task_span = request
+                error = {
+                    "errorType": "States.Timeout",
+                    "errorMessage": "State or Execution ran for longer " +
+                        "than the specified TimeoutSeconds value",
+                }
+                with opentracing.tracer.scope_manager.activate(
+                    span=task_span,
+                    finish_on_close=True
+                ) as scope:
+                    send_error_callback(None, error)
+
 
         """
         If resource_arn starts with $ then attempt to look up its value from
@@ -578,7 +704,7 @@ class TaskDispatcher(object):
                 resource_arn
             )
             error = {"errorType": "InvalidResource", "errorMessage": message}
-            error_callback(context.get("Tracer", {}), error, callback)
+            send_error_callback(context.get("Tracer", {}), error)
             return
 
         arn = parse_arn(resource_arn)
@@ -624,26 +750,13 @@ class TaskDispatcher(object):
             self.cancellers[id] = correlation_id
 
             """
-            Create a timeout in case the rpcmessage invocation fails.
-            The timeout sends an error response to the calling Task state and
-            deletes the pending request.
+            Create a timeout handler in case the rpcmessage invocation fails.
+            The timeout_callback sends an error response to the calling Task
+            state and deletes the pending request, using the correlation_id
+            captured here by the on_timeout closure to lookup the request.
             """
             def on_timeout():
-                # Do lookup in case timeout fires after a successful response.
-                request = self.pending_requests.get(correlation_id)
-                if request:
-                    del self.pending_requests[correlation_id]
-                    state_machine, execution_arn, resource_arn, callback, sched_time, timeout_id, task_span = request
-                    error = {
-                        "errorType": "States.Timeout",
-                        "errorMessage": "State or Execution ran for longer " +
-                            "than the specified TimeoutSeconds value",
-                    }
-                    with opentracing.tracer.scope_manager.activate(
-                        span=task_span,
-                        finish_on_close=True
-                    ) as scope:
-                        error_callback(None, error, callback)
+                timeout_callback(correlation_id)
 
             """
             Start an OpenTracing trace for the rpcmessage request.
@@ -707,8 +820,7 @@ class TaskDispatcher(object):
                 self.producer.send(message)
 
                 self.state_engine.update_execution_history(
-                    state_machine,
-                    execution_arn,
+                    state_machine, execution_arn,
                     "LambdaFunctionScheduled",
                     {
                         "input": parameters_as_string,
@@ -746,11 +858,31 @@ class TaskDispatcher(object):
             """
             The service part of the Resource ARN might be "states" for a number
             of Service Integrations, so we must further demultiplex based on
-            the resource_type. Initially just support states startExecution to
-            allow us to invoke another state machine execution.
+            the resource_type. Initially just support states startExecution and
+            its variants allow us to invoke another state machine execution.
+            startExecution launches a child state machine in an asynchronous
+            "fire and forget" manner and simply returns the executionArn and
+            startDate immediately and the calling Task state doesn't wait for
+            the child state machine to complete. On the other hand
+            startExecution.sync, startExecution.sync:2 and for EXPRESS workflows
+            aws-sdk:sfn:startSyncExecution all launch the child state machine
+            synchronously, where the calling Task will wait for the child state
+            machine to complete
+            https://awsteele.com/blog/2021/10/12/nested-express-step-functions.html
+            https://stackoverflow.com/a/69548324
             """
-            if resource_type == "states" and resource == "startExecution":
-                asl_service_states_startExecution()
+            if resource_type == "states":
+                if (resource == "startExecution" or
+                    resource == "startExecution.sync" or
+                    resource == "startExecution.sync:2"):
+                    asl_service_states_startExecution()
+                else:
+                    asl_service_InvalidService()
+            elif resource_type == "aws-sdk":
+                if resource == "sfn:startSyncExecution":
+                    asl_service_states_startExecution()
+                else:
+                    asl_service_InvalidService()
             else:
                 asl_service_InvalidService()
 
@@ -768,8 +900,16 @@ class TaskDispatcher(object):
             documents the new more direct service integration:            
             https://docs.aws.amazon.com/step-functions/latest/dg/connect-stepfunctions.html
 
-            The resource ARN should be of the form:
+            For asynchronous execution of child sate machines the resource ARN
+            should be of the form:
             arn:aws:states:region:account-id:states:startExecution
+
+            For synchronous execution of child state machines:
+            arn:aws:states:region:account-id:states:startExecution.sync
+            arn:aws:states:region:account-id:states:startExecution.sync:2
+
+            For synchronous execution of EXPRESS child state machines:
+            arn:aws:states:region:account-id:aws-sdk:sfn:startSyncExecution
 
             The Task must have a Parameters field of the form:
 
@@ -781,25 +921,31 @@ class TaskDispatcher(object):
 
             if the execution Name is not specified in the Parameters a UUID will
             be assigned by the service.
-
-            TODO: At the moment this integration only supports the direct
-            request/response stepfunction integration NOT the "run a job" (.sync)
-            or "wait for callback" (.waitForTaskToken) forms so at the moment
-            we can't yet wait for the child stepfunction to complete or wait
-            for a callback. To achieve this we *probably* need to poll
-            ListExecutions with statusFilter="SUCCEEDED" comparing the response
-            with our executionArn, which is mostly fairly straightforward but
-            becomes more involved in a clustered environment. The callback
-            integration might be slightly easier to implement as it shouldn't
-            need any polling but one oddity is that there doesn't seem to be
-            a stepfunctions integration for SendTaskSuccess (or SendTaskFailure
-            or SendTaskHeartbeat) as those are the APIs that relate to
-            triggering or cancelling a callback by implication there is no
-            direct mechanism yet for a child stepfunction to actually do the
-            callback other than proxying via a lambda. My guess is that this is
-            an accidental omission that was missed when implementing the
-            stepfunctions integration and will be added IDC.
             """
+
+            """
+            EXPRESS workflows do not support job-run (.sync) or callback
+            (.waitForTaskToken) service integration patterns.
+            https://docs.aws.amazon.com/step-functions/latest/dg/concepts-standard-vs-express.html
+            Note however that STANDARD workflows can use these to launch
+            child EXPRESS workflows as illustrated in this AWS example:
+            https://docs.aws.amazon.com/step-functions/latest/dg/sample-project-express-selective-checkpointing.html
+
+            EXPRESS workflows do, however, support being invoked by the
+            StartSyncExecution API call, and both STANDARD and EXPRESS workflows
+            can launch EXPRESS child executions by using the awd-skd integration
+            arn:aws:states:region:account-id:aws-sdk:sfn:startSyncExecution
+            """
+            if ((resource == "startExecution.sync" or
+                 resource == "startExecution.sync:2") and
+                state_machine.get("type") == "EXPRESS"):
+                message = "TaskDispatcher asl_service_states_startExecution: " \
+                          "Express state machine does not support '.sync' " \
+                          "service integration"
+                error = {"errorType": "InvalidResourceArn", "errorMessage": message}
+                send_error_callback(context.get("Tracer", {}), error)
+                return
+
             child_execution_name = parameters.get("Name", str(uuid.uuid4()))
 
             child_state_machine_arn = parameters.get("StateMachineArn")
@@ -807,7 +953,30 @@ class TaskDispatcher(object):
                 message = "TaskDispatcher asl_service_states_startExecution: " \
                           "StateMachineArn must be specified"
                 error = {"errorType": "MissingRequiredParameter", "errorMessage": message}
-                error_callback(context.get("Tracer", {}), error, callback)
+                send_error_callback(context.get("Tracer", {}), error)
+                return
+
+            # Look up stateMachineArn to get child State Machine
+            child_state_machine = self.state_engine.asl_store.get_cached_view(
+                child_state_machine_arn
+            )
+            if child_state_machine:
+                # sfn:startSyncExecution is only supported by EXPRESS workloads 
+                if (resource == "sfn:startSyncExecution" and
+                    child_state_machine.get("type") != "EXPRESS"):
+                    message = "TaskDispatcher asl_service_states_startExecution: " \
+                              "The sfn:startSyncExecution service integration " \
+                              "is only supported by Express workflows"
+                    error = {"errorType": "InvalidResourceArn", "errorMessage": message}
+                    send_error_callback(context.get("Tracer", {}), error)
+                    return
+            else:  # Child state machine doesn't exist.
+                message = "TaskDispatcher asl_service_states_startExecution: " \
+                          "State Machine {} does not exist".format(
+                    child_state_machine_arn
+                )
+                error = {"errorType": "StateMachineDoesNotExist", "errorMessage": message}
+                send_error_callback(context.get("Tracer", {}), error)
                 return
 
             arn = parse_arn(child_state_machine_arn)
@@ -824,18 +993,25 @@ class TaskDispatcher(object):
                 resource=child_state_machine_name + ":" + child_execution_name,
             )
 
-            # Look up stateMachineArn to get child State Machine
-            child_state_machine = self.state_engine.asl_store.get_cached_view(
-                child_state_machine_arn
-            )
-            if not child_state_machine:
-                message = "TaskDispatcher asl_service_states_startExecution: " \
-                          "State Machine {} does not exist".format(
-                    child_state_machine_arn
-                )
-                error = {"errorType": "StateMachineDoesNotExist", "errorMessage": message}
-                error_callback(context.get("Tracer", {}), error, callback)
-                return
+            """
+            Create a timeout handler in case a (synchronous) child state
+            machine invocation fails. The timeout_callback sends an error
+            response to the calling Task state and deletes the pending request,
+            using the child_execution_arn captured here by the on_timeout
+            closure to lookup the request.
+            """
+            def on_timeout():
+                timeout_callback(child_execution_arn)
+
+            """
+            If the resource is simply startExecution then the child
+            state machine is launched "asynchronously" where the parent
+            execution simply carries on without waiting for the result.
+            The other startExecution resources like startExecution.sync
+            launch the execution "synchronously" where the Task state
+            will not progress until the child execution completes.
+            """
+            async_child = True if resource == "startExecution" else False
 
             """
             Start an OpenTracing trace for the child StartExecution request.
@@ -850,7 +1026,8 @@ class TaskDispatcher(object):
                     "resource_arn": resource_arn,
                     "execution_arn": execution_arn,
                     "child_execution_arn": child_execution_arn,
-                }
+                },
+                finish_on_close=async_child
             ) as scope:
                 # Create the execution context and the event to publish to launch
                 # the requested new state machine execution.
@@ -872,22 +1049,52 @@ class TaskDispatcher(object):
                     },
                 }
 
+                """
+                If the child state machine is launched synchronously we handle
+                the success/failure response in handle_sfn_response().
+                If the response occurs before the timeout expires the timeout
+                should be cancelled, so we store the timeout_id as well as the
+                required callback in the dict keyed by child_execution_arn.
+                """
+                if not async_child:  # E.g. it's launched synchronously
+                    timeout_id = self.state_engine.event_dispatcher.set_timeout(
+                        on_timeout, timeout
+                    )
+
+                    """
+                    The service response message is handled by handle_sfn_response()
+                    If the response occurs before the timeout expires the timeout
+                    should be cancelled, so we store the timeout_id as well as the
+                    required callback in the dict keyed by correlation_id.
+                    As mentioned above we also store the OpenTracing span so that if a 
+                    timeout occurs we can raise an error on the request span.
+                    """
+                    self.pending_requests[child_execution_arn] = (
+                        state_machine,
+                        execution_arn,
+                        resource_arn,
+                        callback,
+                        time.time() * 1000,
+                        timeout_id,
+                        scope.span
+                    )
+
+
                 # Publish event that launches the new state machine execution.
                 event = {"data": parameters.get("Input", {}), "context": child_context}
                 self.state_engine.event_dispatcher.publish(
-                    event, start_execution=True
+                    event, use_shared_queue=async_child
                 )
 
                 parameters_as_string = json.dumps(parameters)
                 self.state_engine.update_execution_history(
-                    state_machine,
-                    execution_arn,
+                    state_machine, execution_arn,
                     "TaskScheduled",
                     {
                         "parameters": parameters_as_string,
                         "region": region,
                         "resource": resource_arn,
-                        "resourceType": "execution",
+                        "resourceType": "states",
                         "timeoutInSeconds": math.ceil(timeout/1000)
                     },
                 )
@@ -906,47 +1113,52 @@ class TaskDispatcher(object):
                         {"ServiceIntegrationResourceArn": resource_arn}
                     )
 
+                """
+                For "fire and forget"/async child executions we trigger the
+                Task state on_response() handler immediately with the result.
+                For synchronous child Stepfunction executions we return
+                immediately after scheduling the invocation and the
+                on_response() handler will be called at some point later when
+                the handle_sfn_response() method eventually gets called when
+                the child execution ends.
+                """
+                if async_child:
+                    result = {"executionArn": execution_arn, "startDate": time.time()}
 
-                result = {"executionArn": execution_arn, "startDate": time.time()}
-
-                """
-                For "fire and forget" launching should this be TaskSubmitted?
-                https://docs.aws.amazon.com/step-functions/latest/apireference/API_TaskSubmittedEventDetails.html
-                """
-                result_as_string = json.dumps(result)
-                self.state_engine.update_execution_history(
-                    state_machine,
-                    execution_arn,
-                    "TaskSucceeded",
-                    {
-                        "output": result_as_string,
-                        "resource": resource_arn,
-                        "resourceType": "execution",
-                    },
-                )
-
-                """
-                For now we only support "fire and forget" launching of child
-                Stepfunctions and *not* synchronous ones that wait for the
-                child Stepfunction to complete nor waitForTaskToken style
-                callbacks. As it it fire and forget the ServiceIntegration
-                is deemed successful if the request is successfully dispatched.
-                TODO the other ServiceIntegration metrics are really only useful
-                for synchronous (not fire and forget) execution invocations.
-                """
-                if self.task_metrics:
-                    self.task_metrics["ServiceIntegrationsSucceeded"].inc(
-                        {"ServiceIntegrationResourceArn": resource_arn}
+                    """
+                    For "fire and forget" launching should this be TaskSubmitted?
+                    https://docs.aws.amazon.com/step-functions/latest/apireference/API_TaskSubmittedEventDetails.html
+                    """
+                    result_as_string = json.dumps(result)
+                    self.state_engine.update_execution_history(
+                        state_machine, execution_arn,
+                        "TaskSucceeded",
+                        {
+                            "output": result_as_string,
+                            "resource": resource_arn,
+                            "resourceType": "states",
+                        },
                     )
 
-                callback(result)
+                    """
+                    For "fire and forget" launching of child Stepfunctions the      
+                    ServiceIntegration is deemed successful if the request is
+                    successfully dispatched.
+                    """
+                    if self.task_metrics:
+                        self.task_metrics["ServiceIntegrationsSucceeded"].inc(
+                            {"ServiceIntegrationResourceArn": resource_arn}
+                        )
+
+                    callback(result)  # Trigger Task state on_response() handler.
+
 
         def asl_service_InvalidService():
             message = "TaskDispatcher ARN {} refers to unsupported service".format(
                 resource_arn
             )
             error = {"errorType": "InvalidService", "errorMessage": message}
-            error_callback(context.get("Tracer", {}), error, callback)
+            send_error_callback(context.get("Tracer", {}), error)
 
         """
         Given the required service from the resource_arn dynamically invoke the

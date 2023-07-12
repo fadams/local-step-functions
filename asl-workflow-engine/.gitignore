@@ -2,3 +2,6 @@
 __pycache__
 .project
 /.pydevproject
+docker-experiments
+asl_store
+*.bak*
