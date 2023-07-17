@@ -427,7 +427,7 @@ class EventDispatcher(object):
             if the message had already been acknowledged, so it's better to just
             log that it occurred than to propagate further.
             """
-            self.logger.exception(
+            self.logger.debug(
                 "Acknowledging message with ID {} caused the exception: {}:{}".format(
                     id, type(e).__name__, str(e)
                 )

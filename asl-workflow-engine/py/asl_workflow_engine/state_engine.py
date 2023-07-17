@@ -98,14 +98,14 @@ def parse_rfc3339_datetime(rfc3339):
         delta = -delta
     return raw_datetime.replace(tzinfo=timezone(delta))
 
-def find_state(current_state_machine, current_state):
+def find_state(current_state_machine, current_state, force_full_lookup=False):
     """
     Look-up the specified JSON state machine to find the state object with the
     given name. If it can't be found by a simple look-up try to find it in
     a nested (e.g. Parallel or Map) state machine as described below.
     """
     state = current_state_machine.get(current_state)
-    if state == None:
+    if state == None or force_full_lookup:
         """
         If the state can't be found in the parent state machine search for
         it more deeply using recursive descent, as the specified state might
@@ -115,13 +115,18 @@ def find_state(current_state_machine, current_state):
         the query then use simple string splits to find the path of that.
         """
         path = get_full_jsonpath(current_state_machine, "$.." + current_state)
-        states_path = path.rpartition("['States']")[0]
-        if path and states_path:
-            branch = apply_jsonpath(current_state_machine, states_path)
-            current_state_machine = branch["States"]
-            state = current_state_machine.get(current_state)
+        if path:
+            states_path = path[0].rpartition("['States']")[0]
+            if states_path:
+                branch = apply_jsonpath(current_state_machine, states_path)
+                current_state_machine = branch["States"]
+                state = current_state_machine.get(current_state)
+        else:
+            path = []
+    else:
+        path = ["$['" + current_state + "']"]
 
-    return state, current_state_machine
+    return state, current_state_machine, path
 
 def merge_result(data, context, result, state, output_path=None):
     """
@@ -1203,7 +1208,10 @@ class StateEngine(object):
         outside of their own “States” field. TODO use current_state_machine to
         check that state transitions only occur within the correct "States".
         """
-        state, current_state_machine = find_state(ASL["States"], current_state)
+        force_full_lookup = "Branch" in context["State"]
+        state, current_state_machine, state_path = find_state(
+            ASL["States"], current_state, force_full_lookup
+        )
         if state == None:  # state should be valid by this point
             self.log_and_drop("State {} does not exist", current_state, id)
             return
@@ -1267,13 +1275,15 @@ class StateEngine(object):
 
             """
             An execution failed due to some exception that could not be
-            processed. Often these are caused by errors at runtime, such
-            as attempting to apply InputPath or OutputPath on a null
-            JSON payload. A States.Runtime error is not retriable, and
-            will always cause the execution to fail.
-            A retry or catch on States.ALL will not catch States.Runtime errors. 
+            handled. Often these are caused by errors at runtime, such
+            as attempting to apply InputPath or OutputPath on a null JSON
+            payload. A States.Runtime error is not retriable and will always
+            cause the execution to fail. Similarly, with a Task.Terminated
+            error we want terminated Tasks to end immediately.
+            A retry or catch on States.ALL will not catch these errors.
             """
-            runtime_error = (error_type == "States.Runtime")
+            runtime_error = (error_type == "States.Runtime" or
+                             error_type == "Task.Terminated")
 
             """
             Get the state_type from the passed state value rather than relying
@@ -1478,8 +1488,6 @@ class StateEngine(object):
             if "Branch" in context["State"]:
                 # Handle terminal states for Map Iterators and Parallel Branches.
 
-                # Suppress history update if terminal state due to Task termination.
-                #if not task_terminated:
                 # Suppress history update if terminal state due to error.
                 if not error:
                     current_state = context["State"]["Name"]
@@ -1518,6 +1526,8 @@ class StateEngine(object):
                 if task_terminated:
                     if execution_arn in self.branch_results:
                         self.check_pending_results(execution_arn)
+                    else:
+                        self.end_execution(state_machine, state_type, event)           
                 else:
                     self.end_execution(state_machine, state_type, event)
 
@@ -1658,7 +1668,8 @@ class StateEngine(object):
                         # Log message without parameters info
                         #self.logger.warn("{} Task State: {} using Resource: {} received an error response: {{'errorType': {}, 'errorMessage': {}}}".format(execution_arn, current_state, resource_arn, error_type, error_message))
 
-                        self.task_dispatcher.remove_canceller(id)
+
+                    self.task_dispatcher.cancel_task(id)
 
                     handle_error(state, error_type, error_message)
                     self.event_dispatcher.acknowledge(id)
@@ -2094,7 +2105,6 @@ class StateEngine(object):
                 if error:  # Should be only happen on Task.Terminated
                     error_type = error.get("errorType")
                     error_message = error.get("errorMessage")
-
                     handle_error(state, error_type, error_message)
                     self.event_dispatcher.acknowledge(id)
                 else:
@@ -2193,7 +2203,9 @@ class StateEngine(object):
                 correct event should be published and the correct id acknowledged.
                 """
                 timeout_id = self.event_dispatcher.set_timeout(on_timeout, timeout)
-                self.task_dispatcher.set_timeout_canceller(id, on_timeout, timeout_id)
+                self.task_dispatcher.set_timeout_canceller(
+                    id, timeout_id, on_timeout, context["Execution"]["Id"]
+                )
             except PathMatchFailure as e:
                 handle_error(state, "States.Runtime", str(e))
                 self.event_dispatcher.acknowledge(id)
@@ -2645,7 +2657,9 @@ class StateEngine(object):
             Retrieve the full parent Map/Parallel state dict from the ASL given
             the parent state name.
             """
-            state, current_state_machine = find_state(ASL["States"], current_state)
+            state, current_state_machine, state_path = find_state(
+                ASL["States"], current_state
+            )
             if state == None:  # state should be valid by this point
                 self.log_and_drop("State {} does not exist", current_state, id)
                 return
@@ -2826,6 +2840,22 @@ class StateEngine(object):
         """
         # ----------------------------------------------------------------------
 
+        """
+        If state_path has two or more elements it means that, when a transition
+        in a Map or Parallel child state machine (e.g. Iterator or Branch) was
+        attempted, multiple path results were found for the Next state name.
+        State names MUST be unique within the scope of the whole state machine
+        https://states-language.net/#states-fields so this condition is illegal.
+        """
+        if len(state_path) > 1:
+            message = ("Transition to non-unique state '{}' failed: "
+                       "Illegal State Machine.").format(
+                        current_state
+                      )
+            self.logger.error(message)
+            handle_error(state, "States.Runtime", message)
+            self.event_dispatcher.acknowledge(id)
+            return
 
         """
         Update the execution history with StateEntered information. The test

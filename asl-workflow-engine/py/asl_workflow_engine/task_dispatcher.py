@@ -484,9 +484,35 @@ class TaskDispatcher(object):
 
                     callback(result)
 
-    def set_timeout_canceller(self, id, callback, timeout_id):
-        #print("set_timeout_canceller " + str(id))
-        self.cancellers[id] = (callback, timeout_id)
+    def set_function_canceller(self, id, task_id, execution_arn):
+        self.cancellers[id] = {
+            "Type": "Function",
+            "TaskID": task_id,
+            "Execution": execution_arn,
+            "Callback": None
+        }
+        #print("----- set_function_canceller " + str(id))
+        #print(self.cancellers[id])
+
+    def set_sfn_canceller(self, id, task_id, execution_arn):
+        self.cancellers[id] = {
+            "Type": "StepFunction",
+            "TaskID": task_id,
+            "Execution": execution_arn,
+            "Callback": None
+        }
+        #print("----- set_sfn_canceller " + str(id))
+        #print(self.cancellers[id])
+
+    def set_timeout_canceller(self, id, task_id, callback, execution_arn):
+        self.cancellers[id] = {
+            "Type": "Timeout",
+            "TaskID": task_id,
+            "Execution": execution_arn,
+            "Callback": callback
+        }
+        #print("----- set_timeout_canceller " + str(id))
+        #print(self.cancellers[id])
 
     def remove_canceller(self, id):
         #print("remove_canceller " + str(id))
@@ -497,29 +523,56 @@ class TaskDispatcher(object):
 
     def cancel_task(self, id):
         #print("cancel_task " + str(id))
+        canceller = self.cancellers.get(id)
+        if canceller:
+            error = {
+                "errorType": "Task.Terminated",
+                "errorMessage": "Task has been Terminated",
+            }
 
-        task = self.cancellers.get(id)
-        if task:
+            task_type = canceller.get("Type")
+            task_id = canceller.get("TaskID")
             del self.cancellers[id]
-            if isinstance(task, str):  # Represents Task correlation_id
-                # Do lookup in case timeout fires after a successful response.
-                request = self.pending_requests.get(task)
-                if request:
-                    del self.pending_requests[task]
-                    state_machine, execution_arn, resource_arn, callback, sched_time, timeout_id, task_span = request
-            else:  # Tuple representing Wait state cancellation information
-                callback, timeout_id = task
+            if task_type == "Timeout":  # Wait state cancellation information
+                #print("----- CANCELLING WAIT STATE -----")
+                callback = canceller.get("Callback")
 
                 # Cancel the timeout previously set for this request.
-                self.state_engine.event_dispatcher.clear_timeout(timeout_id)
+                self.state_engine.event_dispatcher.clear_timeout(task_id)
+                if callable(callback):
+                    callback(error)
+            else:  # Function or Stepfunction
+                #print("----- CANCELLING TASK STATE -----")
+                # Do lookup in case timeout fires after a successful response.
+                request = self.pending_requests.get(task_id)
+                if request:  # Get callback and span from request (other fields ignored)
+                    del self.pending_requests[task_id]
+                    state_machine, execution_arn, resource_arn, callback, sched_time, timeout_id, task_span = request
 
-            if callback and callable(callback):
-                error = {
-                    "errorType": "Task.Terminated",
-                    "errorMessage": "Task has been Terminated",
-                }
+                    with opentracing.tracer.scope_manager.activate(
+                        span=task_span,
+                        finish_on_close=True
+                    ) as scope:
+                        if callable(callback):
+                            callback(error)
 
-                callback(error)
+            """
+            If the Task being cancelled is a child Stepfunction search the
+            outstanding cancellers for any whose associated Execution ARN
+            matches the Task ID (which is the ARN of the child Stepfunction
+            launched by the Task for the case of Stepfunction Tasks).
+            We store the IDs of any matching cancellers in a list using list
+            comprehension then iterate that, cancelling the Task.
+            Note that this search is a linear search, so less than ideal, but
+            this block is only called for cancelled Stepfunctions and the
+            number of items in self.cancellers should (on average) be modest
+            as it only stores Tasks or Wait states currently awaiting results
+            at any given point in time.
+            """
+            if task_type == "StepFunction":
+                l = [k for k, v in self.cancellers.items() if v.get("Execution") == task_id]
+                for child_id in l:
+                    self.cancel_task(child_id)
 
         #print(self.cancellers)
         #print()
@@ -746,9 +799,6 @@ class TaskDispatcher(object):
             # Associate response callback with this request via correlation ID.
             correlation_id = str(uuid.uuid4())
 
-            # Map the event ID for the Task to request ID.
-            self.cancellers[id] = correlation_id
-
             """
             Create a timeout handler in case the rpcmessage invocation fails.
             The timeout_callback sends an error response to the calling Task
@@ -795,6 +845,9 @@ class TaskDispatcher(object):
                     expiration=timeout,
                     mandatory=True,  # Ensure unroutable messages are returned
                 )
+
+                # Map the event ID for the Task to request ID.
+                self.set_function_canceller(id, correlation_id, execution_arn)
 
                 timeout_id = self.state_engine.event_dispatcher.set_timeout(
                     on_timeout, timeout
@@ -1057,6 +1110,9 @@ class TaskDispatcher(object):
                 required callback in the dict keyed by child_execution_arn.
                 """
                 if not async_child:  # E.g. it's launched synchronously
+                    # Map the event ID for the Task to request ID.
+                    self.set_sfn_canceller(id, child_execution_arn, execution_arn)
+
                     timeout_id = self.state_engine.event_dispatcher.set_timeout(
                         on_timeout, timeout
                     )
