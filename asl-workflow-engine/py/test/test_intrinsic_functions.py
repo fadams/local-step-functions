@@ -60,7 +60,7 @@ ASL = """{
           "ItemsPath": "$.items",
           "MaxConcurrency": 3,
           "ResultPath": "$",
-          "Parameters": {
+          "ItemSelector": {
             "item.$": "$$.Map.Item.Value",
             "index.$": "$$.Map.Item.Index",
             "format.$": "States.Format  (  'Execution started at {}, {}. Extra args are {}, {}, {}, {}'  ,    $$.Execution.StartTime   , States.Format   ( 'OK {}'  , 'y\\\\'all' ), -1.0, 1234, $.items[0]  ,  null  )",
@@ -68,14 +68,28 @@ ASL = """{
             "s2j1.$": "States.StringToJson(  '   {\\"number1\\": 20}  '  )",
             "s2j2.$": "States.StringToJson(States.Format('{}{}', '{\\"numb', 'er2\\": 20.5}'))",
             "s2j3.$": "States.StringToJson($.someString)",
-            "j2s.$": "States.JsonToString($.someJson)"
+            "j2s.$": "States.JsonToString($.someJson)",
+            "partition.$": "States.ArrayPartition($.items, 4)",
+            "contains.$": "States.ArrayContains($.items, $.lookingFor)",
+            "range.$": "States.ArrayRange(1, 9, 2)",
+            "get.$": "States.ArrayGetItem($.items, $.idx)",
+            "length.$": "States.ArrayLength($.items)",
+            "unique.$": "States.ArrayUnique($.duplicates)",
+            "base64.$": "States.Base64Encode($.someStringToEncode)",
+            "base64decode.$": "States.Base64Decode($.base64)",
+            "hashed.$": "States.Hash($.Data, $.Algorithm)",
+            "merged.$": "States.JsonMerge($.json1, $.json2, false)",
+            "random.$": "States.MathRandom($.start, $.end)",
+            "value1.$": "States.MathAdd($.value1, $.step)",
+            "split.$": "States.StringSplit($.inputString, $.splitter)",
+            "uuid.$": "States.UUID()"
           },
           "ResultSelector": {
             "state.$": "$$.State.Name",
             "items.$": "$[:].item",
             "item0.$": "$[0]"
           },
-          "Iterator": {
+          "ItemProcessor": {
             "StartAt": "Validate",
             "States": {
               "Validate": {
@@ -183,7 +197,7 @@ class TestIntrinsicFunctions(unittest.TestCase):
         self.event_dispatcher = EventDispatcherStub(state_engine, config)
     
     def test_intrinsic_functions(self):
-        self.event_dispatcher.dispatch('{"data": {"someJson": {"random": "abcdefg"}, "someString": "{\\"number3\\": 25}", "items": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]}, "context": ' + context + '}')
+        self.event_dispatcher.dispatch('{"data": {"someJson": {"random": "abcdefg"}, "someString": "{\\"number3\\": 25}", "items": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], "duplicates": [1,2,2,3,3,3,3,3,3,4,4,4], "lookingFor": 5, "idx": 5, "someStringToEncode": "Data to encode", "base64": "RGVjb2RlZCBkYXRh", "Data": "input data", "Algorithm": "SHA-1", "json1": {"a": {"a1": 1, "a2": 2}, "b": 2}, "json2": {"a": {"a3": 1, "a4": 2}, "c": 3}, "start": 1, "end": 999, "value1": 111, "step": -1, "inputString": "This.is+a,test=string", "splitter": ".+,="}, "context": ' + context + '}')
 
         execution_start_time = self.event_dispatcher.execution_start_time
 
@@ -191,6 +205,7 @@ class TestIntrinsicFunctions(unittest.TestCase):
             output_event = self.event_dispatcher.output_event.result(timeout=1)
         except:
             output_event = {"detail": {"status": "FAILED", "output": None}}
+
         output_event_detail = output_event["detail"]
 
         status = output_event_detail["status"]
@@ -208,9 +223,20 @@ class TestIntrinsicFunctions(unittest.TestCase):
         check_item0_s2j3_number3 = output["item0"]["s2j3"]["number3"] == 25
         check_item0_j2s = output["item0"]["j2s"] == '{"random":"abcdefg"}'
         check_item0_array = output["item0"]["array"] == ["Foo",2020,{"random":"abcdefg"},None]
+        check_item0_partition = output["item0"]["partition"] == [[0,1,2,3],[4,5,6,7],[8,9,10,11],[12]]
 
         format = "Execution started at " + execution_start_time + ", OK y\\'all. Extra args are -1.0, 1234, 0, None"
         check_item0_format = output["item0"]["format"] == format
+        check_item0_contains = output["item0"]["contains"] == True
+        check_item0_range = output["item0"]["range"] == [1,3,5,7,9]
+        check_item0_get = output["item0"]["get"] == 5
+        check_item0_length = output["item0"]["length"] == 13
+        check_item0_base64 = output["item0"]["base64"] == "RGF0YSB0byBlbmNvZGU="
+        check_item0_base64decode = output["item0"]["base64decode"] == "Decoded data"
+        check_item0_hashed = output["item0"]["hashed"] == "aaff4a450a104cd177d28d18d74485e8cae074b7"
+        check_item0_merged = output["item0"]["merged"] == {"a":{"a3":1,"a4":2},"b":2,"c":3}
+        check_item0_value1 = output["item0"]["value1"] == 110
+        check_item0_split = output["item0"]["split"] == ["This","is","a","test","string"]
 
         self.assertEqual(status, "SUCCEEDED")
         self.assertEqual(check_items, True)
@@ -220,7 +246,18 @@ class TestIntrinsicFunctions(unittest.TestCase):
         self.assertEqual(check_item0_s2j3_number3, True)
         self.assertEqual(check_item0_j2s, True)
         self.assertEqual(check_item0_array, True)
+        self.assertEqual(check_item0_partition, True)
         self.assertEqual(check_item0_format, True)
+        self.assertEqual(check_item0_contains, True)
+        self.assertEqual(check_item0_range, True)
+        self.assertEqual(check_item0_get, True)
+        self.assertEqual(check_item0_length, True)
+        self.assertEqual(check_item0_base64, True)
+        self.assertEqual(check_item0_base64decode, True)
+        self.assertEqual(check_item0_hashed, True)
+        self.assertEqual(check_item0_merged, True)
+        self.assertEqual(check_item0_value1, True)
+        self.assertEqual(check_item0_split, True)
 
 if __name__ == '__main__':
     unittest.main()

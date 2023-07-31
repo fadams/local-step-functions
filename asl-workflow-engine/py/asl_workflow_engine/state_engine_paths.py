@@ -33,7 +33,7 @@ and “Parameters”: Pass State, Task State, and Parallel State.
 import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
-import re
+import hashlib, random, re, uuid
 
 """
 ASL paths use JSONPath.
@@ -50,6 +50,17 @@ try:  # Attempt to use ujson if available https://pypi.org/project/ujson/
     import ujson as json
 except:  # Fall back to standard library json
     import json
+
+"""
+Attempt to use pybase64 libbase64 based codec if available
+pip3 install pybase64
+https://github.com/mayeut/pybase64
+https://github.com/aklomp/base64
+"""
+try:
+    import pybase64 as base64
+except:  # Fall back to standard library base64
+    import base64
 
 
 #def apply_jsonpath(input, path="$", throw_exception_on_failed_match=False):
@@ -248,8 +259,16 @@ def evaluate_payload_template(input, context, template):
     """
 
     def evaluate_intrinsic_function(intrinsic):
+        """
+        ASL Appendix B: List of Intrinsic Functions:
+        https://states-language.net/#appendix-b
+        """
 
         def asl_intrinsic_Format(args):
+            if len(args) < 1:
+                raise IntrinsicFailure(
+                    "States.Format failed, requires one or more arguments."
+                )
             template_string = args[0]
             args = args[1:]
             try:
@@ -262,7 +281,7 @@ def evaluate_payload_template(input, context, template):
         def asl_intrinsic_StringToJson(args):
             if len(args) != 1:
                 raise IntrinsicFailure(
-                    "States.StringToJson failed with too many arguments."
+                    "States.StringToJson failed, requires a single argument."
                 )
             try:
                 return json.loads(args[0])
@@ -274,7 +293,7 @@ def evaluate_payload_template(input, context, template):
         def asl_intrinsic_JsonToString(args):
             if len(args) != 1:
                 raise IntrinsicFailure(
-                    "States.JsonToString failed with too many arguments."
+                    "States.JsonToString failed, requires a single argument."
                 )
             try:
                 return json.dumps(args[0])
@@ -286,6 +305,278 @@ def evaluate_payload_template(input, context, template):
         def asl_intrinsic_Array(args):
             return args
 
+        def asl_intrinsic_ArrayPartition(args):
+            if len(args) != 2:
+                raise IntrinsicFailure(
+                    "States.ArrayPartition failed, requires two arguments."
+                )
+            
+            input_array = args[0]
+            if not isinstance(input_array, list):
+                raise IntrinsicFailure(
+                    "States.ArrayPartition failed, arg[0] is not an array."
+                )
+
+            n = args[1]
+            if not isinstance(n, int) or n <= 0:
+                raise IntrinsicFailure(
+                    "States.ArrayPartition failed, arg[1] is not a non-zero, positive integer."
+                )
+
+            # Partition using list comprehension
+            return [input_array[i:i + n] for i in range(0, len(input_array), n)]
+
+        def asl_intrinsic_ArrayContains(args):
+            if len(args) != 2:
+                raise IntrinsicFailure(
+                    "States.ArrayContains failed, requires two arguments."
+                )
+
+            input_array = args[0]
+            if not isinstance(input_array, list):
+                raise IntrinsicFailure(
+                    "States.ArrayContains failed, arg[0] is not an array."
+                )
+
+            """
+            TODO spec says You must specify a valid JSON object as the second
+            argument but all examples seem to be int/string need to check
+            if AWS supports JSON object/list, if so that's make this much
+            more complex and computationally expensive
+            """
+            return args[1] in input_array
+
+        def asl_intrinsic_ArrayRange(args):
+            if len(args) != 3:
+                raise IntrinsicFailure(
+                    "States.ArrayRange failed, requires three arguments."
+                )
+            start     = args[0]
+            end       = args[1]
+            increment = args[2]
+            if not (isinstance(start, int) and
+                    isinstance(end, int) and
+                    isinstance(increment, int)):
+                raise IntrinsicFailure(
+                    "States.ArrayRange failed, all arguments must be integers."
+                )
+            if increment == 0:
+                raise IntrinsicFailure(
+                    "States.ArrayRange failed, args[2] cannot be zero."
+                )
+
+            # Create range using list comprehension. Note end + 1 is used as
+            # ASL spec specifies inclusive range but Python range is exclusive
+            array = [i for i in range(start, end + 1, increment)]
+
+            if len(array) > 1000:
+                raise IntrinsicFailure(
+                    "States.ArrayRange failed with > 1000 items in range."
+                )
+            return array
+
+        def asl_intrinsic_ArrayGetItem(args):
+            if len(args) != 2:
+                raise IntrinsicFailure(
+                    "States.ArrayGetItem failed, requires two arguments."
+                )
+
+            input_array = args[0]
+            if not isinstance(input_array, list):
+                raise IntrinsicFailure(
+                    "States.ArrayGetItem failed, arg[0] is not an array."
+                )
+
+            index = args[1]
+            if not isinstance(index, int) or index < 0:
+                raise IntrinsicFailure(
+                    "States.ArrayGetItem failed, arg[1] is not a positive integer."
+                )
+            if len(input_array) == 0 or index >= len(input_array):
+                raise IntrinsicFailure(
+                    "States.ArrayGetItem failed, index is out of bounds."
+                )
+
+            return input_array[index]
+
+        def asl_intrinsic_ArrayLength(args):
+            if len(args) != 1:
+                raise IntrinsicFailure(
+                    "States.ArrayLength failed, requires a single argument"
+                )
+
+            input_array = args[0]
+            if not isinstance(input_array, list):
+                raise IntrinsicFailure(
+                    "States.ArrayLength failed, arg[0] is not an array."
+                )
+
+            return len(input_array)
+
+        def asl_intrinsic_ArrayUnique(args):
+            if len(args) != 1:
+                raise IntrinsicFailure(
+                    "States.ArrayUnique failed, requires a single argument"
+                )
+
+            input_array = args[0]
+            if not isinstance(input_array, list):
+                raise IntrinsicFailure(
+                    "States.ArrayUnique failed, arg[0] is not an array."
+                )
+
+            # Use set to get unique values from input then use list to convert back
+            return list(set(input_array))
+
+        def asl_intrinsic_Base64Encode(args):
+            if len(args) != 1:
+                raise IntrinsicFailure(
+                    "States.Base64Encode failed, requires a single argument"
+                )
+
+            if not isinstance(args[0], str):
+                raise IntrinsicFailure(
+                    "States.Base64Encode failed, arg[0] is not a string."
+                )
+
+            try:
+                input_bytes = bytes(args[0], "utf-8")  # Get bytes from string
+                return base64.b64encode(input_bytes).decode("utf-8")
+            except Exception as e:
+                raise IntrinsicFailure(
+                    "States.Base64Encode failed with {}.".format(e)
+                )
+
+        def asl_intrinsic_Base64Decode(args):
+            if len(args) != 1:
+                raise IntrinsicFailure(
+                    "States.Base64Decode failed, requires a single argument"
+                )
+
+            if not isinstance(args[0], str):
+                raise IntrinsicFailure(
+                    "States.Base64Decode failed, arg[0] is not a string."
+                )
+
+            try:
+                input_bytes = bytes(args[0], "utf-8")  # Get bytes from string
+                return base64.b64decode(input_bytes).decode("utf-8")
+            except Exception as e:
+                raise IntrinsicFailure(
+                    "States.Base64Decode failed with {}.".format(e)
+                )
+
+        def asl_intrinsic_Hash(args):
+            if len(args) != 2:
+                raise IntrinsicFailure(
+                    "States.Hash failed, requires two arguments."
+                )
+
+            data = args[0]
+            algorithm = args[1]
+            if not isinstance(data, str) or not isinstance(algorithm, str):
+                raise IntrinsicFailure(
+                    "States.Hash failed, both arguments must be strings."
+                )
+            
+            try:
+                input_bytes = bytes(data, "utf-8")  # Get bytes from string
+                if algorithm == "MD5":
+                    return hashlib.md5(input_bytes).hexdigest()
+                elif algorithm == "SHA-1":
+                    return hashlib.sha1(input_bytes).hexdigest()
+                elif algorithm == "SHA-256":
+                    return hashlib.sha256(input_bytes).hexdigest()
+                elif algorithm == "SHA-384":
+                    return hashlib.sha384(input_bytes).hexdigest()
+                elif algorithm == "SHA-512":
+                    return hashlib.sha512(input_bytes).hexdigest()
+                else:
+                    raise Exception("Invalid algorithm {}".format(algorithm))
+            except Exception as e:
+                raise IntrinsicFailure(
+                    "States.Hash failed with {}.".format(e)
+                )
+
+        def asl_intrinsic_JsonMerge(args):
+            if len(args) != 3:
+                raise IntrinsicFailure(
+                    "States.JsonMerge failed, requires three arguments"
+                )
+            if args[2] != False:
+                raise IntrinsicFailure(
+                    "States.JsonMerge failed, args[2] must be false as Step " +
+                    "Functions currently only supports the shallow merging mode."
+                )
+
+            try:
+                # Use dictionary unpacking operator ** to merge the two dictionaries.
+                return {**args[0], **args[1]}
+            except Exception as e:
+                raise IntrinsicFailure(
+                    "States.JsonMerge failed with {}.".format(e)
+                )
+
+        def asl_intrinsic_MathRandom(args):
+            if len(args) < 2 or len(args) > 3:
+                raise IntrinsicFailure(
+                    "States.MathRandom failed, requires two or three arguments"
+                )
+            # The last argument controls the seed value and is optional.
+            if len(args) == 3:
+                # https://docs.python.org/3/library/random.html#random.seed
+                random.seed(args[2])
+            if not isinstance(args[0], int) or not isinstance(args[1], int):
+                raise IntrinsicFailure(
+                    "States.MathRandom failed, args[0] and args[1] must be integers."
+                )
+
+            # States.MathRandom has inclusive start and exclusive end number
+            # https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-intrinsic-functions.html#asl-intrsc-func-math-operation
+            return random.randrange(args[0], args[1])
+
+        def asl_intrinsic_MathAdd(args):
+            if len(args) != 2:
+                raise IntrinsicFailure(
+                    "States.MathAdd failed, requires two arguments."
+                )
+            if not isinstance(args[0], int) or not isinstance(args[1], int):
+                raise IntrinsicFailure(
+                    "States.MathAdd failed, both arguments must be integers."
+                )
+
+            return args[0] + args[1]
+
+        def asl_intrinsic_StringSplit(args):
+            if len(args) != 2:
+                raise IntrinsicFailure(
+                    "States.StringSplit failed, requires two arguments."
+                )
+            data = args[0]
+            separators = args[1]
+            if not isinstance(data, str) or not isinstance(separators, str):
+                raise IntrinsicFailure(
+                    "States.StringSplit failed, both arguments must be strings."
+                )
+
+            # States.StringSplit allows using multiple delimiting characters
+            # https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-intrinsic-functions.html#asl-intrsc-func-string-operation
+            # so we can't simple use Python's split() and use regex instead.
+            try:
+                return re.split('['+ separators + ']', data)
+            except Exception as e:
+                raise IntrinsicFailure(
+                    "States.StringSplit failed with {}.".format(e)
+                )
+
+        def asl_intrinsic_UUID(args):
+            if len(args) != 0:
+                raise IntrinsicFailure(
+                    "States.UUID failed, this intrinsic takes no arguments."
+                )
+
+            return str(uuid.uuid4())
+     
         def asl_intrinsic_Default(args):
             raise IntrinsicFailure(
                 "Intrinsic Function {} is not supported.".format(func)
@@ -304,18 +595,18 @@ def evaluate_payload_template(input, context, template):
         Function arguments may be strings enclosed by apostrophe (') characters,
         numbers, null, Paths, or nested Intrinsic Functions. The regex finds
         each valid argument as follows:
-        \'.*?(?<!\\\)\'         extracts apostrophe delimited string. This uses
+        \'.*?(?<!\\\\)\'        extracts apostrophe delimited string. This uses
             a negative lookbehind to match a closing ' only if not preceeded
-            by a \ in order to support escaped apostrophes in the string.
-        States.*?\)             extracts nested intrinsic
+            by a \\ in order to support escaped apostrophes in the string.
+        States.*?\\)            extracts nested intrinsic
 
         String and nested intrinsics can contain commas so we explicitly match
-        those cases, but the last part of the regex '|[^\s*,]+' just matches
+        those cases, but the last part of the regex '|[^\\s*,]+' just matches
         anything except whitespace comma. We actually *want* a fairly loose
         match here so if we have an invalid number like f123.45 it would match
         but subsequent evaluation would raise an IntrinsicFailure which we want.
         """
-        arglist = re.findall('\'.*?(?<!\\\)\'|States.*?\)|[^\s*,]+', args)
+        arglist = re.findall('\'.*?(?<!\\\\)\'|States.*?\\)|[^\\s*,]+', args)
 
         # Evaluate the arguments
         for i, arg in enumerate(arglist):

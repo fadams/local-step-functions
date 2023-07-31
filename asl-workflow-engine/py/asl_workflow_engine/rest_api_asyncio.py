@@ -80,7 +80,7 @@ assert sys.version_info >= (3, 6)  # Bomb out if not running Python3.6
 
 import asyncio, re, time, uuid, logging, opentracing
 from datetime import datetime, timezone
-from quart import Quart, escape, request, jsonify, abort
+from quart import Quart, request, jsonify
 from aioprometheus import Registry, render
 
 from asl_workflow_engine.metrics_system import SystemMetrics

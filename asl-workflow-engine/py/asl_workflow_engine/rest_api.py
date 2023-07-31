@@ -79,7 +79,7 @@ assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 import re, time, uuid, logging, opentracing
 from datetime import datetime, timezone
-from flask import Flask, escape, request, jsonify, abort
+from flask import Flask, request, jsonify
 
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.open_tracing_factory import span_context, inject_span

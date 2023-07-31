@@ -469,6 +469,7 @@ class StateEngine(object):
         output_as_string = json.dumps(data)
         context = event["context"]
         state = context["State"]
+        execution_arn = context["Execution"]["Id"]
 
         """
         First check next_state is not None. This shouldn't be the case as it is
@@ -477,16 +478,12 @@ class StateEngine(object):
         the execution should this situation occur.
         """
         if next_state == None:
-            error_message = ("An error occurred while executing the state '{}'. "
-                             "Mandatory \"Next\" field is missing."
-                             ).format(state["Name"])
-            event["data"] = {
-                "Error": "States.Runtime",
-                "Cause": error_message,
-            }
-            self.logger.error("States.Runtime: {}".format(error_message))
-            self.end_execution(state_machine, state_type, event)
-            return
+            error_message = ("{} an error occurred while executing the state "
+                             "\"{}\": Mandatory \"Next\" field is missing, "
+                             "Illegal State Machine."
+                             ).format(execution_arn, state["Name"])
+            self.logger.error(error_message)
+            return "States.Runtime", error_message
 
         """
         Check if the State's aggregate output has exceeded the 262144
@@ -495,21 +492,16 @@ class StateEngine(object):
         If so then we fail the execution.
         """
         if len(output_as_string) > MAX_DATA_LENGTH:
-            error_message = ("An error occurred while executing the state '{}'. "
-                             "A result with a size exceeding the maximum "
+            error_message = ("{} an error occurred while executing the state "
+                             "\"{}\": A result with a size exceeding the maximum "
                              "number of characters service limit "
-                             "was returned.").format(state["Name"])
-            event["data"] = {
-                "Error": "States.DataLimitExceeded",
-                "Cause": error_message,
-            }
-            self.logger.error("States.DataLimitExceeded: {}".format(error_message))
-            self.end_execution(state_machine, state_type, event)
-            return
+                             "was returned.").format(execution_arn, state["Name"])
+            self.logger.error(error_message)
+            return "States.DataLimitExceeded", error_message
 
         self.update_execution_history(
             state_machine,
-            context["Execution"]["Id"],
+            execution_arn,
             state_type + "StateExited",
             {"output": output_as_string, "name": state["Name"]},
         )
@@ -523,6 +515,7 @@ class StateEngine(object):
         # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
         state["EnteredTime"] = datetime.now(timezone.utc).astimezone().isoformat()
         self.event_dispatcher.publish(event)
+        return None, None  # No error code, no error message on success
 
     def end_execution(self, state_machine, state_type, event):
         """
@@ -1199,40 +1192,6 @@ class StateEngine(object):
             ) as scope:
                 context["Tracer"] = inject_span("text_map", scope.span, self.logger)
 
-        """
-        States in any given “States” field can transition only to each other,
-        and no state outside of that “States” field can transition into it.
-        That is to say a parent state machine cannot transition directly to
-        a state within a Parallel branch or Map Iterator state machine nor
-        can states within those state machines directly transition to states
-        outside of their own “States” field. TODO use current_state_machine to
-        check that state transitions only occur within the correct "States".
-        """
-        force_full_lookup = "Branch" in context["State"]
-        state, current_state_machine, state_path = find_state(
-            ASL["States"], current_state, force_full_lookup
-        )
-        if state == None:  # state should be valid by this point
-            self.log_and_drop("State {} does not exist", current_state, id)
-            return
-
-        # Determine the ASL state type of the current state.
-        state_type = state["Type"]
-
-        """
-        Check if the current execution or branch has been terminated due to a
-        failure and if so prevent the terminated branch from progressing further.
-        """
-        if self.branch_has_terminated(state_type, context, id):
-            return
-
-        """
-        print("state_machine_arn = " + state_machine_arn)
-        print("current_state = " + current_state)
-        print("state = " + str(state))
-        print("data = " + str(data))
-        print("event id = " + str(id))
-        """
 
         # ----------------------------------------------------------------------
         def handle_error(state, error_type, error_message):
@@ -1266,11 +1225,11 @@ class StateEngine(object):
                 id = len(self.execution_history[execution_arn])
                 boiler_plate = (
                     "An error occurred while executing the state "
-                    "'{}' (entered at the event id #{}). "
+                    "\"{}\" (entered at the event id #{}). "
                 ).format(context["State"]["Name"], id)
             else:
                 boiler_plate = (
-                    "An error occurred while executing the state '{}'. "
+                    "An error occurred while executing the state \"{}\". "
                 ).format(context["State"]["Name"])
 
             """
@@ -1446,14 +1405,15 @@ class StateEngine(object):
                             error_message = str(e) + " " + str(data)
                             break
 
-                        self.change_state(
-                            state_machine,
-                            state_type,
-                            catcher.get("Next"),
-                            event
+                        etype, emessage = self.change_state(
+                            state_machine, state_type, catcher.get("Next"), event
                         )
+                        if etype:  # An error from change_state will fail the execution
+                            error_type = etype
+                            error_message = emessage
+                        else:
+                            catch_matched = True
 
-                        catch_matched = True
                         break
 
 
@@ -1466,13 +1426,11 @@ class StateEngine(object):
                 result = {"Error": error_type}
                 if error_message:
                     result["Cause"] = boiler_plate + error_message
-
                 event["data"] = result
                 handle_terminal_state(state_type, event)
 
 
         # ----------------------------------------------------------------------
-
 
         def handle_terminal_state(state_type, event, id=None):
             """
@@ -1534,6 +1492,8 @@ class StateEngine(object):
                 if id != None:
                     self.event_dispatcher.acknowledge(id)
 
+        # ----------------------------------------------------------------------
+
         """
         Define nested functions as handlers for each supported ASL state type.
         Using nested functions so we can use the context extracted in notify.
@@ -1583,12 +1543,12 @@ class StateEngine(object):
                 if state.get("End"):
                     handle_terminal_state(state_type, event, id)
                 else:
-                    self.change_state(
-                        state_machine,
-                        state_type,
-                        state.get("Next"),
-                        event
+                    error_type, error_message = self.change_state(
+                        state_machine, state_type, state.get("Next"), event
                     )
+                    if error_type:
+                        handle_error(state, error_type, error_message)
+
                     self.event_dispatcher.acknowledge(id)
             except IntrinsicFailure as e:
                 handle_error(state, "States.IntrinsicFailure", str(e))
@@ -1634,7 +1594,7 @@ class StateEngine(object):
                         error_type = result.get("errorType", "")
                 if error_type:
                     if error_type == "States.DataLimitExceeded":
-                        error_message = ("The state/task '{}' returned a result "
+                        error_message = ("The state/task \"{}\" returned a result "
                                          "with a size exceeding the maximum "
                                          "number of characters service limit.").format(
                                             state.get("Resource")
@@ -1650,7 +1610,7 @@ class StateEngine(object):
                         execution_arn = context["Execution"]["Id"]
 
                         # Original updated, but less verbose log.
-                        #self.logger.warn("{} TaskState '{}' received an error response from the invoked Task: {{'errorType': {}, 'errorMessage': {}}}".format(execution_arn, current_state, error_type, error_message))
+                        #self.logger.warn("{} TaskState \"{}\" received an error response from the invoked Task: {{'errorType': {}, 'errorMessage': {}}}".format(execution_arn, current_state, error_type, error_message))
                         # Experimental more verbose log.
                         """
                         Note that the resource_arn and parameters values are in
@@ -1694,12 +1654,12 @@ class StateEngine(object):
                         if state.get("End"):
                             handle_terminal_state(state_type, event, id)
                         else:
-                            self.change_state(
-                                state_machine,
-                                state_type,
-                                state.get("Next"),
-                                event
+                            error_type, error_message = self.change_state(
+                                state_machine, state_type, state.get("Next"), event
                             )
+                            if error_type:
+                                handle_error(state, error_type, error_message)
+
                             self.event_dispatcher.acknowledge(id)
                     except IntrinsicFailure as e:
                         handle_error(state, "States.IntrinsicFailure", str(e))
@@ -1949,9 +1909,10 @@ class StateEngine(object):
                     return next_if(variable, operator.le, value, str)
 
                 def asl_choice_StringMatches(value):
+                    # https://docs.python.org/3/library/fnmatch.html
                     # Change the \ escape to fnmatch [seq] escape and also
                     # escape [ to allow things like a literal [hello]
-                    value = value.replace("[", "[[]").replace("\*", "[*]")
+                    value = value.replace("[", "[[]").replace("\\*", "[*]")
                     if fnmatch.fnmatch(variable, value):
                         return next
 
@@ -2065,14 +2026,14 @@ class StateEngine(object):
             """
             if next_state:
                 self.change_state(
-                    state_machine,
-                    state_type,
-                    next_state,
-                    event
+                    state_machine, state_type, next_state, event
                 )
             else:
-                message = "Choice state {} failed to find a match for the condition field extracted from its input".format(current_state)
-                self.logger.error("States.NoChoiceMatched {}".format(message))
+                message = ("{} the 'Choice' state \"{}\" failed to find a match "
+                           "for the condition field extracted from its input.".format(
+                               context["Execution"]["Id"], current_state)
+                            )
+                self.logger.error(message)
                 handle_error(state, "States.NoChoiceMatched", message)
 
             self.event_dispatcher.acknowledge(id)
@@ -2117,12 +2078,12 @@ class StateEngine(object):
                         if state.get("End"):
                             handle_terminal_state(state_type, event, id)
                         else:
-                            self.change_state(
-                                state_machine,
-                                state_type,
-                                state.get("Next"),
-                                event
+                            error_type, error_message = self.change_state(
+                                state_machine, state_type, state.get("Next"), event
                             )
+                            if error_type:
+                                handle_error(state, error_type, error_message)
+
                             self.event_dispatcher.acknowledge(id)
                     except PathMatchFailure as e:
                         handle_error(state, "States.Runtime", str(e))
@@ -2369,14 +2330,14 @@ class StateEngine(object):
 
         def get_start_index(context):
             """
-            Boilerplate to retrieve the start index of the Map Iterator. This
-            is used in the implementation of MaxConcurrency. The idea is when
-            we process the Map state we launch MaxConcurrency child state
-            machine executions and when those complete we re-enter the Map state
-            and process the next block of MaxConcurrency, and so on. The "Range"
-            field, if present, holds the index of the start of the next block
-            to be processed. The "Branch" metadata is a list so we can handle
-            the case of nested Map and Parallel states.
+            Boilerplate to retrieve the start index of the Map ItemProcessor or
+            Iterator. This is used in the implementation of MaxConcurrency. The
+            idea is when we process the Map state we launch MaxConcurrency child
+            state machine executions and when those complete we re-enter the Map
+            state and process the next block of MaxConcurrency, and so on. The
+            "Range" field, if present, holds the index of the start of the next
+            block to be processed. The "Branch" metadata is a list so we can
+            handle the case of nested Map and Parallel states.
             """
             start = 0
             context_state = context["State"]
@@ -2421,14 +2382,31 @@ class StateEngine(object):
                 length = len(items_path)
 
                 """
-                A Map State MUST contain an object field named “Iterator” which
-                MUST contain fields named “States” and “StartAt”, whose meanings
-                are exactly like those in the top level of a State Machine.
+                A Map State MUST contain an object field named "ItemProcessor"
+                (or deprecated "Iterator") which MUST contain fields named
+                “States” and “StartAt”, whose meanings are exactly like those
+                in the top level of a State Machine.  The "ItemProcessor" field
+                performs the same function as the "Iterator" field, which is
+                now deprecated in the Map State. 
 
-                The “Iterator” field’s value is an object that defines a state
-                machine which will process each element of the array.
+                The "ItemProcessor" (or "Iterator" which is now deprecated)
+                field’s value is an object that defines a state machine which
+                will process each element of the array.
                 """
-                iterator = state.get("Iterator", {})
+                item_processor = state.get("Iterator")  # Deprecated Iterator/Parameters
+                if item_processor:
+                    if "ItemSelector" in state:
+                        self.logger.warning(
+                            "Using Map State ItemSelector with deprecated Iterator field"
+                        )
+                    item_selector = state.get("Parameters", state.get("ItemSelector"))
+                else:
+                    item_processor = state.get("ItemProcessor", {})
+                    if "Parameters" in state:
+                        self.logger.warning(
+                            "Using Map State ItemProcessor with deprecated Parameters field"
+                        )
+                    item_selector = state.get("ItemSelector", state.get("Parameters"))
 
                 """
                 The “MaxConcurrency” field’s value is an integer that provides
@@ -2511,8 +2489,7 @@ class StateEngine(object):
                     context_state["Name"] = map_state_name
                     context_state["EnteredTime"] = map_state_entered
 
-                    params = state.get("Parameters")
-                    if params:
+                    if item_selector:
                         # Store the index and value in the context as described above.
                         context["Map"] = {
                             "Item": {
@@ -2528,7 +2505,7 @@ class StateEngine(object):
                         extraction and embedding, becomes the effective input.
                         """
                         parameters = evaluate_payload_template(
-                            input, context, params
+                            input, context, item_selector
                         )
 
                         del context["Map"]  # Delete after parameters have been processed
@@ -2553,7 +2530,7 @@ class StateEngine(object):
                     if retry_timeout != None:
                         branch_info["RetryTimeout"] = retry_timeout
 
-                    context_state["Name"] = iterator.get("StartAt")
+                    context_state["Name"] = item_processor.get("StartAt")
                     context_state["EnteredTime"] = (
                         datetime.now(timezone.utc).astimezone().isoformat()
                     )
@@ -2586,12 +2563,12 @@ class StateEngine(object):
                     if state.get("End"):
                         handle_terminal_state(state_type, event, id)
                     else:
-                        self.change_state(
-                            state_machine,
-                            state_type,
-                            state.get("Next"),
-                            event
+                        error_type, error_message = self.change_state(
+                            state_machine, state_type, state.get("Next"), event
                         )
+                        if error_type:
+                            handle_error(state, error_type, error_message)
+
                         self.event_dispatcher.acknowledge(id)
             except IntrinsicFailure as e:
                 handle_error(state, "States.IntrinsicFailure", str(e))
@@ -2815,12 +2792,11 @@ class StateEngine(object):
             Publish any new state change before acknowledging the events.
             """
             if not state.get("End"):
-                self.change_state(
-                    state_machine,
-                    state_type,
-                    state.get("Next"),
-                    event
+                error_type, error_message = self.change_state(
+                    state_machine, state_type, state.get("Next"), event
                 )
+                if error_type:
+                    handle_error(state, error_type, error_message)
 
             # Acknowledge the events for each branch's terminal state
             #print("Result - event_ids:")
@@ -2840,6 +2816,50 @@ class StateEngine(object):
         """
         # ----------------------------------------------------------------------
 
+        # Used by calls to update_execution_history and log messages.
+        execution_arn = context["Execution"]["Id"]
+
+        """
+        States in any given “States” field can transition only to each other,
+        and no state outside of that “States” field can transition into it.
+        That is to say a parent state machine cannot transition directly to
+        a state within a Parallel branch or Map Iterator state machine nor
+        can states within those state machines directly transition to states
+        outside of their own “States” field. TODO use current_state_machine to
+        check that state transitions only occur within the correct "States".
+        """
+        force_full_lookup = "Branch" in context["State"]
+        state, current_state_machine, state_path = find_state(
+            ASL["States"], current_state, force_full_lookup
+        )
+        if state == None:  # state should be valid by this point
+            message = ("{} attempted a transition to a non-existent "
+                       "state \"{}\": Illegal State Machine.").format(
+                        execution_arn, current_state
+                      )
+            self.logger.error(message)
+            handle_error({}, "States.Runtime", message)
+            self.event_dispatcher.acknowledge(id)
+            return
+
+        # Determine the ASL state type of the current state.
+        state_type = state["Type"]
+
+        """
+        Check if the current execution or branch has been terminated due to a
+        failure and if so prevent the terminated branch from progressing further.
+        """
+        if self.branch_has_terminated(state_type, context, id):
+            return
+
+        """
+        print("state_machine_arn = " + state_machine_arn)
+        print("current_state = " + current_state)
+        print("state = " + str(state))
+        print("data = " + str(data))
+        print("event id = " + str(id))
+        """
+
         """
         If state_path has two or more elements it means that, when a transition
         in a Map or Parallel child state machine (e.g. Iterator or Branch) was
@@ -2848,9 +2868,9 @@ class StateEngine(object):
         https://states-language.net/#states-fields so this condition is illegal.
         """
         if len(state_path) > 1:
-            message = ("Transition to non-unique state '{}' failed: "
-                       "Illegal State Machine.").format(
-                        current_state
+            message = ("{} attempted a transition to a non-unique "
+                       "state \"{}\": Illegal State Machine.").format(
+                        execution_arn, current_state
                       )
             self.logger.error(message)
             handle_error(state, "States.Runtime", message)
@@ -2867,7 +2887,6 @@ class StateEngine(object):
         set we will re-enter the Map state, possibly several times, to process
         the next batch of items so again we want to suppress the history update.
         """
-        execution_arn = context["Execution"]["Id"]
         reentered_map = state_type == "Map" and get_start_index(context) != 0
         if not context["State"].get("RetryCount") and not reentered_map:
             self.update_execution_history(
@@ -2896,7 +2915,7 @@ class StateEngine(object):
             execution_history_length = len(self.execution_history.get(execution_arn, []))
             #print(execution_history_length)
             if execution_history_length > MAX_EXECUTION_HISTORY_LENGTH:
-                message = ("Execution '{}' has a history of {} events and has "
+                message = ("{} has a history of {} events and has "
                            "exceeded the maximum execution history size.").format(
                             execution_arn, execution_history_length
                           )
@@ -2913,12 +2932,17 @@ class StateEngine(object):
         executing an arbitrary function, so disable semgrep warning.
         """
         try:
+            # If it's an illegal state propagate to Exception handler below.
+            def raise_exception(message):
+                raise Exception(message)
+
             # nosemgrep
             locals().get(
                 "asl_state_" + state_type,
-                lambda: self.logger.error(
-                    "StateEngine illegal state transition: {}".format(state_type)
-                ),
+                lambda: raise_exception("State \"{}\" has an illegal Type "
+                                        "\"{}\": Illegal State Machine.".format(
+                                            current_state, state_type)
+                                        )
             )()
         except Exception as e:
             """
