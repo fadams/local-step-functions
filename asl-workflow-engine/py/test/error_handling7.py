@@ -118,7 +118,6 @@ ASL = """{
           "BackoffRate": 1.5
         },
         {
-          "Comment": "Uses the default values for IntervalSeconds (1), MaxAttempts (3), BackoffRate (2.0) ",
           "ErrorEquals": [ "States.ALL" ]
         }
       ],

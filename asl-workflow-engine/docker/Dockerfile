@@ -1,6 +1,7 @@
 FROM python:3.8-alpine
 
 COPY py/asl_workflow_engine /usr/local/lib/asl_workflow_engine/asl_workflow_engine
+COPY py/statelint /usr/local/lib/asl_workflow_engine/statelint
 COPY py/setup.py /usr/local/lib/asl_workflow_engine
 COPY py/workflow_engine /usr/local/bin
 

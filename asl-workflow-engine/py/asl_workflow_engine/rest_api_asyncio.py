@@ -89,6 +89,13 @@ from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.open_tracing_factory import span_context, inject_span
 from asl_workflow_engine.arn import *
 from asl_workflow_engine.state_engine import MAX_DATA_LENGTH, MAX_STATE_MACHINE_LENGTH
+
+from statelint.statelint import StateLint  # ASL validator
+
+# Even if we use ujson for JSON parsing we need stdlib json for ASL validation,
+# because we use object_pairs_hook to detect duplicate State names.
+import json as stdjson
+
 try:  # Attempt to use ujson if available https://pypi.org/project/ujson/
     import ujson as json
 except:  # Fall back to standard library json
@@ -140,6 +147,20 @@ def aws_error(code, message=None):
         "message": message if message else code,
     })
 
+def raise_on_duplicates(ordered_pairs):
+    """
+    Use an object_pairs_hook to detect and reject duplicate keys in json.loads()
+    https://stackoverflow.com/questions/14902299/json-loads-allows-duplicate-keys-in-a-dictionary-overwriting-the-first-value/14902564#14902564
+    """
+    # Reject duplicate keys.
+    d = {}
+    for k, v in ordered_pairs:
+        if k in d:
+            raise ValueError("Duplicate key: %r" % (k,))
+        else:
+            d[k] = v
+    return d
+
 class RestAPI(object):
     def __init__(self, state_engine, event_dispatcher, config):
         """
@@ -154,6 +175,7 @@ class RestAPI(object):
             self.host = rest_api_config.get("host", "0.0.0.0")
             self.port = rest_api_config.get("port", 4584)
             self.region = rest_api_config.get("region", "local")
+            self.validate_asl = rest_api_config.get("validate_asl")
 
         self.asl_store = state_engine.asl_store
         self.executions = state_engine.executions
@@ -167,6 +189,13 @@ class RestAPI(object):
         metrics_config = config.get("metrics", {})
         if metrics_config.get("implementation", "") == "Prometheus":
             self.system_metrics = SystemMetrics(metrics_config.get("namespace", ""))
+
+        # StateLint used in CreateStateMachine/UpdateStateMachine to validate ASL
+        try:
+            self.statelint = StateLint()
+        except Exception as e:
+            self.statelint = None
+            self.logger.warning("Unable to create StateLint instance: {}".format(e))
 
     def create_app(self):
         app = Quart(__name__)
@@ -334,23 +363,40 @@ class RestAPI(object):
                     return aws_error("InvalidDefinition"), 400
 
                 try:
-                    definition = json.loads(definition)
+                    if self.validate_asl:
+                        definition = stdjson.loads(
+                            definition, object_pairs_hook=raise_on_duplicates
+                        )
+                    else:
+                        definition = stdjson.loads(definition)
                 except ValueError as e:
                     definition = None
+                    message = "State Machine {} InvalidDefinition {} does not contain valid JSON. {}".format(state_machine_arn, params.get("definition"), e)
                     self.logger.error(
-                        "RestAPI CreateStateMachine: State Machine definition {} does not contain valid JSON".format(
-                            params.get("definition")
-                        )
+                        "RestAPI CreateStateMachine: {}".format(message)
                     )
-                    return aws_error("InvalidDefinition"), 400
+                    return aws_error("InvalidDefinition", message), 400
+
+                if self.statelint:  # Make sure StateLint was properly created.
+                    problems = self.statelint.validate(definition)
+                    if len(problems) > 0:
+                        if len(problems) == 1:
+                            error_count = "One error:"
+                        elif len(problems) > 1:
+                            error_count = "{} errors:".format(len(problems))
+                        message = "State Machine {} InvalidDefinition {} {}\n{}".format(state_machine_arn, params.get("definition"), error_count, "\n".join(problems))
+                        self.logger.error(
+                            "RestAPI CreateStateMachine: {}".format(message)
+                        )
+                        # Only return error if configured to do so.
+                        if self.validate_asl:
+                            return aws_error("InvalidDefinition", message), 400
 
                 if not (name and role_arn and definition):
                     self.logger.warning(
                         "RestAPI CreateStateMachine: name, roleArn and definition must be specified"
                     )
                     return aws_error("MissingRequiredParameter"), 400
-
-                # TODO ASL Validator??
 
                 """
                 Handle the configuration describing where execution history
@@ -594,22 +640,40 @@ class RestAPI(object):
                     """
                     if len(definition) == 0 or len(definition) > MAX_STATE_MACHINE_LENGTH:
                         self.logger.error(
-                            "RestAPI CreateStateMachine: Invalid definition size for State Machine '{}'.".format(name)
+                            "RestAPI UpdateStateMachine: Invalid definition size for State Machine '{}'.".format(name)
                         )
                         return aws_error("InvalidDefinition"), 400
 
                     try:
-                        definition = json.loads(definition)
+                        if self.validate_asl:
+                            definition = stdjson.loads(
+                                definition, object_pairs_hook=raise_on_duplicates
+                            )
+                        else:
+                            definition = stdjson.loads(definition)
                     except ValueError as e:
                         definition = None
+                        message = "State Machine {} InvalidDefinition {} does not contain valid JSON. {}".format(state_machine_arn, params.get("definition"), e)
                         self.logger.error(
-                            "RestAPI UpdateStateMachine: State Machine definition {} does not contain valid JSON".format(
-                                params.get("definition")
-                            )
+                            "RestAPI UpdateStateMachine: {}".format(message)
                         )
-                        return aws_error("InvalidDefinition"), 400
+                        return aws_error("InvalidDefinition", message), 400
 
-                    # TODO ASL Validator??
+                    if self.statelint:  # Make sure StateLint was properly created.
+                        problems = self.statelint.validate(definition)
+                        if len(problems) > 0:
+                            if len(problems) == 1:
+                                error_count = "One error:"
+                            elif len(problems) > 1:
+                                error_count = "{} errors:".format(len(problems))
+                            message = "State Machine {} InvalidDefinition {} {}\n{}".format(state_machine_arn, params.get("definition"), error_count, "\n".join(problems))
+                            self.logger.error(
+                                "RestAPI UpdateStateMachine: {}".format(message)
+                            )
+                            # Only return error if configured to do so.
+                            if self.validate_asl:
+                                return aws_error("InvalidDefinition", message), 400
+
                     state_machine["definition"] = definition
 
                 if not role_arn and not definition:

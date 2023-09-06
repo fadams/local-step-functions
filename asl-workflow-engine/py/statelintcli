@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# Run with:
+# ./statelintcli <some_ASL.json>
+#
+"""
+This is a simple CLI executable to run the statelint ASL linter standalone.
+
+statelint is Python port/adaptation of https://github.com/awslabs/statelint
+by Tim Bray, the author of the ASL spec https://states-language.net/spec.html.
+
+Bray wrote about the validator of the AWS Stepfunction service in this blog
+https://www.tbray.org/ongoing/When/201x/2016/12/01/J2119-Validator
+In particular: "the awfulness of all the schema alternatives, in particular
+JSON Schema. But later, when I signed up to do the service’s validator (it’s
+Java code) I couldn’t find a good alternative, so I spent an unreasonably long
+time writing a schema, and a validator based on it.
+
+We’ll release that JSON Schema, or the validator source, over my dead body.
+It’s not a good example of anything."
+
+That blog describes the alternative approach taken by statelint and links to
+the statelint GitHub repository. Unfortunately statelint is written in Ruby,
+so this is a port/adaptation/update of that in Python so that we can integrate
+it more easily with the asl-workflow-engine CreateStateMachine code.
+
+This CLI allows the same code to be used standalone.
+"""
+
+import sys, os
+assert sys.version_info >= (3, 6)  # Bomb out if not running Python3.6
+
+from statelint.statelint import StateLint
+
+"""
+For this validator we have to use stdlib json, because ujson doesn't
+support object_pairs_hook which we use to detect duplicate State names.
+"""
+import json
+
+if __name__ == "__main__":
+    executable = sys.argv[0]
+    args = sys.argv[1:]
+
+    if len(args) > 0:
+        try:
+            statelint = StateLint()
+        except Exception as e:
+            print(f"Unable to create StateLint instance: {e}")
+            sys.exit(0)
+
+        for arg in args:
+            try:
+                with open(arg, "r") as fp:
+                    """
+                    Use an object_pairs_hook to detect and reject duplicate keys.
+                    https://stackoverflow.com/questions/14902299/json-loads-allows-duplicate-keys-in-a-dictionary-overwriting-the-first-value/14902564#14902564
+                    """
+                    def raise_on_duplicates(ordered_pairs):
+                        # Reject duplicate keys.
+                        d = {}
+                        for k, v in ordered_pairs:
+                            if k in d:
+                                raise ValueError("Duplicate key: %r" % (k,))
+                            else:
+                                d[k] = v
+                        return d
+
+                    definition = json.load(fp, object_pairs_hook=raise_on_duplicates)
+                    problems = statelint.validate(definition)
+
+                    if len(problems) == 1:
+                        print("One error:")
+                    elif len(problems) > 1:
+                        print(f"{len(problems)} errors:")
+                    for problem in problems:
+                        print(problem)
+            except IOError as e:
+                print(f"Unable to read file: {e}")
+            except ValueError as e:
+                print(f"{arg} does not contain valid JSON: {e}")
+    else:
+        print(f"{executable} requires one or more ASL JSON files as arguments")
+        sys.exit(0)
+

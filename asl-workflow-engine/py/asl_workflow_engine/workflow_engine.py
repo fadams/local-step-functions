@@ -133,6 +133,13 @@ class WorkflowEngine(object):
         ra["host"] = os.environ.get("REST_API_HOST", ra.get("host"))
         ra["port"] = int(os.environ.get("REST_API_PORT", ra.get("port")))
         ra["region"] = os.environ.get("REST_API_REGION", ra.get("region"))
+        ra["validate_asl"] = ra.get("validate_asl", False)
+        validate_asl = os.environ.get("REST_API_VALIDATE_ASL")
+        if validate_asl:  # Should be "true"/"false" if env var is explicitly set
+            if validate_asl.lower() == "true":
+                ra["validate_asl"] = True
+            elif validate_asl.lower() == "false":
+                ra["validate_asl"] = False
 
         tr = config["tracer"]
         tr["implementation"] = os.environ.get("TRACER_IMPLEMENTATION", 
