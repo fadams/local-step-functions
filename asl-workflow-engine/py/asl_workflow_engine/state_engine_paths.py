@@ -669,7 +669,9 @@ def evaluate_payload_template(input, context, template):
             is_tuple = False
 
         if v_is_path_or_intrinsic:
-            if v.startswith("$"):  # It's a path
+            if v == "$":  # It's a path representing the root node
+                v = clone(input)  # clone to avoid potential circular reference
+            elif v.startswith("$"):  # It's a path
                 v = apply_path(input, context, v)
             else:  # It's an Intrinsic Function
                 v = evaluate_intrinsic_function(v)
