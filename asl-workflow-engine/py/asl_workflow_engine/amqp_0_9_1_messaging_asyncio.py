@@ -120,7 +120,18 @@ class Connection(object):
         https://pika.readthedocs.io/en/stable/examples/using_urlparameters.html
         """
         self.logger = init_logging(log_name="amqp_0_9_1_messaging_async")
-        self.logger.info("Creating Connection with url: {}".format(url))
+        """
+        We want to log the URL, but that would contain the password if present,
+        so we create a redacted version for logging purposes.
+        """
+        p = pika.compat.urlparse(url)
+        password = ":xxxxx@" if p.password else "@"
+        userpass = p.username + password if p.username else ""
+        port = ":" + str(p.port) if p.port else ""
+        hostport = p.hostname + port
+        netloc = userpass + hostport
+        redacted_url = p._replace(netloc=netloc).geturl()
+        self.logger.info("Creating Connection with url: {}".format(redacted_url))
         self.parameters = pika.URLParameters(url)
 
     async def open(self, timeout=None):
