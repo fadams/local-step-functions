@@ -72,7 +72,7 @@ https://docs.aws.amazon.com/step-functions/latest/apireference/API_StartExecutio
 https://docs.aws.amazon.com/step-functions/latest/apireference/API_CreateStateMachine.html
 """
 MAX_EXECUTION_HISTORY_LENGTH = 25000
-MAX_DATA_LENGTH = 262144  # Max length of the input or output JSON string.
+MAX_DATA_LENGTH = 262144  # Max length of the input or output JSON string (256*1024).
 MAX_STATE_MACHINE_LENGTH = 1048576  # Max length of the State Machine definition.
 
 def parse_rfc3339_datetime(rfc3339):
@@ -1039,7 +1039,7 @@ class StateEngine(object):
         return has_terminated
 
 
-    def notify(self, event, id):
+    def notify(self, event, id, redelivered=False):
         #print("~~~~~ notify id = " + str(id))
         """
         ------------------------------------------------------------------------
@@ -1053,6 +1053,15 @@ class StateEngine(object):
         :item id: The ID of the event as given by the EventDispatcher, it is
          primarily used for acknowledging the event.
         :type id: A string representing the event ID, it may just be a number.
+        :item redelivered: A flag that is True if the event has been redelivered
+         by the EventDispatcher. This might be the case if the ASL Engine has
+         been restarted whilst waiting for a Task to return. In this case the
+         Task State event will be redelivered because it has not yet been
+         acknowledged. We use the redelivered flag to avoid dispatching the Task
+         again, instead just wait for the result of the original invocation.
+        :type redelivered: A boolean flag, True if the event has been redelivered.
+         the default is False.
+
 
         The event dict passed to the notify method has the following format:
 
@@ -1105,7 +1114,7 @@ class StateEngine(object):
             return
 
         """
-        If ASL is present in optional ctx_state_machine["Definition"] store that as
+        If ASL is present in optional ctx_state_machine["Definition"], store as
         if it were a CreateStateMachine API call. TODO the roleArn added here is
         not a valid IAM role ARN. This way of adding State Nachines "by value"
         embedded in the context was mainly added to enable development of some
@@ -1753,7 +1762,7 @@ class StateEngine(object):
                 timeout = t1 if t1 < t2 else t2
 
                 self.task_dispatcher.execute_task(
-                    resource_arn, parameters, on_response, timeout, context, id
+                    resource_arn, parameters, on_response, timeout, context, id, redelivered
                 )
             except IntrinsicFailure as e:
                 handle_error(state, "States.IntrinsicFailure", str(e))

@@ -21,7 +21,7 @@ import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
 
-import asyncio, importlib
+import asyncio, importlib, uuid
 from asl_workflow_engine.logger import init_logging
 from asl_workflow_engine.messaging_exceptions import *
 
@@ -76,9 +76,7 @@ class EventDispatcher(object):
         is a simple one-up number used as a key.
         """
         self.unacknowledged_messages = {}
-        self.shared_event_consumer_unack_count = 0
-        self.instance_event_consumer_unack_count = 0
-        self.message_count = 0
+        #self.message_count = 0
 
         """
         """
@@ -124,9 +122,6 @@ class EventDispatcher(object):
         """
         self.heartbeat_count += 1
         if self.heartbeat_count % 60 == 0:
-            print("self.instance_event_consumer_unack_count")
-            print(self.instance_event_consumer_unack_count)
-
             print("len(self.unacknowledged_messages)")
             print(len(self.unacknowledged_messages))
         """
@@ -365,19 +360,14 @@ class EventDispatcher(object):
         """
         try:
             item = json.loads(message.body.decode("utf8"))
-            self.unacknowledged_messages[self.message_count] = message
+            # TODO delete - original approach using one up number
+            #self.unacknowledged_messages[self.message_count] = message
+            #self.state_engine.notify(item, self.message_count, message.redelivered)
+            #self.message_count += 1
 
-            if message.subject == self.queue_name:
-                self.shared_event_consumer_unack_count += 1
-                #print("self.shared_event_consumer_unack_count")
-                #print(self.shared_event_consumer_unack_count)
-            else:
-                self.instance_event_consumer_unack_count += 1
-                #print("self.instance_event_consumer_unack_count")
-                #print(self.instance_event_consumer_unack_count)
-
-            self.state_engine.notify(item, self.message_count)
-            self.message_count += 1
+            message_id = message.message_id
+            self.unacknowledged_messages[message_id] = message
+            self.state_engine.notify(item, message_id, message.redelivered)
         except ValueError as e:
             self.logger.error(
                 "Message {} does not contain valid JSON".format(message.body)
@@ -411,15 +401,6 @@ class EventDispatcher(object):
             message = self.unacknowledged_messages[id]
             message.acknowledge(multiple=False)
             del self.unacknowledged_messages[id]
-
-            if message.subject == self.queue_name:
-                self.shared_event_consumer_unack_count -= 1
-                #print("self.shared_event_consumer_unack_count")
-                #print(self.shared_event_consumer_unack_count)
-            else:
-                self.instance_event_consumer_unack_count -= 1
-                #print("self.instance_event_consumer_unack_count")
-                #print(self.instance_event_consumer_unack_count)
         except Exception as e:
             """
             This shouldn't generally occur, though can as a side effect of other
@@ -461,6 +442,15 @@ class EventDispatcher(object):
 
         message = Message(json.dumps(item), content_type="application/json")
         message.subject = subject  # Selects the queue to publish to
+        """
+        Feb 2024: start using a unique message_id rather than the simple one-up
+        number that was previously used as the unacknowledged_messages key.
+        The message_id is associated with the Event mesasge so survives a
+        restart and message redelivery. We reuse this as Task State correlation
+        IDs such that upon a restart outstanding Task responses may still be
+        correlated with the request.
+        """
+        message.message_id = str(uuid.uuid4())
         self.event_queue_producer.send(message, threadsafe)
 
     def broadcast(self, subject, item, carrier_properties=None):

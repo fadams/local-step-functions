@@ -652,7 +652,7 @@ def evaluate_payload_template(input, context, template):
             asl_intrinsic_Default,
         )(arglist)
 
-    def evaluate(k, v=None):
+    def evaluate(k, v=None, is_tuple=False):
         """
         Evaluate and expand fields whose name ends with “.$” as described above
         """
@@ -662,11 +662,8 @@ def evaluate_payload_template(input, context, template):
         else:
             v_is_path_or_intrinsic = False
 
-        if v:
-            is_tuple = True
-        else:
+        if not is_tuple:
             v = k
-            is_tuple = False
 
         if v_is_path_or_intrinsic:
             if v == "$":  # It's a path representing the root node
@@ -699,7 +696,7 @@ def evaluate_payload_template(input, context, template):
                 if isinstance(v, (dict, list)):
                     target[k] = clone(v)
                 else:
-                    k, v = evaluate(k, v)
+                    k, v = evaluate(k, v, True)
                     target[k] = v
         return target
 

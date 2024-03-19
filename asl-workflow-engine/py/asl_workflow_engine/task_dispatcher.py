@@ -39,7 +39,7 @@ except:  # Fall back to standard library json
     import json
 
 # https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
-MAX_DATA_LENGTH = 262144  # Max length of the input or output JSON string.
+MAX_DATA_LENGTH = 262144  # Max length of the input or output JSON string (256*1024).
 
 class TaskDispatcher(object):
     def __init__(self, state_engine, config):
@@ -74,6 +74,9 @@ class TaskDispatcher(object):
         if parsed_peer_address.scheme:
             self.peer_address = parsed_peer_address.scheme + "://" + self.peer_address
 
+        instance_id = queue_config.get("instance_id", "")
+        self.reply_to_queue_name = "asl_workflow_reply_to" + "-" + instance_id
+
         # Get the channel capacity/prefetch value for the reply_to consumer
         capacity = queue_config.get("reply_to_consumer_capacity", 100)
         self.reply_to_capacity = int(float(capacity))  # Handles numbers or strings
@@ -100,6 +103,22 @@ class TaskDispatcher(object):
         we also have the cancellers dict to map event ID to request ID
         """
         self.cancellers = {}
+
+        """
+        There are some scenarios whereby a response might arrive from say an
+        rpcmessage request, but a pending_requests value for it may not be set.
+        This may occur if the ASL Engine is restarted and the response to a
+        previously made request then arrives, or where a Task is cancelled and
+        the response from the invoked task subsequently arrives.
+        We want to retain orphaned_responses for a short while as the Task
+        Event message may be redelivered after a restart and we'd like to be
+        able to associate the response with the Task.
+        """
+        self.orphaned_responses = {}
+        self.orphaned_response_retention_ms = queue_config.get(
+            "orphaned_response_retention_ms"
+        )
+        self.startup_time = time.time()  # Used to determine uptime after restart
 
         """
         Prometheus metrics intended to emulate Stepfunction CloudWatch metrics.
@@ -174,7 +193,7 @@ class TaskDispatcher(object):
         specific and it might well not be possible to do this on other providers.
         """
         self.reply_to = session.consumer(
-            '; {"link": {"x-subscribe": {"arguments": {"x-priority": 10}}}}'
+            self.reply_to_queue_name + '; {"node": {"durable": true}, "link": {"x-subscribe": {"arguments": {"x-priority": 10}}}}'
         )
 
         # Enable consumer prefetch
@@ -207,7 +226,7 @@ class TaskDispatcher(object):
         specific and it might well not be possible to do this on other providers.
         """
         self.reply_to = await session.consumer(
-            '; {"link": {"x-subscribe": {"arguments": {"x-priority": 10}}}}'
+            self.reply_to_queue_name + '; {"node": {"durable": true}, "link": {"x-subscribe": {"arguments": {"x-priority": 10}}}}'
         )
 
         # Enable consumer prefetch
@@ -264,6 +283,49 @@ class TaskDispatcher(object):
         improved as we add code to handle Task state "rainy day" scenarios such
         as Timeouts etc. so park for now, but something to be aware of.
         """
+
+        def log_and_acknowledge_orphaned_responses():
+            """
+            When Tasks get cancelled or if the ASL Engine is restarted before a
+            Task is completed then it is possible for the response Message to
+            not have an associated pending_requests entry, e.g. be "orphaned".
+            However, for the case of a restart the Task State Event messages
+            are redelivered, so there is an edge case where a response from the
+            invocation arrives before the redelivered Task State message. We
+            therefore want to hold on to orphaned_responses for a while before
+            logging and acknowledging in case they aren't in fact actually
+            orphaned. To accomplish this log_and_acknowledge_orphaned_responses
+            is called indirectly via a timeout and orphaned_responses is
+            checked to see if there is still an entry for the correlation_id
+            and thus still orphaned.
+            Note that this nested function captures the message instance from
+            the parent function in its closure and uses that captured value
+            when the timeout is triggered.
+            """
+            if message.correlation_id in self.orphaned_responses:
+                with opentracing.tracer.start_active_span(
+                    operation_name="Task",
+                    child_of=span_context("text_map", message.properties, self.logger),
+                    tags={
+                        "component": "task_dispatcher",
+                        "message_bus.destination": self.reply_to.name,
+                        "span.kind": "consumer",
+                        "peer.address": self.peer_address
+                    }
+                ) as scope:
+                    self.logger.info("Response {} has no matching requestor".format(message))
+                    scope.span.set_tag("error", True)
+                    scope.span.log_kv(
+                        {
+                            "event": "No matching requestor",
+                            "message": "Response has no matching requestor",
+                        }
+                    )
+
+                del self.orphaned_responses[message.correlation_id]
+                message.acknowledge(multiple=False)
+
+
         correlation_id = message.correlation_id
         request = self.pending_requests.get(correlation_id)
         if request:
@@ -346,28 +408,30 @@ class TaskDispatcher(object):
 
                     callback(result)
 
-        else:
-            with opentracing.tracer.start_active_span(
-                operation_name="Task",
-                child_of=span_context("text_map", message.properties, self.logger),
-                tags={
-                    "component": "task_dispatcher",
-                    "message_bus.destination": self.reply_to.name,
-                    "span.kind": "consumer",
-                    "peer.address": self.peer_address
-                }
-            ) as scope:
-                self.logger.info("Response {} has no matching requestor".format(message))
-                scope.span.set_tag("error", True)
-                scope.span.log_kv(
-                    {
-                        "event": "No matching requestor",
-                        "message": "Response has no matching requestor",
-                    }
+            message.acknowledge(multiple=False)
+        else:  # If Message correlation_id not in self.pending_requests
+            uptime = (time.time() - self.startup_time)*1000  # Uptime in millis
+            if uptime < self.orphaned_response_retention_ms:
+                """
+                Defer logging and acknowledging any "orphaned" response messages
+                as upon a restart of the ASL Engine it is possible for Task
+                responses from the original Task invocation to arrive before the
+                pending Task's state is reconstructed.
+                """
+                timeout_id = self.state_engine.event_dispatcher.set_timeout(
+                    log_and_acknowledge_orphaned_responses,
+                    self.orphaned_response_retention_ms
                 )
 
+                self.orphaned_responses[correlation_id] = (message, timeout_id)
+            else:
+                """
+                If the uptime is more than the retention period for orphaned
+                responses directly call log_and_acknowledge_orphaned_responses()
+                """
+                self.orphaned_responses[correlation_id] = (message, None)
+                log_and_acknowledge_orphaned_responses()
 
-        message.acknowledge(multiple=False)
 
     def handle_sfn_response(self, correlation_id, input, output, execution_detail):
         """
@@ -484,46 +548,46 @@ class TaskDispatcher(object):
 
                     callback(result)
 
-    def set_function_canceller(self, id, task_id, execution_arn):
-        self.cancellers[id] = {
+    def set_function_canceller(self, event_id, task_id, execution_arn):
+        self.cancellers[event_id] = {
             "Type": "Function",
             "TaskID": task_id,
             "Execution": execution_arn,
             "Callback": None
         }
-        #print("----- set_function_canceller " + str(id))
-        #print(self.cancellers[id])
+        #print("----- set_function_canceller " + str(event_id))
+        #print(self.cancellers[event_id])
 
-    def set_sfn_canceller(self, id, task_id, execution_arn):
-        self.cancellers[id] = {
+    def set_sfn_canceller(self, event_id, task_id, execution_arn):
+        self.cancellers[event_id] = {
             "Type": "StepFunction",
             "TaskID": task_id,
             "Execution": execution_arn,
             "Callback": None
         }
-        #print("----- set_sfn_canceller " + str(id))
-        #print(self.cancellers[id])
+        #print("----- set_sfn_canceller " + str(event_id))
+        #print(self.cancellers[event_id])
 
-    def set_timeout_canceller(self, id, task_id, callback, execution_arn):
-        self.cancellers[id] = {
+    def set_timeout_canceller(self, event_id, task_id, callback, execution_arn):
+        self.cancellers[event_id] = {
             "Type": "Timeout",
             "TaskID": task_id,
             "Execution": execution_arn,
             "Callback": callback
         }
-        #print("----- set_timeout_canceller " + str(id))
-        #print(self.cancellers[id])
+        #print("----- set_timeout_canceller " + str(event_id))
+        #print(self.cancellers[event_id])
 
-    def remove_canceller(self, id):
-        #print("remove_canceller " + str(id))
-        if id in self.cancellers:
-            del self.cancellers[id]
+    def remove_canceller(self, event_id):
+        #print("remove_canceller " + str(event_id))
+        if event_id in self.cancellers:
+            del self.cancellers[event_id]
 
         #print(self.cancellers)
 
-    def cancel_task(self, id):
-        #print("cancel_task " + str(id))
-        canceller = self.cancellers.get(id)
+    def cancel_task(self, event_id):
+        #print("cancel_task " + str(event_id))
+        canceller = self.cancellers.get(event_id)
         if canceller:
             error = {
                 "errorType": "Task.Terminated",
@@ -532,7 +596,7 @@ class TaskDispatcher(object):
 
             task_type = canceller.get("Type")
             task_id = canceller.get("TaskID")
-            del self.cancellers[id]
+            del self.cancellers[event_id]
             if task_type == "Timeout":  # Wait state cancellation information
                 #print("----- CANCELLING WAIT STATE -----")
                 callback = canceller.get("Callback")
@@ -543,7 +607,7 @@ class TaskDispatcher(object):
                     callback(error)
             else:  # Function or Stepfunction
                 #print("----- CANCELLING TASK STATE -----")
-                # Do lookup in case timeout fires after a successful response.
+                # Do lookup in case cancel occurs after a successful response.
                 request = self.pending_requests.get(task_id)
                 if request:  # Get callback and span from request (other fields ignored)
                     del self.pending_requests[task_id]
@@ -578,7 +642,7 @@ class TaskDispatcher(object):
         #print()
         #print(self.pending_requests.keys())
 
-    def execute_task(self, resource_arn, parameters, callback, timeout, context, id):
+    def execute_task(self, resource_arn, parameters, callback, timeout, context, event_id, redelivered):
         """
         Look up stateMachineArn to get State Machine as we need that later to
         call state_engine.update_execution_history. We do it here to capture in
@@ -796,8 +860,16 @@ class TaskDispatcher(object):
             # print(parameters)
             # TODO deal with the case of delivering to a different broker.
 
-            # Associate response callback with this request via correlation ID.
-            correlation_id = str(uuid.uuid4())
+            """
+            Associate response callback with this request via a correlation ID.
+            We now use event_id as the correlation ID, as that is now a UUID
+            attached to the Event Messages, which represent State transitions.
+            Because they are associated with the Messages these IDs survive
+            ASL Engine restarts, so Task responses can be correlated with the
+            requesting Task State even after a restart.
+            """
+            #correlation_id = str(uuid.uuid4())  # Deprecated approach
+            correlation_id = event_id
 
             """
             Create a timeout handler in case the rpcmessage invocation fails.
@@ -827,27 +899,8 @@ class TaskDispatcher(object):
                 },
                 finish_on_close=False
             ) as scope:
-                parameters_as_string = json.dumps(parameters)
-                """
-                We also pass the span to pending_requests so we can use
-                it when receiving a response, and in case of a timeout.
-                """
-                carrier = inject_span("text_map", scope.span, self.logger)
-                message = Message(
-                    parameters_as_string,
-                    properties=carrier,
-                    content_type="application/json",
-                    subject=resource,
-                    reply_to=self.reply_to.name,
-                    correlation_id=correlation_id,
-                            # Give the RPC Message a TTL equivalent to the ASL
-                            # Task State (or Execution) timeout period. Both are ms.
-                    expiration=timeout,
-                    mandatory=True,  # Ensure unroutable messages are returned
-                )
-
                 # Map the event ID for the Task to request ID.
-                self.set_function_canceller(id, correlation_id, execution_arn)
+                self.set_function_canceller(event_id, correlation_id, execution_arn)
 
                 timeout_id = self.state_engine.event_dispatcher.set_timeout(
                     on_timeout, timeout
@@ -858,8 +911,8 @@ class TaskDispatcher(object):
                 If the response occurs before the timeout expires the timeout
                 should be cancelled, so we store the timeout_id as well as the
                 required callback in the dict keyed by correlation_id.
-                As mentioned above we also store the OpenTracing span so that if a 
-                timeout occurs we can raise an error on the request span.
+                We also pass the OpenTracing span to pending_requests so we can
+                use it when receiving a response, and in case of a timeout.
                 """
                 self.pending_requests[correlation_id] = (
                     state_machine,
@@ -870,32 +923,76 @@ class TaskDispatcher(object):
                     timeout_id,
                     scope.span
                 )
-                self.producer.send(message)
 
-                self.state_engine.update_execution_history(
-                    state_machine, execution_arn,
-                    "LambdaFunctionScheduled",
-                    {
-                        "input": parameters_as_string,
-                        "resource": resource_arn,
-                        "timeoutInSeconds": math.ceil(timeout/1000)
-                    },
-                )
+                """
+                Actually invoke the Task by creating and publishing the request
+                Message and updating the Execution History and metrics.
 
-                if self.task_metrics:
-                    """
-                    https://docs.aws.amazon.com/step-functions/latest/dg/procedure-cw-metrics.html
-                    It's not totally clear what LambdaFunctionsScheduled and
-                    LambdaFunctionsStarted *actually* mean from the AWS docs.
-                    With the ASL Engine we are using an AMQP RPC pattern so
-                    requests are queued and the ASL Engine can't really tell
-                    whether the worker/processor has actually started, so it is
-                    most truthful just to use the LambdaFunctionsScheduled
-                    metric as we can't know LambdaFunctionsStarted.
-                    """
-                    self.task_metrics["LambdaFunctionsScheduled"].inc(
-                        {"LambdaFunctionArn": resource_arn}
+                Note that if the Task State is re-entered, for example due to
+                the ASL Engine being restarted and the outstanding Task State
+                transition Message being redelivered then we do not re-invoke
+                the Task, instead we check for any orphaned responses that
+                might have been sent by the rpcmessage service before the
+                pending_requests were recreated.
+
+                The original behaviour was to re-invoke as it is simpler, but
+                for expensive or long lived Tasks it is sub-optimal to invoke
+                them again, so we now try to avoid it which adds complexity.
+                """
+                if redelivered:
+                    orphaned_response = self.orphaned_responses.get(correlation_id)
+                    if orphaned_response != None:
+                        message, timeout_id = orphaned_response
+
+                        # Directly call response handler with the stored message.
+                        self.handle_rpcmessage_response(message)
+
+                        # Cancel the timeout previously set for this orphaned_response.
+                        self.state_engine.event_dispatcher.clear_timeout(timeout_id)
+
+                        del self.orphaned_responses[correlation_id]
+                else:
+                    parameters_as_string = json.dumps(parameters)
+                    carrier = inject_span("text_map", scope.span, self.logger)
+                    message = Message(
+                        parameters_as_string,
+                        properties=carrier,
+                        content_type="application/json",
+                        subject=resource,
+                        reply_to=self.reply_to.name,
+                        correlation_id=correlation_id,
+                        # Give the RPC Message a TTL equivalent to the ASL
+                        # Task State (or Execution) timeout period. Both are ms.
+                        expiration=timeout,
+                        mandatory=True,  # Ensure unroutable messages are returned
                     )
+
+                    self.producer.send(message)
+
+                    self.state_engine.update_execution_history(
+                        state_machine, execution_arn,
+                        "LambdaFunctionScheduled",
+                        {
+                            "input": parameters_as_string,
+                            "resource": resource_arn,
+                            "timeoutInSeconds": math.ceil(timeout/1000)
+                        },
+                    )
+
+                    if self.task_metrics:
+                        """
+                        https://docs.aws.amazon.com/step-functions/latest/dg/procedure-cw-metrics.html
+                        It's not totally clear what LambdaFunctionsScheduled and
+                        LambdaFunctionsStarted *actually* mean from the AWS docs.
+                        With the ASL Engine we are using an AMQP RPC pattern so
+                        requests are queued and the ASL Engine can't really tell
+                        whether the worker/processor has actually started, so it is
+                        most truthful just to use the LambdaFunctionsScheduled
+                        metric as we can't know LambdaFunctionsStarted.
+                        """
+                        self.task_metrics["LambdaFunctionsScheduled"].inc(
+                            {"LambdaFunctionArn": resource_arn}
+                        )
 
 
         # def asl_service_openfaas():  # TODO
@@ -953,7 +1050,7 @@ class TaskDispatcher(object):
             documents the new more direct service integration:            
             https://docs.aws.amazon.com/step-functions/latest/dg/connect-stepfunctions.html
 
-            For asynchronous execution of child sate machines the resource ARN
+            For asynchronous execution of child state machines the resource ARN
             should be of the form:
             arn:aws:states:region:account-id:states:startExecution
 
@@ -999,8 +1096,6 @@ class TaskDispatcher(object):
                 send_error_callback(context.get("Tracer", {}), error)
                 return
 
-            child_execution_name = parameters.get("Name", str(uuid.uuid4()))
-
             child_state_machine_arn = parameters.get("StateMachineArn")
             if not child_state_machine_arn:
                 message = "TaskDispatcher asl_service_states_startExecution: " \
@@ -1036,8 +1131,8 @@ class TaskDispatcher(object):
             region = arn.get("region", "local")
             child_state_machine_name = arn["resource"]
 
-            execution_arn = context["Execution"]["Id"]
-
+            #child_execution_name = parameters.get("Name", str(uuid.uuid4())) # Deprecated
+            child_execution_name = parameters.get("Name", event_id)
             child_execution_arn = create_arn(
                 service="states",
                 region=region,
@@ -1071,6 +1166,7 @@ class TaskDispatcher(object):
             https://opentracing.io/guides/python/tracers/ standard tags are from
             https://opentracing.io/specification/conventions/
             """
+            execution_arn = context["Execution"]["Id"]
             with opentracing.tracer.start_active_span(
                 operation_name="Task",
                 child_of=span_context("text_map", context.get("Tracer", {}), self.logger),
@@ -1082,26 +1178,6 @@ class TaskDispatcher(object):
                 },
                 finish_on_close=async_child
             ) as scope:
-                # Create the execution context and the event to publish to launch
-                # the requested new state machine execution.
-                # https://stackoverflow.com/questions/8556398/generate-rfc-3339-timestamp-in-python
-                start_time = datetime.now(timezone.utc).astimezone().isoformat()
-                child_context = {
-                    "Tracer": inject_span("text_map", scope.span, self.logger),
-                    "Execution": {
-                        "Id": child_execution_arn,
-                        "Input": parameters.get("Input", {}),
-                        "Name": child_execution_name,
-                        "RoleArn": child_state_machine.get("roleArn"),
-                        "StartTime": start_time,
-                    },
-                    "State": {"EnteredTime": start_time, "Name": ""},  # Start state
-                    "StateMachine": {
-                        "Id": child_state_machine_arn,
-                        "Name": child_state_machine_name
-                    },
-                }
-
                 """
                 If the child state machine is launched synchronously we handle
                 the success/failure response in handle_sfn_response().
@@ -1111,7 +1187,7 @@ class TaskDispatcher(object):
                 """
                 if not async_child:  # E.g. it's launched synchronously
                     # Map the event ID for the Task to request ID.
-                    self.set_sfn_canceller(id, child_execution_arn, execution_arn)
+                    self.set_sfn_canceller(event_id, child_execution_arn, execution_arn)
 
                     timeout_id = self.state_engine.event_dispatcher.set_timeout(
                         on_timeout, timeout
@@ -1122,8 +1198,8 @@ class TaskDispatcher(object):
                     If the response occurs before the timeout expires the timeout
                     should be cancelled, so we store the timeout_id as well as the
                     required callback in the dict keyed by correlation_id.
-                    As mentioned above we also store the OpenTracing span so that if a 
-                    timeout occurs we can raise an error on the request span.
+                    We also pass the OpenTracing span to pending_requests so we can
+                    use it when receiving a response, and in case of a timeout.
                     """
                     self.pending_requests[child_execution_arn] = (
                         state_machine,
@@ -1136,38 +1212,80 @@ class TaskDispatcher(object):
                     )
 
 
-                # Publish event that launches the new state machine execution.
-                event = {"data": parameters.get("Input", {}), "context": child_context}
-                self.state_engine.event_dispatcher.publish(
-                    event, use_shared_queue=async_child
-                )
-
-                parameters_as_string = json.dumps(parameters)
-                self.state_engine.update_execution_history(
-                    state_machine, execution_arn,
-                    "TaskScheduled",
-                    {
-                        "parameters": parameters_as_string,
-                        "region": region,
-                        "resource": resource_arn,
-                        "resourceType": "states",
-                        "timeoutInSeconds": math.ceil(timeout/1000)
-                    },
-                )
-
                 """
-                The Stepfunction metrics specified in the docs:
-                https://docs.aws.amazon.com/step-functions/latest/dg/procedure-cw-metrics.html
-                describe Service Integration Metrics, which would include child
-                Stepfunctions. The "dimension" for these, however is the
-                resource ARN of the integrated service. In practice that is
-                less than ideal as it only really describes the startExecution
-                service so the ARN is the same irrespective of the state machine.
+                Actually invoke the Task by creating and publishing the sfn
+                event Message and updating the Execution History and metrics.
+
+                Note that if the Task State is re-entered, for example due to
+                the ASL Engine being restarted and the outstanding Task State
+                transition Message being redelivered then we do not re-invoke
+                the Task.
+
+                For child Stepfunctions we don't need the logic for "orphaned"
+                responses that we have for rpcmessage Tasks because synchronous
+                child Stepfunctions are launched in the same instance as their
+                parent, so can't complete unless the parent is also running.
+
+                The original behaviour was to re-invoke as it is simpler, but
+                for expensive or long lived Tasks it is sub-optimal to invoke
+                them again, so we now try to avoid it which adds complexity.
                 """
-                if self.task_metrics:
-                    self.task_metrics["ServiceIntegrationsScheduled"].inc(
-                        {"ServiceIntegrationResourceArn": resource_arn}
+                if not redelivered:
+                    """
+                    Create the execution context and the event to publish to launch
+                    the requested new state machine execution.
+                    """
+                    start_time = datetime.now(timezone.utc).astimezone().isoformat()
+                    child_context = {
+                        "Tracer": inject_span("text_map", scope.span, self.logger),
+                        "Execution": {
+                            "Id": child_execution_arn,
+                            "Input": parameters.get("Input", {}),
+                            "Name": child_execution_name,
+                            "RoleArn": child_state_machine.get("roleArn"),
+                            "StartTime": start_time,
+                        },
+                        "State": {"EnteredTime": start_time, "Name": ""},  # Start state
+                        "StateMachine": {
+                            "Id": child_state_machine_arn,
+                            "Name": child_state_machine_name
+                        },
+                    }
+
+                    # Publish event that launches the new state machine execution.
+                    event = {"data": parameters.get("Input", {}), "context": child_context}
+                    self.state_engine.event_dispatcher.publish(
+                        event, use_shared_queue=async_child
                     )
+
+                    parameters_as_string = json.dumps(parameters)
+                    self.state_engine.update_execution_history(
+                        state_machine, execution_arn,
+                        "TaskScheduled",
+                        {
+                            "parameters": parameters_as_string,
+                            "region": region,
+                            "resource": resource_arn,
+                            "resourceType": "states",
+                            "timeoutInSeconds": math.ceil(timeout/1000)
+                        },
+                    )
+
+                    if self.task_metrics:
+                        """
+                        The Stepfunction metrics specified in the docs:
+                        https://docs.aws.amazon.com/step-functions/latest/dg/procedure-cw-metrics.html
+                        describe Service Integration Metrics, which would include
+                        child Stepfunctions. The "dimension" for these, however
+                        is the resource ARN of the integrated service. In
+                        practice that is less than ideal as it only really
+                        describes the startExecution service so the ARN is the
+                        same irrespective of the state machine.
+                        """
+                        self.task_metrics["ServiceIntegrationsScheduled"].inc(
+                            {"ServiceIntegrationResourceArn": resource_arn}
+                        )
+
 
                 """
                 For "fire and forget"/async child executions we trigger the

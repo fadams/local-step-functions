@@ -106,7 +106,7 @@ class EventDispatcherStub(object):
 This stubs out the real TaskDispatcher execute_task method which requires
 messaging infrastructure to run whereas this test is just a state machine test.
 """
-def execute_task_stub(resource_arn, parameters, callback, timeout, context, id):
+def execute_task_stub(resource_arn, parameters, callback, timeout, context, event_id, redelivered):
     name = resource_arn.split(":")[-1]
     result = {"reply": name + " reply"}
     callback(result)

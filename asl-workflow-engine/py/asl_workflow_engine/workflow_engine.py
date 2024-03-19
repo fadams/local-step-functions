@@ -99,6 +99,7 @@ class WorkflowEngine(object):
         eq["connection_url"] = os.environ.get(
             "EVENT_QUEUE_CONNECTION_URL", eq.get("connection_url")
         )
+        # Not currently used.
         eq["connection_options"] = os.environ.get(
             "EVENT_QUEUE_CONNECTION_OPTIONS", eq.get("connection_options")
         )
@@ -113,6 +114,12 @@ class WorkflowEngine(object):
         eq["reply_to_consumer_capacity"] = os.environ.get(
             "EVENT_QUEUE_REPLY_TO_CONSUMER_CAPACITY",
             eq.get("reply_to_consumer_capacity")
+        )
+        # The time in milliseconds to retain "orphaned" Task responses.
+        # Default is 10 minutes = 10*60*1000
+        eq["orphaned_response_retention_ms"] = os.environ.get(
+            "EVENT_QUEUE_ORPHANED_RESPONSE_RETENTION_MS",
+            eq.get("orphaned_response_retention_ms", 600000)
         )
 
         no = config["notifier"]
