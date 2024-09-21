@@ -63,7 +63,8 @@ The official API Actions not currently implemented are:
 The Activity API will be implemented in due course, though in an Open Source ASL implementation such as this implementing additional Service Integrations might be more elegant, though Step Function Activities do provide as fairly general integration approach.
 
 Some examples of using the AWS CLI follow, note the use of the `--endpoint` (or `--endpoint-url`) flag to tell the CLI to use a different (non-default) REST endpoint.
-```
+
+```bash
 # List state machines
 aws stepfunctions --endpoint http://localhost:4584 list-state-machines --max-results 20
 
@@ -99,6 +100,7 @@ aws stepfunctions --endpoint http://localhost:4584 get-execution-history --execu
 ```
 
 In order to use boto3 with the ASL Workflow Engine the endpoint_url should be set as follows:
-```
+
+```python
 sfn = boto3.client("stepfunctions", endpoint_url="http://localhost:4584")
 ```

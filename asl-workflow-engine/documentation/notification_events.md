@@ -4,31 +4,40 @@ With *real* AWS Step Functions it is possible to configure Step Functions to emi
 Obviously with a local on premises ASL implementation the CloudWatch/EventBridge service is not readily available, however we can provide similar behaviour.
 
 With this implementation we make use of the messaging fabric used for the event queue (currently RabbitMQ) where the CloudWatch-like notification events are published to a topic of the form:
+
 ```
 asl_workflow_engine/<state_machine_arn>.<status>
 ```
+
 That is to say we publish to the **asl_workflow_engine** topic exchange with a subject comprising the *State Machine ARN* and the *status* separated by a dot. e.g.
+
 ```
 asl_workflow_engine/arn:aws:states:local:0123456789:stateMachine:simple_state_machine.SUCCEEDED
 ```
+
 Note that the topic (e.g. AMQP topic exchange) used to broadcast notification events is currently **asl_workflow_engine**, however that is configurable.
 
 Consumer applications may subscribe to specific events using the full subject, or groups of event using wildcards.
 
 For example, to subscribe only to the SUCCEEDED event for the given state machine the following subject (routing key) should be used:
+
 ```
 arn:aws:states:local:0123456789:stateMachine:simple_state_machine.SUCCEEDED
 ```
+
 To subscribe to all notification events published for a given state machine the following subject (routing key) should be used:
+
 ```
 arn:aws:states:local:0123456789:stateMachine:simple_state_machine.*
 ```
+
 To subscribe to all notification events from the asl_workflow_engine use the wildcard `#` as the subject (routing key).
 
 The format of the message bodies is as described in [Event Patterns in CloudWatch Events](https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/CloudWatchEventsandEventPatterns.html) and more specifically in [CloudWatch Events for Step Functions Execution Status Changes](https://docs.aws.amazon.com/step-functions/latest/dg/cw-events.html).
 
 e.g. for Execution Started
-```
+
+```json
 {
     "version": "0",
     "id": "315c1398-40ff-a850-213b-158f73e60175",
@@ -52,7 +61,8 @@ e.g. for Execution Started
     }
 }
 ```
-Execution Succeeded and Execution Failed follow the same pattern except for the obvious difference in the ["detail]["status"] field.
+
+Execution Succeeded and Execution Failed follow the same pattern except for the obvious difference in the `["detail"]["status"]` field.
 
 Execution Timed Out and Execution Aborted events are not yet implemented.
 
@@ -62,7 +72,7 @@ The AWS documentation is not terribly clear whether a timeout would result in bo
 
 and
 
- *If the state runs longer than the specified timeout, or if more time than the specified heartbeat elapses between heartbeats from the task, then the interpreter fails the state with a States.Timeout Error Name.*
+*If the state runs longer than the specified timeout, or if more time than the specified heartbeat elapses between heartbeats from the task, then the interpreter fails the state with a States.Timeout Error Name.*
 
 ### CloudWatch Documentation
 The most relevant sections of the AWS CloudWatch documentation for Step Functions may be found at the following links:

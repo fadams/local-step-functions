@@ -1,8 +1,8 @@
 # Configuration
-Many aspects of the ASL Workflow Engine are configurable, with the configuration being broken down into various subsystems like event_queue, notifier, state_engine, rest_api, tracer and metrics. There are two equivalent ways of specifying the configuration: config.json or environment variables and reasonable defaults have been included for most configurable fields.
+Many aspects of the ASL Workflow Engine are configurable, with the configuration being broken down into various subsystems like event_queue, notifier, state_engine, rest_api, tracer and metrics. There are two equivalent ways of specifying the configuration: `config.json` or `environment variables` and reasonable defaults have been included for most configurable fields.
 
-config.json
-```
+`config.json`
+```json
 {
     "event_queue": {
         "comment": "instance_id should be unique for each instance of the workflow engine in a cluster. It will be used to create a unique per-instance event queue.",
@@ -48,7 +48,9 @@ config.json
     }
 }
 ```
-Equivalent environment variables (note that not every field available in the config.json is currently configurable using environment variables):
+
+Equivalent environment variables (note that not every field available in the `config.json` is currently configurable using environment variables):
+
 ```
 EVENT_QUEUE_QUEUE_NAME
 EVENT_QUEUE_INSTANCE_ID
@@ -68,6 +70,7 @@ REST_API_HOST
 REST_API_PORT
 REST_API_REGION
 ```
+
 **EVENT_QUEUE_QUEUE_NAME** defaults to "asl_workflow_events" and is the name of the shared event queue as described in [Clustering and Scaling](clustering_and_scaling.md).
 
 **EVENT_QUEUE_INSTANCE_ID** is a unique identifier for the ASL Workflow Engine instance. A UUID is the most obvious ID to use here though it could be any value that uniquely identified each instance in a cluster. This value is used in conjunction with EVENT_QUEUE_QUEUE_NAME to form the name of the per-instance event queue.
