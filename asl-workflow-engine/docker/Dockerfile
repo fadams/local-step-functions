@@ -1,4 +1,4 @@
-FROM python:3.8-alpine
+FROM python:3.10-alpine
 
 COPY py/asl_workflow_engine /usr/local/lib/asl_workflow_engine/asl_workflow_engine
 COPY py/statelint /usr/local/lib/asl_workflow_engine/statelint
@@ -33,6 +33,12 @@ ENTRYPOINT ["/usr/local/bin/workflow_engine"]
 #-------------------------------------------------------------------------------
 # Build the image (note using .. not . here to reference the Docker context)
 # docker build -t asl-workflow-engine -f ./Dockerfile ..
+
+# To debug Docker builds:
+# Force output display to ensure you can see the output of each RUN command
+# docker build --progress=plain -t asl-workflow-engine -f ./Dockerfile ..
+# or disable BuildKit if the old build system is preferred
+# DOCKER_BUILDKIT=0 docker build -t asl-workflow-engine -f ./Dockerfile ..
 
 # docker run --rm asl-workflow-engine
 

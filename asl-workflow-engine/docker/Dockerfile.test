@@ -1,4 +1,4 @@
-FROM python:3.8-alpine
+FROM python:3.10-alpine
 
 COPY py /usr/local/lib/asl_workflow_engine
 
@@ -17,10 +17,17 @@ RUN apk update && apk upgrade && \
     pip install pytest && \
     mkdir -p /tmp/results/
 
-ENTRYPOINT python -m pytest --junitxml /tmp/results/test_results.xml /tmp/test/
+ENTRYPOINT ["python", "-m", "pytest", "--junitxml", "/tmp/results/test_results.xml", "/tmp/test/"]
 
 #-------------------------------------------------------------------------------
 # Build the image (note using .. not . here to reference the Docker context)
 # docker build -t asl-workflow-engine-test -f ./Dockerfile.test ..
 
+# To debug Docker builds:
+# Force output display to ensure you can see the output of each RUN command
+# docker build --progress=plain -t asl-workflow-engine-test -f ./Dockerfile.test ..
+# or disable BuildKit if the old build system is preferred
+# DOCKER_BUILDKIT=0 docker build -t asl-workflow-engine-test -f ./Dockerfile.test ..
+
 # docker run --rm -it asl-workflow-engine-test
+
