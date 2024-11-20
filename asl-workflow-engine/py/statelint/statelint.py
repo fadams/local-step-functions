@@ -82,8 +82,8 @@ class StateNode():
         # We keep track of all the state names and complain about dupes
         self.all_state_names = {}
 
-        self.intrinsic_invocation_regex = re.compile('^States\.(Format|Array|ArrayPartition|ArrayContains|ArrayRange|ArrayGetItem|ArrayLength|ArrayUnique|Base64Encode|Base64Decode|Hash|JsonMerge|JsonToString|StringToJson|MathRandom|MathAdd|StringSplit)\\s*\(.+\)$')
-        self.intrinsic_uuid_invocation_regex = re.compile('^States\.UUID\\s*\(\\s*\)$')
+        self.intrinsic_invocation_regex = re.compile(r'^States\.(Format|Array|ArrayPartition|ArrayContains|ArrayRange|ArrayGetItem|ArrayLength|ArrayUnique|Base64Encode|Base64Decode|Hash|JsonMerge|JsonToString|StringToJson|MathRandom|MathAdd|StringSplit)\s*\(.+\)$')
+        self.intrinsic_uuid_invocation_regex = re.compile(r'^States\.UUID\s*\(\s*\)$')
 
     def check(self, node, path, problems):
         if not node or not isinstance(node, dict):
