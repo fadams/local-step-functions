@@ -11,6 +11,9 @@ This document is a good first port of call to understand some of the nuances in 
 ### Configuration
 Many aspects of the ASL Workflow Engine are configurable and are described in detail on the [Configuration](documentation/configuration.md) page.
 
+### Tracing/Telemetry
+The ASL Workflow Engine has supported OpenTracing for some time and now also supports OpenTelemetry, as described in the [Telemetry](documentation/telemetry.md) page.
+
 ### Notification Events
 With *real* AWS Step Functions it is possible to configure Step Functions to emit [CloudWatch Events](https://docs.aws.amazon.com/step-functions/latest/dg/cw-events.html) (recently renamed [EventBridge](https://docs.aws.amazon.com/eventbridge/latest/userguide/what-is-amazon-eventbridge.html) by Amazon) when an execution status changes.
 

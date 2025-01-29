@@ -21,13 +21,14 @@ from setuptools import setup, find_packages
 
 setup(
     name="asl_workflow_engine",
-    version="1.23.1",
+    version="1.24.0",
     description="A workflow engine based on the Amazon States Language (ASL).",
     long_description="A workflow engine based on the Amazon States Language (ASL). It is intended to provide the features and API of AWS Step Functions in an engine that can be deployed to a range of different hosting environments.",
     packages=find_packages(),
     install_requires=["pika",
                       "structlog",
                       "ujson",
+                      "uvloop",
                       "pybase64",
                       "jsonpath",
                       "flask",
@@ -35,6 +36,13 @@ setup(
                       "redis",
                       "pottery",
                       "opentracing>=2.2",
+                      "opentelemetry-api",
+                      "opentelemetry-sdk",
+                      "opentelemetry-exporter-otlp-proto-grpc",
+                      "opentelemetry-exporter-otlp-proto-http",
+                      "opentelemetry-exporter-jaeger-thrift",
+                      "opentelemetry-opentracing-shim",
+                      "opentelemetry-propagator-jaeger",
                       "aioprometheus",
                       "jaeger_client"]
 )

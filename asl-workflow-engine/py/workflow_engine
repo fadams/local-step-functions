@@ -21,8 +21,19 @@
 # ./workflow_engine
 # LOG_LEVEL=DEBUG ./workflow_engine
 #
+# OpenTelemetry default uses otlp-proto-grpc so no need to explicitly configure.
+# TRACER_IMPLEMENTATION=OpenTelemetry ./workflow_engine
+# TRACER_IMPLEMENTATION=OpenTelemetry OTEL_EXPORTER_TYPE=jaeger-thrift ./workflow_engine
+# TRACER_IMPLEMENTATION=OpenTelemetry OTEL_EXPORTER_TYPE=otlp-proto-http ./workflow_engine
+#
+# Profile with py-spy
+# TRACER_IMPLEMENTATION= py-spy record -o profile-jaegerthrift.svg -- ./workflow_engine
+#
 # Run with cProfile enabled:
 # python3 -m cProfile -s tottime ./workflow_engine > prof-tottime.txt
+#
+# Use Python 3.12 perf based profiling
+# PYTHONPERFSUPPORT=1 perf record -F 9999 -g -o perf.data ./workflow_engine
 #
 """
 This is the main executable to run the ASL Workflow Engine.

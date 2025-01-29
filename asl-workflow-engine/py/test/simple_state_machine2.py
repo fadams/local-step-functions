@@ -140,6 +140,8 @@ if __name__ == '__main__':
     # Initialising OpenTracing. It's important to do this before the boto3.client
     # call as create_tracer "patches" boto3 to add the OpenTracing hooks.
     create_tracer("simple_state_machine2", {"implementation": "Jaeger"})
+    #create_tracer("simple_state_machine2", {"implementation": "Jaeger", "config": {"sampler": {"type": "probabilistic", "param": 0.01}}})
+    #create_tracer("simple_state_machine2", {"implementation": "OpenTelemetry", "config": {"exporter": "jaeger-thrift"}})
 
     # Initialise the boto3 client setting the endpoint_url to our local
     # ASL Workflow Engine

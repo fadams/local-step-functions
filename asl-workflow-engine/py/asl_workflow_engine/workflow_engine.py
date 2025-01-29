@@ -152,15 +152,36 @@ class WorkflowEngine(object):
         tr["implementation"] = os.environ.get("TRACER_IMPLEMENTATION", 
                                               tr.get("implementation", "None"))
 
-        # The Jaeger specific env vars are derived from this document:
-        # https://www.jaegertracing.io/docs/1.22/client-features/
-        sampler = tr["config"]["sampler"]
-        sampler["type"] = os.environ.get(
-            "JAEGER_SAMPLER_TYPE", sampler.get("type")
-        )
-        sampler["param"] = os.environ.get(
-            "JAEGER_SAMPLER_PARAM", sampler.get("param")
-        )
+        if tr["implementation"] == "Jaeger":
+            # The Jaeger specific env vars are derived from this document:
+            # https://www.jaegertracing.io/docs/1.22/client-features/
+            tr["config"] = tr.get("config", {})
+            tr["config"]["sampler"] = tr["config"].get("sampler", {})
+
+            sampler = tr["config"]["sampler"]
+            sampler["type"] = os.environ.get(
+                "JAEGER_SAMPLER_TYPE", sampler.get("type", "probabilistic")
+            )
+            sampler["param"] = os.environ.get(
+                "JAEGER_SAMPLER_PARAM", sampler.get("param", 0.01)
+            )
+        elif tr["implementation"] == "OpenTelemetry":
+            tr["config"] = tr.get("config", {})
+            tr["config"]["exporter"] = os.environ.get(
+                "OTEL_EXPORTER_TYPE", tr["config"].get("exporter", "otlp-proto-grpc")
+            )
+            """
+            Allow configuration of *additional* propagators to add to default
+            propagators. This is in addition to also honouring the
+            OTEL_PROPAGATORS env var. Initially we default this to jaeger so
+            uber-trace-id headers are propagated to facilitate transiion to
+            OpenTelemetry. In due course we will default to no additional
+            propagators.
+            """
+            tr["config"]["additional_propagators"] = os.environ.get(
+                "OTEL_ADDITIONAL_PROPAGATORS",
+                tr["config"].get("additional_propagators", "jaeger")
+            )
 
         metrics = config["metrics"]
         metrics["implementation"] = os.environ.get(

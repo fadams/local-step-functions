@@ -35,16 +35,27 @@
 # 14268 HTTP 	 collector 	accept jaeger.thrift directly from clients
 # 14250 HTTP 	 collector 	accept model.proto
 # 9411 	HTTP 	 collector 	Zipkin compatible endpoint (optional)
+#
+# OpenTelemetry
+# 4317 	gRPC 	 collector 	OTLP Protobuf ‘ExportTraceServiceRequest’
+# 4318 	HTTP 	 collector 	OTLP Protobuf or OTLP JSON /v1/traces
 #-------------------------------------------------------------------------------
 
+#docker run --rm -it --name jaeger \
+#  -e COLLECTOR_ZIPKIN_HTTP_PORT=9411 \
+#  -p 5775:5775/udp \
+#  -p 6831:6831/udp \
+#  -p 6832:6832/udp \
+#  -p 5778:5778 \
+#  -p 16686:16686 \
+#  -p 14268:14268 \
+#  -p 9411:9411 \
+#  jaegertracing/all-in-one:1.14
+
 docker run --rm -it --name jaeger \
-  -e COLLECTOR_ZIPKIN_HTTP_PORT=9411 \
-  -p 5775:5775/udp \
-  -p 6831:6831/udp \
-  -p 6832:6832/udp \
-  -p 5778:5778 \
   -p 16686:16686 \
-  -p 14268:14268 \
-  -p 9411:9411 \
-  jaegertracing/all-in-one:1.14
+  -p 6831:6831/udp \
+  -p 4317:4317 \
+  -p 4318:4318 \
+  jaegertracing/all-in-one:1.47
 
