@@ -48,6 +48,11 @@ class EventDispatcher(object):
         # TODO validate that config contains the keys we need.
 
         self.queue_name = self.queue_config.get("queue_name", "asl_workflow_events")
+        self.queue_type = self.queue_config.get("queue_type", "classic")
+
+        # For quorum queues append -qq to the base name to visually distinguish.
+        if self.queue_type == "quorum":
+            self.queue_name += "-qq"
 
         instance_id = self.queue_config.get("instance_id", "")
         self.instance_queue_name = self.queue_name + "-" + instance_id
@@ -88,7 +93,7 @@ class EventDispatcher(object):
         implementations in order to allow maximum flexibility.
         """
         name = (
-            self.queue_config.get("queue_type", "AMQP-0.9.1")
+            self.queue_config.get("queue_implementation", "AMQP-0.9.1-asyncio")
             .lower()
             .replace("-", "_")
             .replace(".", "_")
@@ -102,9 +107,10 @@ class EventDispatcher(object):
         self.logger.info("Loading messaging module {}".format(self.name))
 
         """
-        Load the module whose name is derived from the specified queue_type.
+        Load the module whose name is derived from queue_implementation.
         The "asl_workflow_engine." prefix and "_messaging" suffix mitigates the
-        risk of the name value loading arbitrary module, so disable semgrep warning.
+        risk of the name value loading arbitrary module, so disable semgrep
+        warning.
         """
         try:
             # nosemgrep
@@ -173,6 +179,10 @@ class EventDispatcher(object):
             """
             self.topic_producer = self.session.producer(self.notifier_config["topic"])
 
+            x_declare = ""
+            if self.queue_type == "quorum":
+                x_declare = ', "x-declare": {"arguments": {"x-queue-type": "quorum"}}'
+
             """
             The asl_workflow_events queue is a shared event queue, that is to
             say every asl_workflow_engine instance receives events from this
@@ -180,7 +190,10 @@ class EventDispatcher(object):
             exclusive so multiple asl_workflow_engine instances can consume from
             it and will thus load-balance executions across multiple instances.
             """
-            shared_queue = self.queue_name + '; {"node": {"durable": true}}'
+            shared_queue = (
+                self.queue_name + 
+                '; {"node": {"durable": true' + x_declare + '}}'
+            )
             shared_event_consumer = self.session.consumer(shared_queue)
             # Enable consumer prefetch
             self.logger.info("Setting shared_event_consumer.capacity to {}".format(
@@ -202,7 +215,11 @@ class EventDispatcher(object):
             per instance queue is because with the Parallel and Map states we
             would like each branch to notify the same instance when complete.
             """
-            instance_queue = self.instance_queue_name + '; {"node": {"durable": true}, "link": {"x-subscribe": {"exclusive": true}}}'
+            instance_queue = (
+                self.instance_queue_name +
+                '; {"node": {"durable": true' + x_declare + '}, ' +
+                '"link": {"x-subscribe": {"exclusive": true}}}'
+            )
             instance_event_consumer = self.session.consumer(instance_queue)
             # Enable consumer prefetch
             self.logger.info("Setting instance_event_consumer.capacity to {}".format(
@@ -224,7 +241,7 @@ class EventDispatcher(object):
             #self.set_timeout(self.heartbeat, 1000)
 
             connection.start()  # Blocks until event loop exits.
-        except MessagingError as e:
+        except (MessagingError, Exception) as e:
             self.logger.error(e)
             sys.exit(1)
 
@@ -276,6 +293,10 @@ class EventDispatcher(object):
             """
             self.topic_producer = await self.session.producer(self.notifier_config["topic"])
 
+            x_declare = ""
+            if self.queue_type == "quorum":
+                x_declare = ', "x-declare": {"arguments": {"x-queue-type": "quorum"}}'
+
             """
             The asl_workflow_events queue is a shared event queue, that is to
             say every asl_workflow_engine instance receives events from this
@@ -283,7 +304,10 @@ class EventDispatcher(object):
             exclusive so multiple asl_workflow_engine instances can consume from
             it and will thus load-balance executions across multiple instances.
             """
-            shared_queue = self.queue_name + '; {"node": {"durable": true}}'
+            shared_queue = (
+                self.queue_name + 
+                '; {"node": {"durable": true' + x_declare + '}}'
+            )
             shared_event_consumer = await self.session.consumer(shared_queue)
             # Enable consumer prefetch
             self.logger.info("Setting shared_event_consumer.capacity to {}".format(
@@ -305,7 +329,11 @@ class EventDispatcher(object):
             per instance queue is because with the Parallel and Map states we
             would like each branch to notify the same instance when complete.
             """
-            instance_queue = self.instance_queue_name + '; {"node": {"durable": true}, "link": {"x-subscribe": {"exclusive": true}}}'
+            instance_queue = (
+                self.instance_queue_name +
+                '; {"node": {"durable": true' + x_declare + '}, ' +
+                '"link": {"x-subscribe": {"exclusive": true}}}'
+            )
             instance_event_consumer = await self.session.consumer(instance_queue)
             # Enable consumer prefetch
             self.logger.info("Setting instance_event_consumer.capacity to {}".format(
@@ -336,7 +364,7 @@ class EventDispatcher(object):
             self.session.channel.add_on_close_callback(on_close_callback)
 
             await connection.start()  # Blocks until event loop exits.
-        except MessagingError as e:
+        except (MessagingError, Exception) as e:
             self.logger.error(e)
             sys.exit(1)
 

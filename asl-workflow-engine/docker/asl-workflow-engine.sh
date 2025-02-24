@@ -13,7 +13,7 @@ docker run --rm -it \
 -e OTEL_EXPORTER_TYPE=otlp-proto-grpc \
     -e USE_STRUCTURED_LOGGING=FALSE \
     -e EVENT_QUEUE_CONNECTION_URL="amqp://$(hostname -I | awk '{print $1}'):5672?connection_attempts=20&retry_delay=10&heartbeat=0" \
-    -e EVENT_QUEUE_QUEUE_TYPE="AMQP-0.9.1-asyncio" \
+    -e EVENT_QUEUE_QUEUE_IMPLEMENTATION="AMQP-0.9.1-asyncio" \
     -e JAEGER_AGENT_HOST=$(hostname -I | awk '{print $1}') \
 -e OTEL_EXPORTER_JAEGER_AGENT_HOST=$(hostname -I | awk '{print $1}') \
 -e OTEL_EXPORTER_OTLP_ENDPOINT=http://$(hostname -I | awk '{print $1}'):4317 \

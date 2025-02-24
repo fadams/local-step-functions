@@ -8,7 +8,7 @@ Many aspects of the ASL Workflow Engine are configurable, with the configuration
         "comment": "instance_id should be unique for each instance of the workflow engine in a cluster. It will be used to create a unique per-instance event queue.",
         "queue_name": "asl_workflow_events",
         "instance_id": "9256f7e8-55ec-47ea-885e-8ee1f922efa8",
-        "queue_type": "AMQP-0.9.1-asyncio",
+        "queue_implementation": "AMQP-0.9.1-asyncio",
         "connection_url": "amqp://localhost:5672?connection_attempts=20&retry_delay=10&heartbeat=0",
         "connection_options": "",
         "shared_event_consumer_capacity": 1000,
@@ -54,6 +54,7 @@ Equivalent environment variables (note that not every field available in the `co
 ```
 EVENT_QUEUE_QUEUE_NAME
 EVENT_QUEUE_INSTANCE_ID
+EVENT_QUEUE_QUEUE_IMPLEMENTATION
 EVENT_QUEUE_QUEUE_TYPE
 EVENT_QUEUE_CONNECTION_URL
 EVENT_QUEUE_CONNECTION_OPTIONS
@@ -75,9 +76,11 @@ REST_API_REGION
 
 **EVENT_QUEUE_INSTANCE_ID** is a unique identifier for the ASL Workflow Engine instance. A UUID is the most obvious ID to use here though it could be any value that uniquely identified each instance in a cluster. This value is used in conjunction with EVENT_QUEUE_QUEUE_NAME to form the name of the per-instance event queue.
 
-**EVENT_QUEUE_QUEUE_TYPE** defaults to "AMQP-0.9.1-asyncio". The values AMQP-0.9.1-asyncio and the original AMQP-0.9.1 are currently the only supported types. The -asyncio suffix selects the asyncio transport for AMQP and REST API and is now the default. **Note** that the intention is to deprecate the blocking IO path in the near future.
+**EVENT_QUEUE_QUEUE_IMPLEMENTATION** defaults to "AMQP-0.9.1-asyncio". The values AMQP-0.9.1-asyncio and the original AMQP-0.9.1 are currently the only supported types. The -asyncio suffix selects the asyncio transport for AMQP and REST API and is now the default. **Note** that the intention is to deprecate the blocking IO path in the near future.
 
-The intention of making the queue type configurable is to allow there to be different implementations of event queue supported, for example "AMQP-0.10", "AMQP-1.0", "AWS-SQS", etc. The value is used internally in a factory method to create the required concrete event queue implementation.
+The intention of making the queue implementation configurable is to allow there to be different implementations of event queue supported, for example "AMQP-0.10", "AMQP-1.0", "AWS-SQS", etc. The value is used internally in a factory method to create the required concrete event queue implementation.
+
+**EVENT_QUEUE_QUEUE_TYPE** defaults to "classic". The values classic and quorum are currently the only supported types and represent the RabbitMQ classic and quorum queue type respectively. Using quorum queues with a clustered RabbitMQ broker may increase resilience, however be aware that it might reduce throughput performance.
 
 **EVENT_QUEUE_CONNECTION_URL** specifies the Connection URL to the messaging fabric. The default is "amqp://localhost:5672?connection_attempts=20&retry_delay=10&heartbeat=0" which is a typical RabbitMQ Connection URL that also allows connection retries to be configured. Note that for most deployments the hostname part of the URL will certainly need to be changed from the default value of localhost.
 

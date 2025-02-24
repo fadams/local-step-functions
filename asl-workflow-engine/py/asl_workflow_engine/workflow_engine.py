@@ -93,8 +93,12 @@ class WorkflowEngine(object):
         eq["instance_id"] = os.environ.get(
             "EVENT_QUEUE_INSTANCE_ID", eq.get("instance_id")
         )
+        eq["queue_implementation"] = os.environ.get(
+            "EVENT_QUEUE_QUEUE_IMPLEMENTATION",
+            eq.get("queue_implementation", "AMQP-0.9.1-asyncio")
+        )
         eq["queue_type"] = os.environ.get(
-            "EVENT_QUEUE_QUEUE_TYPE", eq.get("queue_type")
+            "EVENT_QUEUE_QUEUE_TYPE", eq.get("queue_type", "classic")
         )
         eq["connection_url"] = os.environ.get(
             "EVENT_QUEUE_CONNECTION_URL", eq.get("connection_url")
@@ -200,7 +204,7 @@ class WorkflowEngine(object):
         a new ThreadLoop, which is the default behaviour unless a tornado IOLoop
         is passed. In recent versions of Tornado that delegates to asyncio loop.
         """
-        if eq["queue_type"].endswith("-asyncio"):
+        if eq["queue_implementation"].endswith("-asyncio"):
             # Attempt to use uvloop libuv based event loop if available
             # https://github.com/MagicStack/uvloop
             try:

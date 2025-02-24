@@ -74,8 +74,13 @@ class TaskDispatcher(object):
         if parsed_peer_address.scheme:
             self.peer_address = parsed_peer_address.scheme + "://" + self.peer_address
 
+        self.queue_type = queue_config.get("queue_type", "classic")
+
+        # For quorum queues append -qq to the base name to visually distinguish.
+        suffix = "-qq" if self.queue_type == "quorum" else ""
+
         instance_id = queue_config.get("instance_id", "")
-        self.reply_to_queue_name = "asl_workflow_reply_to" + "-" + instance_id
+        self.reply_to_queue_name = "asl_workflow_reply_to" + suffix + "-" + instance_id
 
         # Get the channel capacity/prefetch value for the reply_to consumer
         capacity = queue_config.get("reply_to_consumer_capacity", 100)
@@ -181,6 +186,10 @@ class TaskDispatcher(object):
         Connect to the messaging fabric to enable Task States to integrate with
         "rpcmessage" based services as described in execute_task.
         """
+        x_declare = ""
+        if self.queue_type == "quorum":
+            x_declare = ', "x-declare": {"arguments": {"x-queue-type": "quorum"}}'
+
         #self.reply_to = session.consumer()  # reply_to with normal priority
         """
         Increase the consumer priority of the reply_to consumer.
@@ -193,7 +202,9 @@ class TaskDispatcher(object):
         specific and it might well not be possible to do this on other providers.
         """
         self.reply_to = session.consumer(
-            self.reply_to_queue_name + '; {"node": {"durable": true}, "link": {"x-subscribe": {"arguments": {"x-priority": 10}}}}'
+            self.reply_to_queue_name +
+            '; {"node": {"durable": true' + x_declare + '}, ' + 
+            '"link": {"x-subscribe": {"arguments": {"x-priority": 10}}}}'
         )
 
         # Enable consumer prefetch
@@ -214,6 +225,10 @@ class TaskDispatcher(object):
         Connect to the messaging fabric to enable Task States to integrate with
         "rpcmessage" based services as described in execute_task.
         """
+        x_declare = ""
+        if self.queue_type == "quorum":
+            x_declare = ', "x-declare": {"arguments": {"x-queue-type": "quorum"}}'
+
         #self.reply_to = await session.consumer()  # reply_to with normal priority
         """
         Increase the consumer priority of the reply_to consumer.
@@ -226,7 +241,9 @@ class TaskDispatcher(object):
         specific and it might well not be possible to do this on other providers.
         """
         self.reply_to = await session.consumer(
-            self.reply_to_queue_name + '; {"node": {"durable": true}, "link": {"x-subscribe": {"arguments": {"x-priority": 10}}}}'
+            self.reply_to_queue_name +
+            '; {"node": {"durable": true' + x_declare + '}, ' + 
+            '"link": {"x-subscribe": {"arguments": {"x-priority": 10}}}}'
         )
 
         # Enable consumer prefetch
