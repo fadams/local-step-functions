@@ -101,6 +101,18 @@ try:  # Attempt to use ujson if available https://pypi.org/project/ujson/
 except:  # Fall back to standard library json
     import json
 
+"""
+Base64 decoding needed for processing TaskToken
+Attempt to use pybase64 libbase64 based codec if available
+pip3 install pybase64
+https://github.com/mayeut/pybase64
+https://github.com/aklomp/base64
+"""
+try:
+    import pybase64 as base64
+except:  # Fall back to standard library base64
+    import base64
+
 
 def valid_name(name):
     return (
@@ -198,6 +210,19 @@ class RestAPI(object):
             self.logger.warning("Unable to create StateLint instance: {}".format(e))
 
     def create_app(self):
+        """
+        This is needed to do a "low level" Message send for SendTaskSuccess and
+        SendTaskFailure where we create an rpcmessage response that behaves
+        like a normal rpcmessage response from an rpcmessage handling processor.
+
+        In the EventDispatcher constructor we have a "Connection Factory" for
+        the event queue that lets the messaging implementation used be set
+        via the configuration e.g. AMQP-0.9.1-asyncio. Part of that is to set
+        the Message implementation class on event_dispatcher globals(), so
+        we can do the import of the Message class from event_dispatcher.
+        """
+        from asl_workflow_engine.event_dispatcher import Message
+
         app = Quart(__name__)
 
         # Turn off Quart standard logging
@@ -1270,6 +1295,139 @@ class RestAPI(object):
                     resp["nextToken"] = next_token
 
                 return jsonify(resp), 200
+
+            async def aws_api_SendTaskSuccess():
+                """
+                https://docs.aws.amazon.com/step-functions/latest/apireference/API_SendTaskSuccess.html
+                """
+                encoded_task_token = params.get("taskToken")
+                output = params.get("output")
+                if not (encoded_task_token and output):
+                    self.logger.warning(
+                        "RestAPI SendTaskSuccess: taskToken and output must be specified"
+                    )
+                    return aws_error("MissingRequiredParameter"), 400
+
+                """
+                First check if the output length has exceeded the 262144 character
+                quota described in Stepfunction Quotas page.
+                https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
+                """
+                if len(output) > MAX_DATA_LENGTH:
+                    self.logger.error(
+                        "RestAPI SendTaskSuccess: InvalidOutput: size exceeds "
+                        "the maximum number of characters service limit."
+                    )
+                    return aws_error("InvalidOutput"), 400
+
+                # Check that the supplied output parameter is valid JSON
+                try:
+                    json.loads(output)
+                except ValueError as e:
+                    self.logger.error(
+                        f"RestAPI SendTaskSuccess: InvalidOutput: invalid JSON {output}"
+                    )
+                    return aws_error("InvalidOutput"), 400
+
+                try:
+                    input_bytes = bytes(encoded_task_token, "utf-8")  # Get bytes from string
+                    task_token = base64.b64decode(input_bytes).decode("utf-8")
+
+                    split = task_token.split(":")
+                    if len(split) != 2:  # Needs Correlation ID and Reply To
+                        raise Exception(f"Malformed TaskToken {task_token}")
+                    correlation_id = split[0]
+                    reply_to = split[1]
+
+                    if not correlation_id.endswith(".waitForTaskToken"):
+                        raise Exception(f"Malformed TaskToken {task_token}")
+                except Exception as e:
+                    self.logger.error(
+                        f"RestAPI SendTaskSuccess: InvalidToken: {encoded_task_token} {e}"
+                    )
+                    return aws_error("InvalidToken"), 400
+
+                message = Message(
+                    output,
+                    properties={"x-SendTaskSuccess": True},
+                    content_type="application/json",
+                    subject=reply_to,
+                    correlation_id=correlation_id,
+                )
+
+                self.task_dispatcher.producer.send(message, threadsafe=True)
+
+                """
+                If the action is successful, the service sends back an HTTP 200
+                response with an empty HTTP body.
+                """
+                return "", 200
+
+            async def aws_api_SendTaskFailure():
+                """
+                https://docs.aws.amazon.com/step-functions/latest/apireference/API_SendTaskFailure.html
+                """
+                encoded_task_token = params.get("taskToken")
+                if not (encoded_task_token):
+                    self.logger.warning(
+                        "RestAPI SendTaskFailure: taskToken must be specified"
+                    )
+                    return aws_error("MissingRequiredParameter"), 400
+
+
+                error = params.get("error")
+                cause = params.get("cause")
+
+                """
+                First check if the error or cause exceed length limits.
+                """
+                if len(error) > 256:
+                    self.logger.error(
+                        "RestAPI SendTaskFailure: ValidationError: error size "
+                        "exceeds maximum length of 256."
+                    )
+                    return aws_error("ValidationError"), 400
+
+                if len(cause) > 32768:
+                    self.logger.error(
+                        "RestAPI SendTaskFailure: ValidationError: cause size "
+                        "exceeds maximum length of 32768."
+                    )
+                    return aws_error("ValidationError"), 400
+
+                try:
+                    input_bytes = bytes(encoded_task_token, "utf-8")  # Get bytes from string
+                    task_token = base64.b64decode(input_bytes).decode("utf-8")
+
+                    split = task_token.split(":")
+                    if len(split) != 2:  # Needs Correlation ID and Reply To
+                        raise Exception(f"Malformed TaskToken {task_token}")
+                    correlation_id = split[0]
+                    reply_to = split[1]
+
+                    if not correlation_id.endswith(".waitForTaskToken"):
+                        raise Exception(f"Malformed TaskToken {task_token}")
+                except Exception as e:
+                    self.logger.error(
+                        f"RestAPI SendTaskSuccess: InvalidToken: {encoded_task_token} {e}"
+                    )
+                    return aws_error("InvalidToken"), 400
+
+                message = Message(
+                    json.dumps({"errorType": error, "errorMessage": cause}),
+                    properties={"x-SendTaskFailure": True},
+                    content_type="application/json",
+                    subject=reply_to,
+                    correlation_id=correlation_id,
+                )
+                
+                self.task_dispatcher.producer.send(message, threadsafe=True)
+
+                """
+                If the action is successful, the service sends back an HTTP 200
+                response with an empty HTTP body.
+                """
+                return "", 200
 
             async def aws_api_InvalidAction():
                 self.logger.error("RestAPI invalid action: {}".format(action))

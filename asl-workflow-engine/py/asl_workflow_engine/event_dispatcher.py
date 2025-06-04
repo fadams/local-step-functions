@@ -396,6 +396,7 @@ class EventDispatcher(object):
             message_id = message.message_id
             self.unacknowledged_messages[message_id] = message
             self.state_engine.notify(item, message_id, message.redelivered)
+            self.state_engine.task_dispatcher.schedule_orphaned_response_handler()
         except ValueError as e:
             self.logger.error(
                 "Message {} does not contain valid JSON".format(message.body)

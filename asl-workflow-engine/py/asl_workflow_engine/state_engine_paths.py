@@ -134,7 +134,17 @@ def apply_path(input, context, path="$", throw_exception_on_failed_match=True):
         raise ParameterPathFailure("{} must be a JSONPath".format(path))
     if path.startswith("$$"):  # Use Context object, not input
         path = path[1:]  # Strip leading "$" from context path
-        return apply_jsonpath(context, path, throw_exception_on_failed_match)
+        raw_result = apply_jsonpath(context, path, throw_exception_on_failed_match)
+        if path == "$.Task.Token":
+            """
+            If the query is for a TaskToken we base64 result to make it "opaque".
+            We do it here rather than when we insert the TaskToken into the
+            Context as we only need to make it opaque when it is actually used.
+            """
+            input_bytes = bytes(raw_result, "utf-8")  # Get bytes from string
+            return base64.b64encode(input_bytes).decode("utf-8")
+        else:
+            return raw_result
     else:
         return apply_jsonpath(input, path, throw_exception_on_failed_match)
 

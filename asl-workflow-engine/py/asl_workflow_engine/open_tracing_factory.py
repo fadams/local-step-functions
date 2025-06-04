@@ -72,36 +72,101 @@ def instrument_StartExecution(params, **kwargs):
 
 def patch_boto3():
     """
-    Patch boto3 to enable OpenTracing. This first intercepts boto3.client
-    calls, and if the client is a stepfunctions client an event handler is
+    Patch botocore/boto3 to enable OpenTracing.
+    This first intercepts botocore.session.Session.create_client calls.
+    The original approach (for boto3) wrapped boto3.client but that is sub-
+    optimal as a) it won't work if we create a client from a custom Session
+    b) creating a client from a custom Session is the only mechanism allowed
+    in aioboto3. If the client is a stepfunctions client an event handler is
     registered on the StartExecution call that creates a span and injects
     it into the REST API HTTP headers.
     """
     try:
-        import boto3
+        import botocore
 
-        # Save the original boto3.client function to use in the wrapper.
-        boto3_client = boto3.client
+        # Save the original create_client function to use in the wrapper.
+        saved_create_client = botocore.session.Session.create_client
 
-        def client_wrapper(*args, **kwargs):
-            client = boto3_client(*args, **kwargs)
+        def create_client_wrapper(self, service_name, region_name=None,
+            api_version=None, use_ssl=True, verify=None, endpoint_url=None,
+            aws_access_key_id=None, aws_secret_access_key=None,
+            aws_session_token=None, config=None,
+        ):
+            client = saved_create_client(self, service_name, region_name,
+                api_version, use_ssl, verify, endpoint_url, aws_access_key_id,
+                aws_secret_access_key, aws_session_token, config)
 
-            if args[0] == "stepfunctions":
+            if service_name == "stepfunctions":
                 """
                 Access boto3 event system and Register instrument_StartExecution
-                function to the StartExecution event before-call hook.
+                function to the StartExecution and StartSyncExecution
+                event before-call hook.
                 """
                 client.meta.events.register(
                     "before-call.stepfunctions.StartExecution",
                     instrument_StartExecution
                 )
+                client.meta.events.register(
+                    "before-call.stepfunctions.StartSyncExecution",
+                    instrument_StartExecution
+                )
             return client
 
-        # Patch boto3 to use client_wrapper
-        boto3.client = client_wrapper
-
+        # Patch boto3 to use create_client_wrapper
+        botocore.session.Session.create_client = create_client_wrapper
+    except AttributeError as e:
+        pass
     except Exception as e:
-        create_tracer.logger.warning("Failed to add Tracer to boto3: {}".format(e))
+        create_tracer.logger.warning(f"Failed to add Tracer to boto3: {e}")
+
+def patch_aioboto3():
+    """
+    Patch aiobotocore/aioboto3 to enable OpenTracing.
+    This first intercepts aiobotocore.session.AioSession._create_client calls.
+    The original approach (for boto3) wrapped boto3.client but that is sub-
+    optimal as a) it won't work if we create a client from a custom Session
+    b) creating a client from a custom Session is the only mechanism allowed
+    in aioboto3. If the client is a stepfunctions client an event handler is
+    registered on the StartExecution call that creates a span and injects
+    it into the REST API HTTP headers.
+    """
+    try:
+        import aiobotocore
+
+        # Save the original _create_client function to use in the wrapper.
+        saved_create_client = aiobotocore.session.AioSession._create_client
+
+        async def create_client_wrapper(self, service_name, region_name=None,
+            api_version=None, use_ssl=True, verify=None, endpoint_url=None,
+            aws_access_key_id=None, aws_secret_access_key=None,
+            aws_session_token=None, config=None,
+        ):
+            client = await saved_create_client(self, service_name, region_name,
+                api_version, use_ssl, verify, endpoint_url, aws_access_key_id,
+                aws_secret_access_key, aws_session_token, config)
+
+            if service_name == "stepfunctions":
+                """
+                Access boto3 event system and Register instrument_StartExecution
+                function to the StartExecution and StartSyncExecution
+                event before-call hook.
+                """
+                client.meta.events.register(
+                    "before-call.stepfunctions.StartExecution",
+                    instrument_StartExecution
+                )
+                client.meta.events.register(
+                    "before-call.stepfunctions.StartSyncExecution",
+                    instrument_StartExecution
+                )
+            return client
+
+        # Patch aioboto3 to use create_client_wrapper
+        aiobotocore.session.AioSession._create_client = create_client_wrapper
+    except AttributeError as e:
+        pass
+    except Exception as e:
+        create_tracer.logger.warning(f"Failed to add Tracer to aioboto3: {e}")
 
 def create_tracer(service_name, config, use_asyncio=False):
     create_tracer.logger = init_logging(service_name)
@@ -396,6 +461,7 @@ def create_tracer(service_name, config, use_asyncio=False):
             opentracing.tracer = tracer
 
     patch_boto3()
+    patch_aioboto3()
 
 def span_context(format, carrier, logger):
     """

@@ -115,10 +115,12 @@ class TaskDispatcher(object):
         This may occur if the ASL Engine is restarted and the response to a
         previously made request then arrives, or where a Task is cancelled and
         the response from the invoked task subsequently arrives.
+
         We want to retain orphaned_responses for a short while as the Task
         Event message may be redelivered after a restart and we'd like to be
         able to associate the response with the Task.
         """
+        self.handle_orphaned_responses_is_scheduled = False
         self.orphaned_responses = {}
         self.orphaned_response_retention_ms = queue_config.get(
             "orphaned_response_retention_ms"
@@ -271,7 +273,7 @@ class TaskDispatcher(object):
         https://www.rabbitmq.com/reliability.html#routing
         and pass this method as the return_callback to handle AMQP Basic.Return.
         """
-        error_message = "Specified Task Resource arn:aws:rpcmessage:local::function:{} is not currently available".format(message.subject)
+        error_message = f"Function not found: arn:aws:rpcmessage:local::function:{message.subject}"
         error = {"errorType": "States.TaskFailed", "errorMessage": error_message}
         error_as_bytes = json.dumps(error).encode('utf-8')
 
@@ -294,11 +296,9 @@ class TaskDispatcher(object):
         """
         This is a message listener receiving messages from the reply_to queue
         for this workflow engine instance.
-        TODO cater for the case where requests are sent but responses never
-        arrive, this scenario will cause self.pending_requests to "leak" as
-        correlation_id keys get added but not removed. This situation should be
-        improved as we add code to handle Task state "rainy day" scenarios such
-        as Timeouts etc. so park for now, but something to be aware of.
+
+        Its primary purpose is to handle rpcmessage response messages, but is
+        also handles SendTaskSuccess/SendTaskFailure
         """
 
         def log_and_acknowledge_orphaned_responses():
@@ -320,34 +320,151 @@ class TaskDispatcher(object):
             when the timeout is triggered.
             """
             if message.correlation_id in self.orphaned_responses:
-                with opentracing.tracer.start_active_span(
-                    operation_name="Task",
-                    child_of=span_context("text_map", message.properties, self.logger),
-                    tags={
-                        "component": "task_dispatcher",
-                        "message_bus.destination": self.reply_to.name,
-                        "span.kind": "consumer",
-                        "peer.address": self.peer_address
-                    }
-                ) as scope:
-                    self.logger.info("Response {} has no matching requestor".format(message))
-                    scope.span.set_tag("error", True)
-                    scope.span.log_kv(
-                        {
-                            "event": "No matching requestor",
-                            "message": "Response has no matching requestor",
+                """
+                The responses to invoke.waitForTaskToken rpcmessage requests
+                are ignored as the *actual* Task response for those will be
+                from SendTaskSuccess/SendTaskFailure. If we get "orphaned"
+                responses from those the reason is likely to be some processing
+                that calls SendTaskSuccess then sends an rpcmessage response
+                so we don't need to log, just acknowledge.
+                """
+                if not message.correlation_id.endswith(".waitForTaskToken"):
+                    with opentracing.tracer.start_active_span(
+                        operation_name="Task",
+                        child_of=span_context("text_map", message.properties, self.logger),
+                        tags={
+                            "component": "task_dispatcher",
+                            "message_bus.destination": self.reply_to.name,
+                            "span.kind": "consumer",
+                            "peer.address": self.peer_address
                         }
-                    )
+                    ) as scope:
+                        self.logger.info("Response {} has no matching requestor".format(message))
+                        scope.span.set_tag("error", True)
+                        scope.span.log_kv(
+                            {
+                                "event": "No matching requestor",
+                                "message": "Response has no matching requestor",
+                            }
+                        )
 
                 del self.orphaned_responses[message.correlation_id]
                 message.acknowledge(multiple=False)
 
 
         correlation_id = message.correlation_id
+
+        """
+        Process the correlation_id to check if it had a ".invoke" or
+        ".waitForTaskToken" suffix appended when it was stored. These are
+        used to disambiguate, as the Task response handling for functions
+        invoked using the "long form" invoke syntax is slightly different
+        than that for the "short form" and TaskToken callbacks also behave
+        slightly differently.
+        https://docs.aws.amazon.com/step-functions/latest/dg/connect-lambda.html#connect-lambda-api-examples
+        """
+        request_has_invoke = False  # Set if "dictionary of metadata" response is required.
+        request_has_waitForTaskToken = False
+        is_callback = False  # E.g. a SendTaskSuccess/SendTaskFailure response.
+        if correlation_id.endswith(".waitForTaskToken"):
+            is_callback = (
+                "x-SendTaskSuccess" in message.properties or
+                "x-SendTaskFailure" in message.properties
+            )
+
+            """
+            If the message is NOT a message generated by a SendTaskSuccess
+            or SendTaskFailure callback API call, in other words if it is
+            a response message directly from the rpcmessage call, then we
+            set request_has_waitForTaskToken as we want to ignore any
+            rpcmessage responses that aren't error responses.
+
+            This logic is in place because a .invoke.waitForTaskToken
+            request _could_ have *two* responses one being the rpcmessage
+            response to the invoke and the other being the callback. Both
+            appear very similar with the exception of the message property
+            added to the callback message and they are handled similarly so
+            this logic disambiguates them.
+            """
+            if not is_callback:
+                request_has_waitForTaskToken = True
+        elif correlation_id.endswith(".invoke"):
+            request_has_invoke = True
+
+        """
+        If request_has_waitForTaskToken is set above any non-error rpcmessage
+        response is ignored, as the *actual* Task completion is via
+        SendTaskSuccess or SendTaskFailure API calls, however if the rpcmessage
+        response is an error then that is *not* ignored and the Task will be
+        failed, so we must check whether the response is an error before we do
+        much else.
+        """
+
+        message_body = message.body
+
+        """
+        First check if the response has exceeded the 262144
+        character quota described in Stepfunction Quotas page.
+        https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
+        We do the test here as we have the raw JSON string handy.
+        """
+        if len(message_body) > MAX_DATA_LENGTH:
+            result = {"errorType": "States.DataLimitExceeded"}
+        else:
+            try:
+                result_as_string = message_body.decode("utf8")
+                result = json.loads(result_as_string)
+            except ValueError as e:
+                error_message = ("Response {} does not contain "
+                    "valid JSON").format(message.body)
+                result = {
+                    "errorType": "States.Runtime",
+                    "errorMessage": error_message
+                }
+                self.logger.error(error_message)
+
+        error_type = None
+        if isinstance(result, dict):
+            error_type = result.get("errorType")
+
+        """
+        If the request Resource was a .invoke.waitForTaskToken and the
+        response *wasn't* an error then we acknowledge any response message
+        and return without removing/resolving the pending_requests. This
+        is because the *actual* Task response should come via
+        SendTaskSuccess/SendTaskFailure which will be sent via its own
+        message. In other words a .invoke.waitForTaskToken request *could*
+        receive two responses, the first direct from the processor, which
+        will be ignored unless it is an error, the second from the
+        SendTaskSuccess/SendTaskFailure API calls.
+        """
+        if request_has_waitForTaskToken and error_type == None:
+            message.acknowledge(multiple=False)
+            return
+
         request = self.pending_requests.get(correlation_id)
         if request:
+            """
+            First remove any orphaned response for this correlation_id, as it is
+            no longer orphaned if present in pending_requests. Note that we'll
+            only have orphaned responses on edge cases where we have a restart
+            and rpcmessage responses get delivered before their Task States get
+            reconstructed from redelivered Task messages.
+            """
+            orphaned_response = self.orphaned_responses.get(correlation_id)
+            if orphaned_response:
+                m, timeout_id = orphaned_response
+                # Cancel the timeout previously set for this orphaned_response.
+                self.state_engine.event_dispatcher.clear_timeout(timeout_id)
+                del self.orphaned_responses[correlation_id]
+
             del self.pending_requests[correlation_id]
             state_machine, execution_arn, resource_arn, callback, sched_time, timeout_id, task_span = request
+
+            arn = parse_arn(resource_arn)
+            resource = arn["resource"]
+            resource_type = arn["resource_type"]
+
             with opentracing.tracer.scope_manager.activate(
                 span=task_span,
                 finish_on_close=True
@@ -355,31 +472,6 @@ class TaskDispatcher(object):
                 # Cancel the timeout previously set for this request.
                 self.state_engine.event_dispatcher.clear_timeout(timeout_id)
                 if callable(callback):
-                    message_body = message.body
-                    """
-                    First check if the response has exceeded the 262144
-                    character quota described in Stepfunction Quotas page.
-                    https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
-                    We do the test here as we have the raw JSON string handy.
-                    """
-                    if len(message_body) > MAX_DATA_LENGTH:
-                        result = {"errorType": "States.DataLimitExceeded"}
-                    else:
-                        try:
-                            message_body_as_string = message_body.decode("utf8")
-                            result = json.loads(message_body_as_string)
-                        except ValueError as e:
-                            error_message = ("Response {} does not contain "
-                                "valid JSON").format(message.body)
-                            result = {
-                                "errorType": "States.Runtime",
-                                "errorMessage": error_message
-                            }
-                            self.logger.error(error_message)
-
-                    error_type = None
-                    if isinstance(result, dict):
-                        error_type = result.get("errorType")
                     if error_type:
                         error_message = result.get("errorMessage", "")
                         opentracing.tracer.active_span.set_tag("error", True)
@@ -390,38 +482,118 @@ class TaskDispatcher(object):
                             }
                         )
 
-                        self.state_engine.update_execution_history(
-                            state_machine, execution_arn,
-                            "LambdaFunctionFailed",
-                            {
-                                "error": error_type,
-                                "cause": error_message,
-                            },
-                        )
-
-                        if self.task_metrics: 
-                            self.task_metrics["LambdaFunctionsFailed"].inc(
-                                {"LambdaFunctionArn": resource_arn}
+                        """
+                        The arn:aws:states:::rpcmessage:invoke "long form"
+                        resource and direct function ARN resource have different
+                        log, history, and metric values. Note that the
+                        "dimension" for ServiceIntegrationsFailed, is the
+                        resource ARN of the integrated service for consistency
+                        with AWS, which is arguably less useful than the
+                        function ARN might be.
+                        """
+                        if request_has_invoke or is_callback or request_has_waitForTaskToken:
+                            self.state_engine.update_execution_history(
+                                state_machine, execution_arn,
+                                "TaskFailed",
+                                {
+                                    "error": error_type,
+                                    "cause": error_message,
+                                    "resource": resource,
+                                    "resourceType": resource_type,
+                                },
                             )
+
+                            if self.task_metrics: 
+                                self.task_metrics["ServiceIntegrationsFailed"].inc(
+                                    {"ServiceIntegrationResourceArn": resource_arn}
+                                )
+                        else:
+                            self.state_engine.update_execution_history(
+                                state_machine, execution_arn,
+                                "LambdaFunctionFailed",
+                                {
+                                    "error": error_type,
+                                    "cause": error_message,
+                                },
+                            )
+
+                            if self.task_metrics: 
+                                self.task_metrics["LambdaFunctionsFailed"].inc(
+                                    {"LambdaFunctionArn": resource_arn}
+                                )
                     else:
-                        self.state_engine.update_execution_history(
-                            state_machine, execution_arn,
-                            "LambdaFunctionSucceeded",
-                            {
-                                "output": message_body_as_string,
-                            },
-                        )
+                        """
+                        If invocation is from arn:aws:states:::rpcmessage:invoke
+                        "long form" resource (rather than using function ARN
+                        directly) when the Task result is returned the function
+                        output is nested inside a dictionary of metadata. When
+                        the function ARN is used directly the task result
+                        contains only the function output.
+                        https://docs.aws.amazon.com/step-functions/latest/dg/connect-lambda.html#connect-lambda-api-examples
+                        """
+                        if request_has_invoke:
+                            result = {
+                                "ExecutedVersion": "$LATEST",
+                                "Payload": result,
+                                "SdkResponseMetadata":{
+                                    "RequestId": correlation_id
+                                },
+                                "StatusCode": 200
+                            }
+                            # Need to convert to string for update_execution_history
+                            result_as_string = json.dumps(result)
 
-                        if self.task_metrics:
-                            self.task_metrics["LambdaFunctionsSucceeded"].inc(
-                                {"LambdaFunctionArn": resource_arn}
+                        """
+                        The arn:aws:states:::rpcmessage:invoke "long form"
+                        resource and direct function ARN resource have different
+                        log, history, and metric values. Note that the
+                        "dimension" for ServiceIntegrationsSucceeded, is the
+                        resource ARN of the integrated service for consistency
+                        with AWS, which is arguably less useful than the
+                        function ARN might be.
+                        """
+                        if request_has_invoke or is_callback:
+                            self.state_engine.update_execution_history(
+                                state_machine, execution_arn,
+                                "TaskSucceeded",
+                                {
+                                    "output": result_as_string,
+                                    "resource": resource,
+                                    "resourceType": resource_type,
+                                },
                             )
+
+                            if self.task_metrics:
+                                self.task_metrics["ServiceIntegrationsSucceeded"].inc(
+                                    {"ServiceIntegrationResourceArn": resource_arn}
+                                )
+                        else:
+                            self.state_engine.update_execution_history(
+                                state_machine, execution_arn,
+                                "LambdaFunctionSucceeded",
+                                {
+                                    "output": result_as_string,
+                                },
+                            )
+
+                            if self.task_metrics:
+                                self.task_metrics["LambdaFunctionsSucceeded"].inc(
+                                    {"LambdaFunctionArn": resource_arn}
+                                )
 
                     if self.task_metrics:
                         duration = (time.time()  * 1000.0) - sched_time
-                        self.task_metrics["LambdaFunctionTime"].observe(
-                            {"LambdaFunctionArn": resource_arn}, duration
-                        )
+
+                        if request_has_invoke or is_callback:
+                            self.task_metrics["ServiceIntegrationTime"].observe(
+                                {"ServiceIntegrationResourceArn": resource_arn},
+                                duration
+                            )
+                        else:
+                            self.task_metrics["LambdaFunctionTime"].observe(
+                                {"LambdaFunctionArn": resource_arn},
+                                duration
+                            )
 
                     callback(result)
 
@@ -430,17 +602,49 @@ class TaskDispatcher(object):
             uptime = (time.time() - self.startup_time)*1000  # Uptime in millis
             if uptime < self.orphaned_response_retention_ms:
                 """
-                Defer logging and acknowledging any "orphaned" response messages
-                as upon a restart of the ASL Engine it is possible for Task
-                responses from the original Task invocation to arrive before the
-                pending Task's state is reconstructed.
+                Handle an edge case where a restart has occurred and *both*
+                an errored rpcmessage response *and* a TaskToken response
+                happen to have been published, which is likely rare, but
+                plausible depending on how a processor handles such as case and
+                the order of responses. In normal operation these will be
+                handled in sequence and the pending request will be present,
+                but on a restart both of these responses might arrive before
+                the pending request has been reconstructed from the redelivered
+                Task State. As these responses will have the *same* correlation
+                ID we must check and select the errored rpcmessage response
+                and dropping the TaskToken response.
                 """
-                timeout_id = self.state_engine.event_dispatcher.set_timeout(
-                    log_and_acknowledge_orphaned_responses,
-                    self.orphaned_response_retention_ms
-                )
-
-                self.orphaned_responses[correlation_id] = (message, timeout_id)
+                if correlation_id in self.orphaned_responses:
+                    if request_has_waitForTaskToken:
+                        """
+                        If current response is an rpcmessage error response
+                        then replace the currently stored orphaned response,
+                        remembering to acknowledge the original stored message
+                        and reusing the original timeout_id.
+                        """
+                        m, timeout_id = self.orphaned_responses[correlation_id]
+                        m.acknowledge(multiple=False)
+                        self.orphaned_responses[correlation_id] = (message, timeout_id)
+                    elif is_callback:
+                        """
+                        If the current response is a TaskToken callback it means
+                        the currently stored orphaned response is an rpcmessage
+                        error response, so retain that and acknowledge the
+                        current message.
+                        """
+                        message.acknowledge(multiple=False)
+                else:
+                    """
+                    Defer logging and acknowledging any "orphaned" response messages
+                    as upon a restart of the ASL Engine it is possible for Task
+                    responses from the original Task invocation to arrive before the
+                    pending Task's state is reconstructed.
+                    """
+                    timeout_id = self.state_engine.event_dispatcher.set_timeout(
+                        log_and_acknowledge_orphaned_responses,
+                        self.orphaned_response_retention_ms
+                    )
+                    self.orphaned_responses[correlation_id] = (message, timeout_id)
             else:
                 """
                 If the uptime is more than the retention period for orphaned
@@ -659,6 +863,47 @@ class TaskDispatcher(object):
         #print()
         #print(self.pending_requests.keys())
 
+    def handle_orphaned_responses(self):
+        """
+        Orphaned responses may occur if the ASL Engine is restarted and the
+        response to a previously made request then arrives, or where a Task is
+        cancelled and the response from the invoked task subsequently arrives.
+        These could be "resolved" when the message representing the Task State
+        gets redelivered, but the delivery order of the response and the
+        redelivered Task is indeterminate.
+
+        To cater for this edge case we schedule a periodic check of Orphaned
+        responses, initially triggered by State Transition Events but will also
+        re-schedule itself if any orphaned_responses remain.
+
+        Note the use of copy() as we might delete items whilst iterating
+        in general orphaned_responses should be small though and only non-zero
+        for a short period after start-up.
+        """
+        for correlation_id, orphaned_response in self.orphaned_responses.copy().items():
+            message, timeout_id = orphaned_response
+            if correlation_id in self.pending_requests:
+                # Directly call response handler with the stored message.
+                self.handle_rpcmessage_response(message)
+
+        # Reset flag to allow handle_orphaned_responses to be scheduled again.
+        self.handle_orphaned_responses_is_scheduled = False
+        self.schedule_orphaned_response_handler()
+
+    def schedule_orphaned_response_handler(self):
+        """
+        Schedule handle_orphaned_responses onto the event loop if any
+        orphaned_responses remain and it is not already scheduled to run.
+        """
+        if (len(self.orphaned_responses) == 0 or
+            self.handle_orphaned_responses_is_scheduled):
+            return
+
+        self.handle_orphaned_responses_is_scheduled = True
+        self.state_engine.event_dispatcher.set_timeout(
+            self.handle_orphaned_responses, 1000
+        )
+
     def execute_task(self, resource_arn, parameters, callback, timeout, context, event_id, redelivered):
         """
         Look up stateMachineArn to get State Machine as we need that later to
@@ -769,7 +1014,7 @@ class TaskDispatcher(object):
                 if error["errorType"] == "States.Timeout":
                     execution_arn = context["Execution"]["Id"]
                     update_type = "TaskTimedOut"
-                    if service == "rpcmessage" or service == "lambda":
+                    if resource_type == "function":
                         update_type = "LambdaFunctionTimedOut"
                     self.state_engine.update_execution_history(
                         state_machine, execution_arn,
@@ -843,6 +1088,7 @@ class TaskDispatcher(object):
 
         arn = parse_arn(resource_arn)
         service = arn["service"]  # e.g. rpcmessage, fn, openfaas, lambda
+        region = arn["region"]  # e.g. real AWS region or "local" for ASL Engine
         resource_type = arn["resource_type"]  # Should be function most times
         resource = arn["resource"]  # function-name
 
@@ -856,11 +1102,11 @@ class TaskDispatcher(object):
             """
             Publish message to the required rpcmessage worker resource. The
             message body is a JSON string containing the "effective parameters"
-            passed from the StateEngine and the message subject is the resource
+            passed from the StateEngine and the message subject is the function
             name, which in turn maps to the name of the queue that the resource
             has set up to listen on. In order to ensure that responses from
             Task resources return to the correct calling Task the message is
-            populated with a reply to address representing this this workflow
+            populated with a reply to address representing this workflow
             engine's reply_to queue as well as a correlation ID to ensure that
             response messages can be correctly tracked irrespective of the order
             that they are returned - as that might be quite different from the
@@ -885,8 +1131,50 @@ class TaskDispatcher(object):
             ASL Engine restarts, so Task responses can be correlated with the
             requesting Task State even after a restart.
             """
-            #correlation_id = str(uuid.uuid4())  # Deprecated approach
             correlation_id = event_id
+
+            """
+            There are two alternative syntaxes for invoking functions as per:
+            https://docs.aws.amazon.com/step-functions/latest/dg/connect-lambda.html
+            The first has a "Resource" like "arn:aws:states:::rpcmessage:invoke"
+            and Parameters specifying FunctionName and Payload. In the second
+            form you can invoke a function by simply specifying a function ARN
+            directly in the "Resource" field, which has been the only form
+            hitherto supported by the ASL Engine.
+
+            We need to collect the same function invocation information from
+            each. However, as the response format is different we need to be
+            able to disambiguate response format based on invocation approach
+            so we append the resource as a suffix to the correlation_id.
+            """
+            if resource_type == "rpcmessage" and (
+                resource == "invoke" or resource == "invoke.waitForTaskToken"):
+                # Called using "long form" invocation syntax e.g.
+                # e.g. "Resource": "arn:aws:states:local::rpcmessage:invoke",
+                function_arn = parameters.get("FunctionName")
+                if function_arn:
+                    # Add suffix to correlation_id to allow disambiguation
+                    suffix = ".invoke" if resource == "invoke" else ".waitForTaskToken"
+                    correlation_id = correlation_id + suffix
+                    arn = parse_arn(function_arn)
+                    function_name = arn["resource"]
+
+                    # The *actual* function arguments are held in the Payload
+                    # field (if present).
+                    function_payload = parameters.get("Payload", {})
+                else:
+                    message = f"TaskDispatcher ARN {resource_arn}: " \
+                               "Parameters.FunctionName must be specified"
+                    error = {"errorType": "MissingRequiredParameter",
+                             "errorMessage": message}
+                    send_error_callback(context.get("Tracer", {}), error)
+                    return
+            else:
+                # Called using "short form" invocation syntax e.g.
+                # "Resource": "arn:aws:rpcmessage:local::function:FunctionName",
+                function_arn = resource_arn
+                function_name = resource
+                function_payload = parameters
 
             """
             Create a timeout handler in case the rpcmessage invocation fails.
@@ -909,7 +1197,8 @@ class TaskDispatcher(object):
                 tags={
                     "component": "task_dispatcher",
                     "resource_arn": resource_arn,
-                    "message_bus.destination": resource,
+                    "function_arn": function_arn,
+                    "message_bus.destination": function_name,
                     "span.kind": "producer",
                     "peer.address": self.peer_address,
                     "execution_arn": execution_arn
@@ -948,34 +1237,20 @@ class TaskDispatcher(object):
                 Note that if the Task State is re-entered, for example due to
                 the ASL Engine being restarted and the outstanding Task State
                 transition Message being redelivered then we do not re-invoke
-                the Task, instead we check for any orphaned responses that
-                might have been sent by the rpcmessage service before the
-                pending_requests were recreated.
+                the Task.
 
                 The original behaviour was to re-invoke as it is simpler, but
                 for expensive or long lived Tasks it is sub-optimal to invoke
                 them again, so we now try to avoid it which adds complexity.
                 """
-                if redelivered:
-                    orphaned_response = self.orphaned_responses.get(correlation_id)
-                    if orphaned_response != None:
-                        message, timeout_id = orphaned_response
-
-                        # Directly call response handler with the stored message.
-                        self.handle_rpcmessage_response(message)
-
-                        # Cancel the timeout previously set for this orphaned_response.
-                        self.state_engine.event_dispatcher.clear_timeout(timeout_id)
-
-                        del self.orphaned_responses[correlation_id]
-                else:
-                    parameters_as_string = json.dumps(parameters)
+                if not redelivered:
+                    payload_as_string = json.dumps(function_payload)
                     carrier = inject_span("text_map", scope.span, self.logger)
                     message = Message(
-                        parameters_as_string,
+                        payload_as_string,
                         properties=carrier,
                         content_type="application/json",
-                        subject=resource,
+                        subject=function_name,
                         reply_to=self.reply_to.name,
                         correlation_id=correlation_id,
                         # Give the RPC Message a TTL equivalent to the ASL
@@ -986,15 +1261,36 @@ class TaskDispatcher(object):
 
                     self.producer.send(message)
 
-                    self.state_engine.update_execution_history(
-                        state_machine, execution_arn,
-                        "LambdaFunctionScheduled",
-                        {
-                            "input": parameters_as_string,
-                            "resource": resource_arn,
-                            "timeoutInSeconds": math.ceil(timeout/1000)
-                        },
-                    )
+                    """
+                    The type of history/log event differs by resource type.
+                    If the resource is a Function ARN then the event is
+                    LambdaFunctionScheduled, but if it is a generic invoke
+                    then the event is TaskScheduled for consistency with
+                    AWS Stepfunctions.
+                    """
+                    if resource_type == "function":
+                        self.state_engine.update_execution_history(
+                            state_machine, execution_arn,
+                            "LambdaFunctionScheduled",
+                            {
+                                "input": payload_as_string,
+                                "resource": function_arn,
+                                "timeoutInSeconds": math.ceil(timeout/1000)
+                            },
+                        )
+                    else:
+                        parameters_as_string = json.dumps(parameters)
+                        self.state_engine.update_execution_history(
+                            state_machine, execution_arn,
+                            "TaskScheduled",
+                            {
+                                "parameters": parameters_as_string,
+                                "region": region,
+                                "resource": resource,
+                                "resourceType": resource_type,
+                                "timeoutInSeconds": math.ceil(timeout/1000)
+                            },
+                        )
 
                     if self.task_metrics:
                         """
@@ -1006,10 +1302,30 @@ class TaskDispatcher(object):
                         whether the worker/processor has actually started, so it is
                         most truthful just to use the LambdaFunctionsScheduled
                         metric as we can't know LambdaFunctionsStarted.
+
+                        The type of metric differs by resource type.
+                        If the resource is a Function ARN then the metric is
+                        LambdaFunctionsScheduled, but if it is a generic invoke
+                        then the metric is ServiceIntegrationsScheduled for
+                        consistency with AWS Stepfunctions.
+
+                        The "dimension" for ServiceIntegrationsScheduled, however
+                        is the resource ARN of the integrated service. In
+                        practice that is less than ideal as it only really
+                        describes the invoke service, so the ARN is the
+                        same irrespective of the invoked function. It's likely
+                        more useful to have the dimention be the function ARN
+                        as with the "short-form" invoke, but the resource ARN
+                        is consistent with AWS Stepfunctions.
                         """
-                        self.task_metrics["LambdaFunctionsScheduled"].inc(
-                            {"LambdaFunctionArn": resource_arn}
-                        )
+                        if resource_type == "function":
+                            self.task_metrics["LambdaFunctionsScheduled"].inc(
+                                {"LambdaFunctionArn": function_arn}
+                            )
+                        else:
+                            self.task_metrics["ServiceIntegrationsScheduled"].inc(
+                                {"ServiceIntegrationResourceArn": resource_arn}
+                            )
 
 
         # def asl_service_openfaas():  # TODO
@@ -1025,8 +1341,10 @@ class TaskDispatcher(object):
             """
             The service part of the Resource ARN might be "states" for a number
             of Service Integrations, so we must further demultiplex based on
-            the resource_type. Initially just support states startExecution and
-            its variants allow us to invoke another state machine execution.
+            the resource_type.
+
+            Initially just support rpcmessage:invoke, states:startExecution and
+            its variants to allow us to invoke another state machine execution.
             startExecution launches a child state machine in an asynchronous
             "fire and forget" manner and simply returns the executionArn and
             startDate immediately and the calling Task state doesn't wait for
@@ -1038,16 +1356,34 @@ class TaskDispatcher(object):
             https://awsteele.com/blog/2021/10/12/nested-express-step-functions.html
             https://stackoverflow.com/a/69548324
             """
+
+            """
+            TODO IDC check for region == "local" for resource_type == "states"
+            or resource_type == "aws-sdk" below. These do StartExecution on
+            the ASL Engine by using the internal messaging, but when support
+            for invoking real AWS services is added we need to disambiguate
+            between "local" invocations vice AWS service invocations.
+            That would be a potentially breaking change as it would require
+            local Resource ARNs to *explicitly* begin arn:aws:states:local:
+            whereas for now arn:aws:states:: would also work.
+            """
             if resource_type == "states":
                 if (resource == "startExecution" or
                     resource == "startExecution.sync" or
-                    resource == "startExecution.sync:2"):
+                    resource == "startExecution.sync:2" or
+                    resource == "startExecution.waitForTaskToken"):
                     asl_service_states_startExecution()
                 else:
                     asl_service_InvalidService()
             elif resource_type == "aws-sdk":
                 if resource == "sfn:startSyncExecution":
                     asl_service_states_startExecution()
+                else:
+                    asl_service_InvalidService()
+            elif resource_type == "rpcmessage":
+                if (resource == "invoke" or
+                    resource == "invoke.waitForTaskToken"):
+                    asl_service_rpcmessage()
                 else:
                     asl_service_InvalidService()
             else:
@@ -1100,7 +1436,7 @@ class TaskDispatcher(object):
 
             EXPRESS workflows do, however, support being invoked by the
             StartSyncExecution API call, and both STANDARD and EXPRESS workflows
-            can launch EXPRESS child executions by using the awd-skd integration
+            can launch EXPRESS child executions by using the aws-sdk integration
             arn:aws:states:region:account-id:aws-sdk:sfn:startSyncExecution
             """
             if ((resource == "startExecution.sync" or
@@ -1159,14 +1495,28 @@ class TaskDispatcher(object):
             )
 
             """
+            Associate response callback with this request via a correlation ID.
+            For startExecution.sync, startExecution.sync:2, and
+            sfn:startSyncExecution we use child_execution_arn as the
+            correlation ID because the child execution knows its own ARN so
+            can easily signal its completion using that. For 
+            startExecution.waitForTaskToken we use event_id plus the suffix
+            ".waitForTaskToken" so we can reuse the rpcmessage callback handler.
+            """
+            if resource == "startExecution.waitForTaskToken":
+                correlation_id = event_id + ".waitForTaskToken"
+            else:
+                correlation_id = child_execution_arn
+
+            """
             Create a timeout handler in case a (synchronous) child state
             machine invocation fails. The timeout_callback sends an error
             response to the calling Task state and deletes the pending request,
-            using the child_execution_arn captured here by the on_timeout
+            using the correlation_id captured here by the on_timeout
             closure to lookup the request.
             """
             def on_timeout():
-                timeout_callback(child_execution_arn)
+                timeout_callback(correlation_id)
 
             """
             If the resource is simply startExecution then the child
@@ -1198,13 +1548,10 @@ class TaskDispatcher(object):
                 """
                 If the child state machine is launched synchronously we handle
                 the success/failure response in handle_sfn_response().
-                If the response occurs before the timeout expires the timeout
-                should be cancelled, so we store the timeout_id as well as the
-                required callback in the dict keyed by child_execution_arn.
                 """
                 if not async_child:  # E.g. it's launched synchronously
                     # Map the event ID for the Task to request ID.
-                    self.set_sfn_canceller(event_id, child_execution_arn, execution_arn)
+                    self.set_sfn_canceller(event_id, correlation_id, execution_arn)
 
                     timeout_id = self.state_engine.event_dispatcher.set_timeout(
                         on_timeout, timeout
@@ -1218,7 +1565,7 @@ class TaskDispatcher(object):
                     We also pass the OpenTracing span to pending_requests so we can
                     use it when receiving a response, and in case of a timeout.
                     """
-                    self.pending_requests[child_execution_arn] = (
+                    self.pending_requests[correlation_id] = (
                         state_machine,
                         execution_arn,
                         resource_arn,
@@ -1228,7 +1575,6 @@ class TaskDispatcher(object):
                         scope.span
                     )
 
-
                 """
                 Actually invoke the Task by creating and publishing the sfn
                 event Message and updating the Execution History and metrics.
@@ -1237,11 +1583,6 @@ class TaskDispatcher(object):
                 the ASL Engine being restarted and the outstanding Task State
                 transition Message being redelivered then we do not re-invoke
                 the Task.
-
-                For child Stepfunctions we don't need the logic for "orphaned"
-                responses that we have for rpcmessage Tasks because synchronous
-                child Stepfunctions are launched in the same instance as their
-                parent, so can't complete unless the parent is also running.
 
                 The original behaviour was to re-invoke as it is simpler, but
                 for expensive or long lived Tasks it is sub-optimal to invoke
@@ -1282,8 +1623,8 @@ class TaskDispatcher(object):
                         {
                             "parameters": parameters_as_string,
                             "region": region,
-                            "resource": resource_arn,
-                            "resourceType": "states",
+                            "resource": resource,
+                            "resourceType": resource_type,
                             "timeoutInSeconds": math.ceil(timeout/1000)
                         },
                     )
@@ -1314,7 +1655,7 @@ class TaskDispatcher(object):
                 the child execution ends.
                 """
                 if async_child:
-                    result = {"executionArn": execution_arn, "startDate": time.time()}
+                    result = {"executionArn": child_execution_arn, "startDate": time.time()}
 
                     """
                     For "fire and forget" launching should this be TaskSubmitted?
@@ -1326,8 +1667,8 @@ class TaskDispatcher(object):
                         "TaskSucceeded",
                         {
                             "output": result_as_string,
-                            "resource": resource_arn,
-                            "resourceType": "states",
+                            "resource": resource,
+                            "resourceType": resource_type,
                         },
                     )
 

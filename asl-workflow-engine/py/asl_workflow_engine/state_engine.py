@@ -1682,8 +1682,6 @@ class StateEngine(object):
 
 
             try:
-                input = apply_path(data, context, state.get("InputPath", "$"))
-
                 """
                 The Task State (identified by "Type":"Task") causes the interpreter
                 to execute the work identified by the state’s “Resource” field.
@@ -1693,7 +1691,34 @@ class StateEngine(object):
                 The States language does not constrain the URI scheme nor any
                 other part of the URI.
                 """
-                resource_arn = state.get("Resource")
+                resource_arn = state.get("Resource", "")
+
+                """
+                Create a TaskToken for this Task State if required. As per AWS
+                a TaskToken is only added to the Context for Task States that
+                have a resource ARN ending with .waitForTaskToken.
+
+                Although at an API level the TaskToken is an "opaque" token
+                we encode the Task's Event ID/Correlation ID and the ASL Engine
+                Instance's ReplyTo queue name so that when SendTaskSuccess
+                or SendTaskFailure API calls are made (which may be HTTP load
+                balanced to any instance) the TaskToken may be decoded and
+                the resulting response Message may be sent to the ReplyTo
+                queue of the instance that launched the Task.
+
+                Note that the queried TaskToken is made "opaque" by base64
+                encoding, as it is not intended to be directly interpreted by
+                clients, but we defer base64 encoding to the apply_path and
+                evaluate_payload_template operations as we only need to encode
+                if the TaskToken is *actually* queried in a StateMachine State.
+                """
+                if resource_arn.endswith(".waitForTaskToken"):
+                    correlation_id = id + ".waitForTaskToken"
+                    reply_to = self.task_dispatcher.reply_to.name
+                    raw_task_token = f'{correlation_id}:{reply_to}'
+                    context["Task"] = {"Token": raw_task_token}
+
+                input = apply_path(data, context, state.get("InputPath", "$"))
 
                 """
                 https://states-language.net/spec.html#using-paths
