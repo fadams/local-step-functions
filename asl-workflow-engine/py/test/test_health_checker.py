@@ -8,6 +8,17 @@ assert sys.version_info >= (3, 0) # Bomb out if not running Python3
 from asl_workflow_engine.rest_api import RestAPI as sync_RestAPI
 from asl_workflow_engine.rest_api_asyncio import RestAPI as async_RestAPI
 
+"""
+The Message class in event_dispatcher is dynamically created at runtime
+by dynamically loading either the blocking or asyncio messaging library.
+The RestAPI does from asl_workflow_engine.event_dispatcher import Message
+which works in the real application as the import is done *after* the class
+is loaded, but it will fail in this test so we explicitly mock the
+event_dispatcher.Message class here.
+"""
+from asl_workflow_engine import event_dispatcher
+event_dispatcher.Message = mock.MagicMock()
+
 class health_checker(unittest.TestCase):
 
     # Setup to mock necessary components
@@ -50,7 +61,7 @@ class health_checker(unittest.TestCase):
         test_rest_client = app.test_client()
         Response = asyncio.run(test_rest_client.get("/health"))
         self.assertEqual(Response.status_code, 503) 
-
+        loop.close()
 
     # Test for async session open
     #   API mock changed to async
@@ -62,6 +73,8 @@ class health_checker(unittest.TestCase):
         test_rest_client = app.test_client()
         Response = asyncio.run(test_rest_client.get("/health"))
         self.assertEqual(Response.status_code, 200) 
+        loop.close()
 
-    if __name__ == '__main__':
-        unittest.main()
+if __name__ == '__main__':
+    unittest.main()
+
