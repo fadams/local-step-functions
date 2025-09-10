@@ -1,4 +1,4 @@
-FROM python:3.10-alpine
+FROM python:3.11-alpine
 
 COPY py/asl_workflow_engine /usr/local/lib/asl_workflow_engine/asl_workflow_engine
 COPY py/statelint /usr/local/lib/asl_workflow_engine/statelint
