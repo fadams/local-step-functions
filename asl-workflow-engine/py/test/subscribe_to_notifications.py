@@ -97,7 +97,7 @@ class NotificationHandler(object):
 
                 # Example topic subscription with options to create (declare)
                 # the topic exchange if it doesn't already exist.
-                #self.consumer = session.consumer("asl_workflow_engine/" + self.getName() + '; {"node": {"x-declare": {"exchange": "asl_workflow_engine", "exchange-type": "topic", "durable": true}}}')
+                #self.consumer = session.consumer("asl_workflow_engine/" + self.name + '; {"node": {"x-declare": {"exchange": "asl_workflow_engine", "exchange-type": "topic", "durable": true}}}')
 
                 # Simple topic subscription - will fail if the specified topic
                 # exchange doesn't already exist.

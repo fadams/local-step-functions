@@ -62,15 +62,15 @@ class Worker(threading.Thread):
 
     # Launched as an Executor Task from the message listener
     def handler_task(self, message):
-        print(self.getName() + " handler_task started")
+        print(self.name + " handler_task started")
         print(message)
 
         with opentracing.tracer.start_active_span(
-            operation_name=self.getName(),
+            operation_name=self.name,
             child_of=span_context("text_map", message.properties, self.logger),
             tags={
                 "component": "workers",
-                "message_bus.destination": self.getName(),
+                "message_bus.destination": self.name,
                 "span.kind": "consumer",
                 "peer.address": "amqp://localhost:5672"
             }
@@ -78,7 +78,7 @@ class Worker(threading.Thread):
             # Delay for a while to simulate work then create simple reply.
             # In a real processor **** DO WORK HERE ****
             time.sleep(30)
-            reply = {"reply": self.getName() + " reply"}
+            reply = {"reply": self.name + " reply"}
 
             """
             Create the response message by reusing the request note that this
@@ -93,7 +93,7 @@ class Worker(threading.Thread):
             https://opentracing.io/specification/conventions/
             """
             with opentracing.tracer.start_active_span(
-                operation_name=self.getName(),
+                operation_name=self.name,
                 child_of=opentracing.tracer.active_span,
                 tags={
                     "component": "workers",
@@ -111,11 +111,11 @@ class Worker(threading.Thread):
                 self.producer.send(message, threadsafe=True)
                 message.acknowledge(threadsafe=True) # Acknowledges the original request
 
-        print(self.getName() + " handler_task finished")
+        print(self.name + " handler_task finished")
 
 
     def message_listener(self, message):
-        print(self.getName() + " message_listener called")
+        print(self.name + " message_listener called")
 
         # N.B. whether to directly call the actual processing or use an
         # Executor *should be configurable*. For IO bound processing it may
@@ -140,7 +140,7 @@ class Worker(threading.Thread):
             connection.open()
             session = connection.session()
             self.consumer = session.consumer(
-                self.getName() + '; {"node": {"auto-delete": true}}'
+                self.name + '; {"node": {"auto-delete": true}}'
             )
             self.consumer.capacity = 100; # Enable consumer prefetch
             self.consumer.set_message_listener(self.message_listener)

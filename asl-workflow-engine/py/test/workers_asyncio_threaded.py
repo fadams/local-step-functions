@@ -62,21 +62,21 @@ class Worker(threading.Thread):
         if self.name == "NonExistentLambda":
             return
 
-        print(self.getName() + " working")
+        print(self.name + " working")
         print(message)
 
         with opentracing.tracer.start_active_span(
-            operation_name=self.getName(),
+            operation_name=self.name,
             child_of=span_context("text_map", message.properties, self.logger),
             tags={
                 "component": "workers",
-                "message_bus.destination": self.getName(),
+                "message_bus.destination": self.name,
                 "span.kind": "consumer",
                 "peer.address": "amqp://localhost:5672"
             }
         ) as scope:
             # Create simple reply. In a real processor **** DO WORK HERE ****
-            reply = {"reply": self.getName() + " reply"}
+            reply = {"reply": self.name + " reply"}
 
             """
             Create the response message by reusing the request note that this
@@ -91,7 +91,7 @@ class Worker(threading.Thread):
             https://opentracing.io/specification/conventions/
             """
             with opentracing.tracer.start_active_span(
-                operation_name=self.getName(),
+                operation_name=self.name,
                 child_of=opentracing.tracer.active_span,
                 tags={
                     "component": "workers",
@@ -115,7 +115,7 @@ class Worker(threading.Thread):
                 await connection.open()
                 session = await connection.session()
                 self.consumer = await session.consumer(
-                    self.getName() + '; {"node": {"auto-delete": true}}'
+                    self.name + '; {"node": {"auto-delete": true}}'
                 )
                 self.consumer.capacity = 100; # Enable consumer prefetch
                 await self.consumer.set_message_listener(self.handler)

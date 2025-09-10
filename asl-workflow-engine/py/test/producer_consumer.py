@@ -66,8 +66,8 @@ class Worker(threading.Thread):
             #session = connection.session()
             session = connection.session(auto_ack=True)   
             self.consumer = session.consumer(
-                self.getName() + '; {"node": {"x-declare": {"auto-delete": true, "arguments": {"x-max-length": 10, "x-overflow": "reject-publish"}}}}'
-                #self.getName() + '; {"node": {"x-declare": {"auto-delete": true}}}'
+                self.name + '; {"node": {"x-declare": {"auto-delete": true, "arguments": {"x-max-length": 10, "x-overflow": "reject-publish"}}}}'
+                #self.name + '; {"node": {"x-declare": {"auto-delete": true}}}'
             )
             self.consumer.capacity = 100; # Enable consumer prefetch
             self.consumer.set_message_listener(self.handler)
@@ -93,7 +93,7 @@ class Publisher(threading.Thread):
         try:
             connection.open()
             session = connection.session()
-            producer = session.producer(self.getName())
+            producer = session.producer(self.name)
 
             producer.enable_exceptions(sync=True)
             #producer.enable_exceptions()
