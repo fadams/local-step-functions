@@ -37,7 +37,7 @@ https://docs.aws.amazon.com/step-functions/latest/apireference/API_GetExecutionH
 import sys
 assert sys.version_info >= (3, 0)  # Bomb out if not running Python3
 
-import json, os, threading, time, uuid, weakref
+import json, os, threading, time, weakref
 from collections import OrderedDict
 from collections.abc import Mapping, MutableMapping, Sequence
 
@@ -184,6 +184,14 @@ class RedisStore(MutableMapping):
         try:
             return RedisStore.connection
         except AttributeError:
+            # https://pypi.org/project/redis/
+            # Use https://github.com/brainix/pottery for more Pythonic redis access
+            from redis import Redis # pip3 install redis
+            from pottery import RedisDict, RedisList # pip3 install pottery
+            RedisStore.Redis = Redis
+            RedisStore.RedisDict = RedisDict
+            RedisStore.RedisList = RedisList
+
             """
             get_connection() supports URLs of the form:
             redis://localhost:6379?connection_attempts=20&retry_delay=10
@@ -196,16 +204,7 @@ class RedisStore(MutableMapping):
             options = dict([] if len(split) == 1 else [
                 i.split("=") for i in split[1].split("&")
             ])
-
             logger.info("RedisStore: Opening Connection to {}".format(url))
-
-            # https://pypi.org/project/redis/
-            # Use https://github.com/brainix/pottery for more Pythonic redis access
-            from redis import Redis, ConnectionPool   # pip3 install redis
-            from pottery import RedisDict, RedisList  # pip3 install pottery
-            RedisStore.Redis = Redis
-            RedisStore.RedisDict = RedisDict
-            RedisStore.RedisList = RedisList
 
             # Defaults are the same defaults that Pika uses for AMQP connections.
             connection_attempts = int(options.get("connection_attempts", "1"))

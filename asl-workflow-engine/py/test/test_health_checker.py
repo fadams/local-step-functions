@@ -77,4 +77,3 @@ class health_checker(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
