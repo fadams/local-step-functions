@@ -127,6 +127,8 @@ class EventDispatcherStub(object):
         self.state_engine.event_dispatcher = self
         self.message_count = -1
 
+        self.unacknowledged_messages = {}
+
         """
         Retain last event so test can check its value. We use a Future here
         to allow the test to block until the result is available.
@@ -173,7 +175,7 @@ class EventDispatcherStub(object):
 This stubs out the real TaskDispatcher execute_task method which requires
 messaging infrastructure to run whereas this test is just a state machine test.
 """
-def execute_task_stub(resource_arn, parameters, callback, timeout, context, event_id, redelivered):
+def execute_task_stub(resource_arn, parameters, callback, timeout, is_task_timeout, context, event_id, redelivered):
     name = resource_arn.split(":")[-1]
     result = {"reply": name + " reply"}
     callback(result)

@@ -123,10 +123,10 @@ class EventDispatcher(object):
 
     
     def heartbeat(self):
-        print("**** EventDispatcher heartbeat ****")
-        #self.state_engine.heartbeat()
-        """
+        #print("**** EventDispatcher heartbeat ****")
         self.heartbeat_count += 1
+        self.state_engine.heartbeat(self.heartbeat_count)
+        """
         if self.heartbeat_count % 60 == 0:
             print("len(self.unacknowledged_messages)")
             print(len(self.unacknowledged_messages))
@@ -238,7 +238,7 @@ class EventDispatcher(object):
             responses have been received and those are likely to require reaping
             for cases where no explicit timeout has been added to the State.
             """
-            #self.set_timeout(self.heartbeat, 1000)
+            self.set_timeout(self.heartbeat, 1000)
 
             connection.start()  # Blocks until event loop exits.
         except (MessagingError, Exception) as e:
@@ -352,7 +352,7 @@ class EventDispatcher(object):
             responses have been received and those are likely to require reaping
             for cases where no explicit timeout has been added to the State.
             """
-            #self.set_timeout(self.heartbeat, 1000)
+            self.set_timeout(self.heartbeat, 1000)
 
 
             def on_close_callback(ch, e):

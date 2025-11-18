@@ -139,6 +139,54 @@ def merge_result(data, context, result, state, output_path=None):
     output_path = output_path if output_path else state.get("OutputPath", "$")
     return apply_path(output, context, output_path)
 
+class BranchMetadata:
+    def __init__(self, context, timeout):
+        """
+        BranchMetadata is stored in the branch_metadata dict of StateEngine,
+        which holds BranchMetadata keyed by Execution ARN. The BranchMetadata
+        for each execution contains a copied "template" Context object that
+        holds some execution metadata like StartTime and also the tracing
+        Tracer. This context is used to synthesise an event object for the
+        call to end_execution that will be made if any "expired" branches
+        are found.
+
+        In addition to the template Context, BranchMetadata contains a results
+        dict, the values of which represent the results metadata for each Map
+        or Parallel state in a given execution.
+
+        We also store an expiry time computed from the execution StartTime
+        held in the context and the supplied timeout, which is the State
+        Machine TimeoutSeconds (if set) or the execution_ttl from the config.
+        The expiry is periodically checked in check_for_expired_branch_results
+        and if exceeded will force an ExecutionFailed to avoid "stuck"
+        executions and potentially stuck event messages.
+        """
+
+        """
+        Note that the template Context is copying fields from the original
+        Context and those will be references not deep copies. That should
+        be fine as the template Context doesn't modify any of these fields.
+        """
+        template_context = {
+            "Tracer": context["Tracer"],
+            "Execution": context["Execution"],
+            "State": {
+                "EnteredTime": context["State"]["EnteredTime"],
+                "Name": ""
+            },
+            "StateMachine": context["StateMachine"],
+        }
+
+        """
+        Compute the actual timestamp of StartTime so we can pre-compute the
+        expiry, which is the execution start timestamp plus execution timeout
+        """
+        start_time = template_context["Execution"].get("StartTime")
+        execution_timestamp = parse_rfc3339_datetime(start_time).timestamp()
+
+        self.expiry = execution_timestamp + timeout
+        self.context = template_context
+        self.results = {}
 
 class StateEngine(object):
     def __init__(self, config):
@@ -175,18 +223,22 @@ class StateEngine(object):
         The execution_ttl is the time to live, in seconds, for the execution
         metadata used by DescribeExecution (executions) and GetExecutionHistory
         (execution_history). The initial default is one day 60x60x24 = 86400.
-        Whether to raise or lower this value will depend on the available memory
-        of the Redis server. The execution_ttl is only honoured by the Redis
-        store and is ignored by the simple store.
+        The original purpose of this was to provide a TTL to manage storage
+        on the Redis store to avoid OOM, but it is now also used as the
+        default value for Execution TimeoutSeconds if not explicitly set in
+        the ASL. This is used by Task timeouts and also the "back stop"
+        check_for_expired_branch_results.
         """
         self.execution_ttl = config["state_engine"]["execution_ttl"]
 
         """
-        Holds the results of Parallel state Branches or Map state Iterations.
-        It holds objects keyed by the execution ARN and each object is another
-        dict which contains arrays keyed by the Parallel or Map state name.
+        Holds metadata about Parallel state Branches or Map state Iterations.
+        It holds BranchMetadata objects keyed by the execution ARN, which
+        contains a "template" Context object that holds some execution metadata
+        like StartTime and a results dict where the values represent the
+        results metadata for each Map or Parallel state in a given execution.
         """
-        self.branch_results = {}
+        self.branch_metadata = {}
 
         self.task_dispatcher = TaskDispatcher(self, config)
         # self.event_dispatcher set by EventDispatcher
@@ -522,6 +574,18 @@ class StateEngine(object):
         End the state machine execution and update execution metadata.
         """
         data = event["data"]
+
+        execution_failed = isinstance(data, dict) and data.get("Error")
+
+        """
+        For Execution timeouts we use States.ExecutionTimeout to disambiguate
+        as it behaves differently to States.Timeout (e.g. it is not retriable
+        nor catchable). However, States.Timeout is the actual "correct" value
+        so we convert States.ExecutionTimeout back to States.Timeout here.
+        """
+        if execution_failed and data.get("Error") == "States.ExecutionTimeout":
+            data["Error"] = "States.Timeout"
+
         """
         Note that the "output" field of the execution detail and history is a
         JSON string not a JSON object, hence the json.dumps().
@@ -533,8 +597,6 @@ class StateEngine(object):
         state = context["State"]
         execution = context["Execution"]
         execution_arn = context["Execution"]["Id"]
-
-        execution_failed = isinstance(data, dict) and data.get("Error")
 
         # Stepfunctions don't transition to StateExited if the execution fails.
         if not execution_failed:
@@ -625,11 +687,11 @@ class StateEngine(object):
                     )
 
                 """
-                Tidy up self.branch_results for current execution_arn.
+                Tidy up self.branch_metadata for current execution_arn.
                 If ExecutionFailed we need to check for outstanding terminated
                 branch messages subsequently arriving.
                 """
-                if execution_arn in self.branch_results:
+                if execution_arn in self.branch_metadata:
                     self.check_pending_results(execution_arn)
             else:
                 opentracing.tracer.active_span.set_tag("status", "SUCCEEDED")
@@ -648,12 +710,12 @@ class StateEngine(object):
                     )
 
                 """
-                Tidy up self.branch_results for current execution_arn.
+                Tidy up self.branch_metadata for current execution_arn.
                 If ExecutionSucceeded we just remove, as we don't have to cater
                 for outstanding terminated branch messages subsequently arriving.
                 """
-                if execution_arn in self.branch_results:
-                    del self.branch_results[execution_arn]
+                if execution_arn in self.branch_metadata:
+                    del self.branch_metadata[execution_arn]
         
         if self.execution_metrics:
             duration = (execution_detail["stopDate"] - 
@@ -844,7 +906,8 @@ class StateEngine(object):
         """
         for i, event_id in enumerate(event_ids):
             if event_id != None:
-                self.event_dispatcher.acknowledge(event_id)
+                if event_id in self.event_dispatcher.unacknowledged_messages:
+                    self.event_dispatcher.acknowledge(event_id)
                 event_ids[i] = None
 
     def check_pending_results(self, execution_arn):
@@ -856,7 +919,7 @@ class StateEngine(object):
         """
 
         # Get the dict containing all the branch results for this execution
-        all_branch_results = self.branch_results[execution_arn]
+        all_branch_results = self.branch_metadata[execution_arn].results
 
         #print("check_pending_results:")
         #print(all_branch_results)
@@ -889,7 +952,7 @@ class StateEngine(object):
 
                 # Check if all outstanding branches have been terminated
                 for i in range(start, end):
-                    if result[i] == None:
+                    if result[i] == None or result[i] == "__CAUGHT__":
                         """
                         If there isn't a result for this branch check if there
                         are pending Tasks, if there are then cancel the Task.
@@ -905,32 +968,31 @@ class StateEngine(object):
                             that hasn't resulted in branch_results being
                             completed and cleared before continuing.
                             """
-                            if execution_arn not in self.branch_results:
+                            if execution_arn not in self.branch_metadata:
                                 return
                         else:
                             results_pending = True
 
+        for results in all_branch_results.values():
+            event_ids = results["ids"]
+            #print("Acknowledging event_ids:")
+            #print(event_ids)
+            self.acknowledge_event_list(event_ids)
 
         if not results_pending:
-            #print("No results pending, deleting self.branch_results[execution_arn]")
+            #print("No results pending, deleting self.branch_metadata[execution_arn]")
+            del self.branch_metadata[execution_arn]
 
-            for results in all_branch_results.values():
-                event_ids = results["ids"]
-                #print("Acknowledging event_ids:")
-                #print(event_ids)
-                self.acknowledge_event_list(event_ids)
+            #print("self.branch_metadata length:")
+            #print(len(self.branch_metadata))
 
-            del self.branch_results[execution_arn]
-
-            #print("self.branch_result length:")
-            #print(len(self.branch_results))
-
-    def branch_has_terminated(self, state_type, context, id):
+    def branch_has_terminated(self, state_type, context, id, timeout):
         """
         Check if the current Map or Parallel branch has been terminated.
         """
         #print("-----")
         #print("Checking branch_has_terminated")
+        #print(state_type)
         #print(context)
 
         has_terminated = False
@@ -942,102 +1004,249 @@ class StateEngine(object):
             execution_arn = context["Execution"]["Id"]
 
             """
-            Initialise the branch_results dict for the current execution if
+            Initialise the branch_metadata dict for the current execution if
             it doesn't already exist. We do it here rather than in the more
             obvious place of self.start_execution() because we need to cater
             for the case of a restart. If a restart occurs the published
             branch states won't have been acknowledged, so will be redelivered.
             """
-            if not execution_arn in self.branch_results:
-                #print("Initialise the branch_results dict")
-                self.branch_results[execution_arn] = {}
+            if not execution_arn in self.branch_metadata:
+                #print("Initialise the branch_metadata dict")
+                self.branch_metadata[execution_arn] = BranchMetadata(
+                    context,
+                    timeout
+                )
 
             # Get the dict containing all the branch results for this execution
-            all_branch_results = self.branch_results[execution_arn]
+            all_branch_results = self.branch_metadata[execution_arn].results
 
             """
-            Check if any parent Map or Parallel state has terminated, iterating
-            all_branch_results to cater for nested Map or Parallel states.
-            If any Map or Parallel state has terminated we set the has_terminated
-            flag which will be used later to force termination of any new items.
-
-            The any function returns True if at least one element in the
-            iterable passed to it is True.
-            """
-            has_terminated = any("terminated" in r for r in all_branch_results.values())
-
-            """
-            Iterate through the Branch "stack" held in the context of events
-            that represent states in Map Iterators or Parallel Branches.
+            Get the Branch "stack" held in the context of events that represent
+            states in Map Iterators or Parallel Branches. We will check the
+            top of the stack (the last index, e.g. -1) which represents the
+            Map or Parallel State that we are collecting results for and we
+            also get the item below that on the stack, e.g. index -2 if it
+            is present. That item represents a parent Map or Parallel and
+            it is used to allow us to identify if "peer" child branches need
+            to be terminated and also to propagate termination to the parent
+            of a nested Map or Parallel state.
             """
             branch_info_stack = context["State"]["Branch"]
-            last_index = len(branch_info_stack) - 1
-            for i, branch_info in enumerate(branch_info_stack):
-                current_id = branch_info["ID"]
+            #print("branch_info_stack:")
+            #print(branch_info_stack)
 
-                """
-                Initialise the branch_results object for the Map or Parallel State
-                that we are collecting results for if it doesn't already exist.
-                """
-                if not current_id in all_branch_results:
-                    #print("Initialise the branch_results object")
-                    length = branch_info["Length"]
-                    all_branch_results[current_id] = {
-                        "results": [None]*length,
-                        "ids": [None]*length,    # Unacknowledged messages
-                    }
+            """
+            Get the results etc. for the parent of this branch. We use this
+            to determine if and where to propagate termination. For example
+            if a branch fails and the failure is uncaught then all the branches
+            will ultimately need to be terminated/aborted.
+            """
+            parent_terminated = None
+            if len(branch_info_stack) > 1:
+                parent_info = branch_info_stack[-2]
+                parent_id = parent_info["ID"]
+                parent_branch_results = all_branch_results.get(parent_id)
+                if parent_branch_results:
+                    parent_terminated = parent_branch_results.get("terminated")
+                    parent_results = parent_branch_results.get("results")
+                    parent_index = parent_info["Index"]
 
-                # Get the branch results for current execution and current state
-                branch_results = all_branch_results[current_id]
+            # Get the item at the top of the Branch metadata stack
+            branch_info = branch_info_stack[-1]
+            current_id = branch_info["ID"]
 
-                """
-                If the branch_info item represents the item at the top of the
-                stack get the branch index and store the event ID at that index
-                in the ids field of the results for the current branch ID.
-                """
-                if i == last_index and state_type != "Parallel" and state_type != "Map":
-                    index = branch_info["Index"]
-                    event_ids = branch_results["ids"]
-                    #print("---- Storing event id " + str(id))
-                    event_ids[index] = id
+            """
+            Initialise the branch_results object for the Map or Parallel State
+            that we are collecting results for if it doesn't already exist.
+            """
+            if not current_id in all_branch_results:
+                #print("Initialise the branch_results object")
+                length = branch_info["Length"]
+                all_branch_results[current_id] = {
+                    "results": [None]*length,
+                    "ids": [None]*length,  # Unacknowledged messages
+                    "state": [None]*length,
+                }
 
-                #print("branch_info:")
-                #print(branch_info)
-                #print("results:")
-                #print(all_branch_results)
+            # Get the branch results for current execution and current state
+            branch_results = all_branch_results[current_id]
+            event_ids = branch_results["ids"]
+            index = branch_info.get("Index", 0)
 
-                if has_terminated:
-                    iterator_range = branch_info.get(
-                        "Range",
-                        "0:" + str(branch_info.get("Length"))
-                    )
-                    branch_results["terminated"] = iterator_range
+            #print("branch_info:")
+            #print(branch_info)
+            #print("results:")
+            #print(all_branch_results)
+
+            terminated = branch_results.get("terminated")
+            has_terminated = terminated or parent_terminated
+
+            if has_terminated:
+                #print("*** has_terminated ***")
+                iterator_range = branch_info.get(
+                    "Range",
+                    "0:" + str(branch_info.get("Length"))
+                )
+                branch_results["terminated"] = iterator_range
 
                 #print("branch_results:")
                 #print(branch_results)
-                # Check if the results have been set to terminated
-                # due to a Map or Parallel State branch failure.
-                terminated = branch_results.get("terminated")
-                if terminated:
-                    has_terminated = True
-                    index = branch_info["Index"]
-                    #print("Terminating branch {}".format(index))
+                #print("Terminating branch {}".format(index))
 
-                    result = branch_results["results"]
-                    result[index] = "terminated"
+                results = branch_results["results"]
+                results[index] = "__TERMINATED__"
 
-                    #print(self.branch_results)
-                    #print()
+                if parent_terminated:
+                    #print("Terminating parent branch {}".format(parent_index))
+                    parent_results[parent_index] = "__TERMINATED__"
 
+                #print(self.branch_metadata)
+                #print()
 
-            if has_terminated:
-                #print("has_terminated")
+                # If has_terminated acknowledge the event and don't add the
+                # id to the event_ids list
+                if state_type != "Parallel" and state_type != "Map":
+                    self.event_dispatcher.acknowledge(id)
+                    event_ids[index] = None
+
                 self.check_pending_results(execution_arn)
+            elif state_type != "Parallel" and state_type != "Map":
+                #print("---- Storing event id " + str(id))
+                event_ids[index] = id
 
         #print("-----")
 
         return has_terminated
 
+    def heartbeat(self, count):
+        """
+        Called periodically by EventDispatcher to allow timed tasks to be
+        asynchronously dispatched.
+        """
+        if count % 60 == 0:
+            """
+            Only check every minute as this check is something of a "back stop"
+            to test for expiry of things that might be "stuck". The
+            branch_metadata should be modest in size as each execution is
+            removed on completion (Succeeded/Failed), but if there are lots of
+            concurrent executions "in play" the branch_metadata dict could grow
+            to several thousand entries that have to be iterated to check
+            their potential expiry, only checking every minute should keep the
+            cost of this back stop test fairly modest.
+            """
+            #print("heartbeat triggered")
+            #print(count)
+            self.check_for_expired_branch_results()
+
+    def check_for_expired_branch_results(self):
+        """
+        For Map and Parallel States each Branch or Iterator essentially runs
+        as a sub State Machine somewhat independently, but the Map/Parallel
+        States eventually perform a logical join operation in essence waiting
+        for all of their results before transitioning to their next State.
+
+        In order to cater for restarts of the ASL Engine the messages
+        representing the State Transitions are not acknowledged until the
+        Map or Parallel State transitions to its next State.
+
+        We basically collect the results for each Branch/Iterator until we
+        have them all. For Execution Success this is relatively straightforward
+        but for Failure it is a whole world more complicated as we have to
+        "cancel" Tasks and also "wait around" after ExecutionFailed as we
+        might have messages pending from cancelled Branches/Iterators which
+        we then need to "ignore" so that we don't update execution history of
+        finished executions with spurious events.
+
+        Most of the logic for that is in check_pending_results and
+        branch_has_terminated which cater for most cases, but there have been
+        some edge cases observed where messages can end up "stuck". These
+        cases are hard to reproduce systematically, though seem to be mainly
+        in nested Map or Parallel States and are most likely due to a restart
+        of the ASL Engine dealing with queued Branch messages from some long
+        dead execution where only some results end up arriving so the "join"
+        ends up not completing and the Map/Parallel then doesn't transition
+        and the messages are then never acknowledged.
+
+        To cater for that scenario, and also to handle execution timeouts
+        due to a top level State Machine TimeoutSeconds being set this method
+        is called periodically by EventDispatcher "hearbeat" events and when
+        called it checks the expiry timestamp with the current time to see if
+        TimeoutSeconds has been exceeded and if so the execution is failed.
+        """
+
+        current_time = time.time()
+        expired = []
+
+        """
+        Check self.branch_metadata for expired items and copy those to expired
+        list. It's tempting to do the rest of the work inside the if statement
+        in this loop, but expired items will cause end_execution to be called
+        which in turn calls check_pending_results, which mutates
+        self.branch_metadata.
+        """
+        for item in self.branch_metadata.items():
+            execution_arn, branch_metadata = item
+            if current_time > branch_metadata.expiry:
+                expired.append(item)
+
+        for execution_arn, branch_metadata in expired:
+            """
+            If branch_metadata.expiry is zero it means we've already gone
+            through this path and called self.end_execution. That *should*
+            cause self.branch_metadata for this execution_arn to clean up
+            and it will definitely force all the outstanding messages to
+            be acknowledged, but there are edge cases if messages have been
+            "logged and dropped" due to some random exception where the
+            results_pending flag in check_pending_results might stay set
+            which stops deletion of self.branch_metadata[execution_arn].
+            If branch_metadata.expiry is zero we therefore force deletion of
+            self.branch_metadata[execution_arn] and move on.
+            """
+            if branch_metadata.expiry == 0:
+                del self.branch_metadata[execution_arn]
+                continue
+
+            """
+            Get the timeout from the expiry and StartTime stored in the context.
+            We compute it rather than storing in branch_metadata as it's only
+            used on edge cases when expiry has been exceeded.
+            """
+            start_time = branch_metadata.context["Execution"].get("StartTime")
+            execution_timestamp = parse_rfc3339_datetime(start_time).timestamp()
+            execution_timeout = int(branch_metadata.expiry - execution_timestamp)
+
+            branch_metadata.expiry = 0
+
+            """
+            Explicitly set "terminated" in the results to force cancellation
+            of any outstanding Tasks.
+            """
+            for results in branch_metadata.results.values():
+                results["terminated"] = "0:" + str(len(results["results"]))
+
+            # Get state_machine from execution_arn for the end_execution call
+            split = execution_arn.rpartition(':')
+            arn = parse_arn(split[0])
+            arn["resource_type"] = "stateMachine"
+            state_machine_arn = create_arn(arn)
+            name = split[2]
+
+            # Look up State Machine
+            state_machine = self.asl_store.get_cached_view(state_machine_arn, {})
+
+            # Synthesise an event for the end_execution call
+            event = {
+                "data": {
+                    "Error": "States.Timeout",
+                    "Cause": "Execution ran for longer than the specified " +
+                        f"timeout value of {execution_timeout} seconds. " +
+                        "Forcing clean up of outstanding events." ,
+                },
+                "context": branch_metadata.context
+            }
+
+            # This should force ExecutionFailed and subsequent clean up
+            self.end_execution(state_machine, "", event)
 
     def notify(self, event, id, redelivered=False):
         #print("~~~~~ notify id = " + str(id))
@@ -1223,7 +1432,6 @@ class StateEngine(object):
             Similarly we get the state_type from the passed state value rather
             than relying on the previously captured value.
             """
-
             retry_matched = False
             catch_matched = False
             execution_arn = context["Execution"]["Id"]
@@ -1242,18 +1450,6 @@ class StateEngine(object):
                 ).format(context["State"]["Name"])
 
             """
-            An execution failed due to some exception that could not be
-            handled. Often these are caused by errors at runtime, such
-            as attempting to apply InputPath or OutputPath on a null JSON
-            payload. A States.Runtime error is not retriable and will always
-            cause the execution to fail. Similarly, with a Task.Terminated
-            error we want terminated Tasks to end immediately.
-            A retry or catch on States.ALL will not catch these errors.
-            """
-            runtime_error = (error_type == "States.Runtime" or
-                             error_type == "Task.Terminated")
-
-            """
             Get the state_type from the passed state value rather than relying
             on the previously captured value.
             """
@@ -1265,8 +1461,21 @@ class StateEngine(object):
             """
             data = event.get("data", {})
 
+            """
+            An execution failed due to some exception that could not be
+            handled. Often these are caused by errors at runtime, such
+            as attempting to apply InputPath or OutputPath on a null JSON
+            payload. A States.Runtime error is not retriable and will always
+            cause the execution to fail. Similarly, with a Task.Terminated
+            error we want terminated Tasks to end immediately.
+            A retry or catch on States.ALL will not catch these errors.
+            """
+            unrecoverable = (error_type == "States.Runtime" or
+                             error_type == "States.ExecutionTimeout" or
+                             error_type == "Task.Terminated")
+
             retry = state.get("Retry")
-            if not runtime_error and retry and isinstance(retry, list):
+            if not unrecoverable and retry and isinstance(retry, list):
                 for retrier in retry:
                     """
                     Each Retrier MUST contain a field named “ErrorEquals”
@@ -1313,10 +1522,10 @@ class StateEngine(object):
                             )
 
                             """
-                            Tidy up self.branch_results for current execution_arn
+                            Tidy up self.branch_metadata for current execution_arn
                             before republishing the Task state event.
                             """
-                            if execution_arn in self.branch_results:
+                            if execution_arn in self.branch_metadata:
                                 self.check_pending_results(execution_arn)
 
                             """
@@ -1351,7 +1560,7 @@ class StateEngine(object):
             Catcher transition if the retry policy fails to resolve the error.
             """
             catch = state.get("Catch")
-            if not runtime_error and not retry_matched and catch and isinstance(catch, list):
+            if not unrecoverable and not retry_matched and catch and isinstance(catch, list):
                 for catcher in catch:
                     """
                     Each Catcher MUST contain a field named “ErrorEquals”,
@@ -1414,6 +1623,15 @@ class StateEngine(object):
                             error_message = str(e) + " " + str(data)
                             break
 
+                        # Needs to be called before change_state.
+                        if state_type == "Map" or state_type == "Parallel":
+                            self.update_execution_history(
+                                state_machine,
+                                execution_arn,
+                                state_type + "StateFailed",
+                                {},
+                            )
+
                         etype, emessage = self.change_state(
                             state_machine, state_type, catcher.get("Next"), event
                         )
@@ -1422,6 +1640,30 @@ class StateEngine(object):
                             error_message = emessage
                         else:
                             catch_matched = True
+
+                            """
+                            If we've caught an error and the current event that
+                            caused the error is an event in a Map/Paralell
+                            Branch or Iterator we mark the Branch/Iterator
+                            result at the appropriae index as "__CAUGHT__".
+                            If the Catch has a Next the eventual actual result
+                            will overwrite "__CAUGHT__", but "__CAUGHT__" is
+                            there to suppress MapIterationAborted or
+                            ParallelStateAborted history updates as if the
+                            error is caught the Aborted is unnecessary.
+                            """
+                            if "Branch" in context["State"]:
+                                branch_info_stack = context["State"]["Branch"]
+                                if len(branch_info_stack) > 0:
+                                    branch_info = branch_info_stack[-1]
+                                    index = branch_info["Index"]
+                                    parent_res_id = branch_info["ID"]
+                                    if execution_arn in self.branch_metadata:
+                                        abr = self.branch_metadata[execution_arn].results
+                                        if parent_res_id in abr:
+                                            branch_results = abr[parent_res_id]
+                                            results = branch_results["results"]
+                                            results[index] = "__CAUGHT__"
 
                         break
 
@@ -1432,6 +1674,16 @@ class StateEngine(object):
             catchers match then fail the execution.
             """
             if not retry_matched and not catch_matched:
+                if ((state_type == "Map" or state_type == "Parallel") and not
+                    (error_type == "Task.Terminated" or
+                     error_type == "States.ExecutionTimeout")):
+                    self.update_execution_history(
+                        state_machine,
+                        execution_arn,
+                        state_type + "StateFailed",
+                        {},
+                    )
+
                 result = {"Error": error_type}
                 if error_message:
                     result["Cause"] = boiler_plate + error_message
@@ -1487,11 +1739,11 @@ class StateEngine(object):
                     asl_state_collect_results(state_type)
             else:
                 """
-                If task_terminated just tidy up self.branch_results for current
+                If task_terminated just tidy up self.branch_metadata for current
                 execution_arn otherwise end the execution.
                 """
                 if task_terminated:
-                    if execution_arn in self.branch_results:
+                    if execution_arn in self.branch_metadata:
                         self.check_pending_results(execution_arn)
                     else:
                         self.end_execution(state_machine, state_type, event)           
@@ -1614,9 +1866,28 @@ class StateEngine(object):
                     else:
                         error_message = result.get("errorMessage", "")
 
-                    # Suppress log message if terminal state due to Task termination.
-                    if error_type != "Task.Terminated":
+                    if error_type == "States.Timeout":
+                        if timeout == t1:  # Timeout due to Execution Timeout.
+                            """
+                            The correct error type is States.Timeout but we need
+                            to disambiguate between Task and Execution timeouts
+                            internally. It will eventually get reset back to
+                            States.Timeout in end_execution.
+                            """
+                            error_type = "States.ExecutionTimeout"
+                            error_message = ("Execution ran for longer than " +
+                                             "the specified timeout value of " +
+                                             f"{execution_timeout} seconds.")
+                    elif error_type != "Task.Terminated":
                         execution_arn = context["Execution"]["Id"]
+                        """
+                        If error type isn't Task.Terminated or States.Timeout
+                        we do an additional warn level log. I'm torn whether
+                        to do this as loggingConfiguration could be used, but
+                        the warn log predated implementing that and if
+                        loggingConfiguration is not configured and DEBUG env
+                        var isn't set Task errors can be a bit "silent".
+                        """
 
                         # Original updated, but less verbose log.
                         #self.logger.warn("{} TaskState \"{}\" received an error response from the invoked Task: {{'errorType': {}, 'errorMessage': {}}}".format(execution_arn, current_state, error_type, error_message))
@@ -1747,8 +2018,9 @@ class StateEngine(object):
                 the Task expiry time that will be checked against the current
                 time each heartbeat and will eventually result in the Task
                 returning a States.Timeout Error if it expires before it
-                completes. The default State Machine execution timeout is
-                1 year 60*60*24*365 = 31536000
+                completes. The default AWS State Machine execution timeout is
+                1 year 60*60*24*365 = 31536000, but we default it to the
+                configured execution_ttl which has a default of 86400 (one day).
                 https://docs.aws.amazon.com/step-functions/latest/dg/limits.html
                 The default Task state timeout is more confusing as this document
                 https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-task-state.html says: "If not provided, the default value is 99999999" whereas
@@ -1759,7 +2031,12 @@ class StateEngine(object):
 
                 start_time = context["Execution"].get("StartTime")
                 execution_timestamp = parse_rfc3339_datetime(start_time).timestamp()
-                execution_timeout = ASL.get("TimeoutSeconds", 31536000)
+                """
+                AWS Stepfunctions has a default execution timeout of 31536000
+                e.g. one year, but we default it to the configured execution_ttl
+                which has a default of 86400 (one day).
+                """
+                execution_timeout = ASL.get("TimeoutSeconds", self.execution_ttl)
                 t1 = (execution_timestamp + execution_timeout - current_timestamp) * 1000
                 # Negative timeouts could occur if messages are redelivered or
                 # backlogged so we set them to 0 if that happens.
@@ -1785,9 +2062,18 @@ class StateEngine(object):
                 # The computed timeout is the lowest of the Execution timeout
                 # (t1) or the State timeout (t2). 
                 timeout = t1 if t1 < t2 else t2
+                # Flag so execute_task knows if it's a task or execution timeout
+                is_task_timeout = timeout == t2
 
                 self.task_dispatcher.execute_task(
-                    resource_arn, parameters, on_response, timeout, context, id, redelivered
+                    resource_arn,
+                    parameters,
+                    on_response,
+                    timeout,
+                    is_task_timeout,
+                    context,
+                    id,
+                    redelivered
                 )
             except IntrinsicFailure as e:
                 handle_error(state, "States.IntrinsicFailure", str(e))
@@ -2097,13 +2383,27 @@ class StateEngine(object):
             timeout actually fires.
             """
             def on_timeout(error=None):
-                if error:  # Should be only happen on Task.Terminated
+                self.task_dispatcher.remove_canceller(id)
+
+                if error:
                     error_type = error.get("errorType")
                     error_message = error.get("errorMessage")
                     handle_error(state, error_type, error_message)
                     self.event_dispatcher.acknowledge(id)
+                elif timeout == t1:  # Timeout due to Execution Timeout.
+                    """
+                    The correct error type is States.Timeout but we need
+                    to disambiguate between Task and Execution timeouts
+                    internally. It will eventually get reset back to
+                    States.Timeout in end_execution.
+                    """
+                    error_type = "States.ExecutionTimeout"
+                    error_message = ("Execution ran for longer than " +
+                                     "the specified timeout value of " +
+                                     f"{execution_timeout} seconds.")
+                    handle_error(state, error_type, error_message)
+                    self.event_dispatcher.acknowledge(id)
                 else:
-                    self.task_dispatcher.remove_canceller(id)
                     try:
                         event["data"] = apply_path(
                             input, context, state.get("OutputPath", "$")
@@ -2170,26 +2470,43 @@ class StateEngine(object):
             entered_time = context["State"].get("EnteredTime")
             state_timestamp = parse_rfc3339_datetime(entered_time).timestamp()
 
-            try:
-                timeout = 0
+            current_timestamp = time.time()
+
+            start_time = context["Execution"].get("StartTime")
+            execution_timestamp = parse_rfc3339_datetime(start_time).timestamp()
+            """
+            AWS Stepfunctions has a default execution timeout of 31536000
+            e.g. one year, but we default it to the configured execution_ttl
+            which has a default of 86400 (one day).
+            """
+            execution_timeout = ASL.get("TimeoutSeconds", self.execution_ttl)
+            t1 = (execution_timestamp + execution_timeout - current_timestamp) * 1000
+            # Negative timeouts could occur if messages are redelivered or
+            # backlogged so we set them to 0 if that happens.
+            t1 = t1 if t1 > 0 else 0
+
+            try:  # To catch any exceptions from apply_path
+                t2 = 0  # t2 represents the State timeout
                 if seconds:
-                    current_timestamp = time.time()
-                    timeout = (state_timestamp + seconds - current_timestamp) * 1000
+                    t2 = (state_timestamp + seconds - current_timestamp) * 1000
                 elif seconds_path:
                     seconds = apply_path(input, context, seconds_path)
                     if seconds:
-                        current_timestamp = time.time()
-                        timeout = (state_timestamp + seconds - current_timestamp) * 1000
+                        t2 = (state_timestamp + seconds - current_timestamp) * 1000
                 elif timestamp:
-                    timeout = get_timeout_from_rfc3339_datetime(timestamp)
+                    t2 = get_timeout_from_rfc3339_datetime(timestamp)
                 elif timestamp_path:
                     timestamp = apply_path(input, context, timestamp_path)
                     if timestamp:
-                        timeout = get_timeout_from_rfc3339_datetime(timestamp)
+                        t2 = get_timeout_from_rfc3339_datetime(timestamp)
 
                 # Negative timeouts could occur if messages are redelivered or
                 # backlogged so we set them to 0 if that happens.
-                timeout = timeout if timeout > 0 else 0
+                t2 = t2 if t2 > 0 else 0
+
+                # The computed timeout is the lowest of the Execution timeout
+                # (t1) or the State timeout (t2). 
+                timeout = t1 if t1 < t2 else t2
 
                 """
                 Schedule the timeout. This is slightly subtle, the idea is that
@@ -2280,6 +2597,8 @@ class StateEngine(object):
                     input, context, state.get("Parameters")
                 )
 
+                execution_arn = context["Execution"]["Id"]
+
                 """
                 A Parallel State MUST contain a field named “Branches” which
                 is an array whose elements MUST be objects. Each object MUST
@@ -2306,12 +2625,37 @@ class StateEngine(object):
                 list, which behaves like a stack.
                 """
                 context_state = context["State"]
-                if not "Branch" in context_state:
-                    context_state["Branch"] = []
-                context_state["Branch"].append({})
+                if "Branch" in context_state:
+                    """
+                    If a "Branch" stack already exists it means this Parallel
+                    State is running in a Branch or Iterator. We get the top
+                    of the stack and use the ID to look up the branch_results
+                    for that ID and record in the "state" field that we've
+                    entered a Parallel State. We use that information in
+                    asl_state_collect_results to decide whether to update
+                    history.
+                    """
+                    branch_info = context_state["Branch"][-1]
+                    current_id = branch_info["ID"]
+                    index = branch_info["Index"]
 
+                    all_branch_results = self.branch_metadata[execution_arn].results
+                    if current_id in all_branch_results:
+                        branch_results = all_branch_results[current_id]
+                        branch_results["state"][index] = "Parallel"
+                else:
+                    context_state["Branch"] = []
+
+                context_state["Branch"].append({})
                 # Unique ID for this instance of this Parallel state
                 parallel_state_id = str(uuid.uuid4())
+
+                self.update_execution_history(
+                    state_machine,
+                    execution_arn,
+                    state_type + "StateStarted",
+                    {},
+                )
 
                 retry_count = None
                 retry_timeout = None
@@ -2459,6 +2803,8 @@ class StateEngine(object):
                 map_state_name = context_state["Name"]
                 map_state_entered = context_state["EnteredTime"]
 
+                execution_arn = context["Execution"]["Id"]
+
                 """
                 Iterate through the items_path and launch each item's State
                 Machine. The index and value of each item is needed to evaluate
@@ -2487,9 +2833,35 @@ class StateEngine(object):
                 start = get_start_index(context)
                 if length:
                     if start == 0:
+                        if len(context_state["Branch"]) > 0:
+                            """
+                            If a "Branch" stack already exists it means this
+                            Map State is running in a Branch or Iterator. We
+                            get the top of the stack and use the ID to look up
+                            the branch_results for that ID and record in the
+                            "state" field that we've entered a Map State. We
+                            use that information in asl_state_collect_results
+                            to decide whether to update history.
+                            """
+                            branch_info = context_state["Branch"][-1]
+                            current_id = branch_info["ID"]
+                            index = branch_info["Index"]
+
+                            all_branch_results = self.branch_metadata[execution_arn].results
+                            if current_id in all_branch_results:
+                                branch_results = all_branch_results[current_id]
+                                branch_results["state"][index] = "Map"
+
                         context_state["Branch"].append({})
-                        # Unique ID for this instance of this Parallel state
+                        # Unique ID for this instance of this Map state
                         map_state_id = str(uuid.uuid4())
+
+                        self.update_execution_history(
+                            state_machine,
+                            execution_arn,
+                            state_type + "StateStarted",
+                            {"length": length},
+                        )
                     else:
                         # If we've "re-entered" Map state due to MaxConcurrency
                         # being set we retrieve the previously set ID
@@ -2550,6 +2922,7 @@ class StateEngine(object):
                         """
                         parameters = item
 
+
                     event["data"] = parameters
                     branch_info = {
                         "Parent": current_state,
@@ -2570,6 +2943,12 @@ class StateEngine(object):
                     )
                     context_state["Branch"][-1] = branch_info
 
+                    self.update_execution_history(
+                        state_machine,
+                        execution_arn,
+                        state_type + "IterationStarted",
+                        {"index": index, "name": map_state_name},
+                    )
                     self.event_dispatcher.publish(event)
 
                 """
@@ -2651,7 +3030,8 @@ class StateEngine(object):
                 cause = None
 
             # Retrieve the index, input, length, etc. info for the current branch.
-            branch_info = context["State"]["Branch"][-1]  # Top of stack (last item)
+            context_state = context["State"]
+            branch_info = context_state["Branch"][-1]  # Top of stack (last item)
             index = branch_info["Index"]
 
             """
@@ -2678,6 +3058,44 @@ class StateEngine(object):
             previous_state_type = state_type
             state_type = state["Type"]
 
+            execution_arn = context["Execution"]["Id"]
+
+            """
+            Note that the branch_results dict for the current execution and the
+            branch_results object for the current Map or Parallel State that it
+            contains are now initialised in the branch_has_terminated method,
+            as we record that a branch has terminated as a "result" in order
+            to ignore and tidy up any pending events for terminated branches.
+
+            However, we also initialise branch_results here if necessary as
+            there are edge cases where asl_state_collect_results is called
+            before branch_has_terminated. This case is usually due to a restart
+            after failure where an outstanding Task response inside a Map or
+            Parallel is delivered before the unacked request message gets
+            redelivered. That scenario could result in a KeyError when looking
+            up self.branch_metadata, so we check and initialise if necessary.
+            """
+            if not execution_arn in self.branch_metadata:
+                timeout = ASL.get("TimeoutSeconds", self.execution_ttl)
+                self.branch_metadata[execution_arn] = BranchMetadata(
+                    context, timeout
+                )
+
+            # Get the dict containing all the branch results for this execution
+            all_branch_results = self.branch_metadata[execution_arn].results
+
+            if not current_id in all_branch_results:
+                if "Branches" in state:  # Parallel
+                    length = len(state["Branches"])
+                else:  # Map
+                    length = branch_info["Length"]
+
+                all_branch_results[current_id] = {
+                    "results": [None]*length,
+                    "ids": [None]*length,  # Unacknowledged messages
+                    "state": [None]*length,
+                }
+
             """
             Record the raw result for this branch, which will eventually be used
             as part of the final result array for the Map/Parallel state.
@@ -2685,15 +3103,8 @@ class StateEngine(object):
             We also record the event id for this branch so we can acknowledge
             the event when the results from all branches have eventually been
             returned.
-
-            Note that the branch_results dict for the current execution and the
-            branch_results object for the current Map or Parallel State that it
-            contains are now initialised in the branch_has_terminated method,
-            as we record that a branch has terminated as a "result" in order
-            to ignore and tidy up any pending events for terminated branches.
             """
-            execution_arn = context["Execution"]["Id"]
-            branch_results = self.branch_results[execution_arn][current_id]
+            branch_results = all_branch_results[current_id]
             result = branch_results["results"]
             event_ids = branch_results["ids"]
 
@@ -2705,7 +3116,7 @@ class StateEngine(object):
             #print(result)
             
             #print("----------")
-            #print(context["State"]["Branch"])
+            #print(context_state["Branch"])
             #print("----------")
 
             """
@@ -2723,27 +3134,27 @@ class StateEngine(object):
             else:
                 end = len(result)
 
-            if not error and None in result:
+            if not error and (None in result or "__CAUGHT__" in result):
                 if max_concurrency:
                     partial = result[start:end]
-                    if not None in partial:
+                    if not (None in partial or "__CAUGHT__" in partial):
                         """
                         If we've got all results for a batch of max_concurrency
                         send an event to re-enter the Map state and trigger
                         processing of the next batch.
                         """
                         event["data"] = branch_info["Input"]  # Get saved raw input
-                        context["State"]["Name"] = current_state
-                        context["State"]["Branch"][-1] = {
+                        context_state["Name"] = current_state
+                        context_state["Branch"][-1] = {
                             "ID": current_id,
                             "Range": str(end) + ":" + 
                                      str(min(end + max_concurrency, len(result))),
                         }
 
                         if retry_count:
-                            context["State"]["RetryCount"] = retry_count
+                            context_state["RetryCount"] = retry_count
                         if retry_timeout:
-                            context["State"]["RetryTimeout"] = retry_timeout
+                            context_state["RetryTimeout"] = retry_timeout
 
                         self.event_dispatcher.publish(event)
 
@@ -2753,11 +3164,11 @@ class StateEngine(object):
             Remove last item from the "Branch" list, then if it becomes empty
             delete "Branch" from context as we've finished with it.
             """
-            del context["State"]["Branch"][-1]
-            if len(context["State"]["Branch"]) == 0:
-                del context["State"]["Branch"]
+            del context_state["Branch"][-1]
+            if len(context_state["Branch"]) == 0:
+                del context_state["Branch"]
 
-            context["State"]["Name"] = current_state
+            context_state["Name"] = current_state
 
             # Parallel and Map states apply ResultPath to "raw input"
             data = branch_info["Input"]  # Get saved raw input
@@ -2781,9 +3192,59 @@ class StateEngine(object):
                 event["data"] = data
 
                 if retry_count:
-                    context["State"]["RetryCount"] = retry_count
+                    context_state["RetryCount"] = retry_count
                 if retry_timeout:
-                    context["State"]["RetryTimeout"] = retry_timeout
+                    context_state["RetryTimeout"] = retry_timeout
+
+                """
+                Implement some Execution History updates that occur when Map
+                or Parallel States fail or are aborted as a result of peer
+                Branches or Iterations failing. Suppress the Execution History
+                updates if error is Task.Terminated or States.ExecutionTimeout.
+                """
+                if not (error == "Task.Terminated" or
+                        error == "States.ExecutionTimeout"):
+                    abort_type = ""
+                    if state_type == "Map":
+                        # I don't believe there's an equivalent ParallelBranchFailed.
+                        self.update_execution_history(
+                            state_machine,
+                            execution_arn,
+                            state_type + "IterationFailed",
+                            {"index": index, "name": current_state},
+                        )
+                        abort_type = "IterationAborted"
+                    else:
+                        abort_type = "StateAborted"
+
+                    previous_abort_type = ""
+                    if previous_state_type == "Map":
+                        previous_abort_type = "IterationAborted"
+                    elif previous_state_type == "Parallel":
+                        previous_abort_type = "StateAborted"
+
+                    branch_state = branch_results["state"]
+                    for i in range(start, end):
+                        """
+                        Only Map/Parallel States running in Branches or
+                        Iterators are Aborted so check branch_results["state"].
+                        """
+                        if branch_state[i] != None:
+                            if result[i] == None:
+                                self.update_execution_history(
+                                    state_machine,
+                                    execution_arn,
+                                    state_type + abort_type,
+                                    {},
+                                )
+
+                            if previous_abort_type:
+                                self.update_execution_history(
+                                    state_machine,
+                                    execution_arn,
+                                    previous_state_type + previous_abort_type,
+                                    {},
+                                )
 
                 """
                 We defer acknowledging events for terminated branches/iterations
@@ -2883,7 +3344,8 @@ class StateEngine(object):
         Check if the current execution or branch has been terminated due to a
         failure and if so prevent the terminated branch from progressing further.
         """
-        if self.branch_has_terminated(state_type, context, id):
+        timeout = ASL.get("TimeoutSeconds", self.execution_ttl)
+        if self.branch_has_terminated(state_type, context, id, timeout):
             return
 
         """

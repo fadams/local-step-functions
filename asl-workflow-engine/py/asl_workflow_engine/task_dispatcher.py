@@ -260,6 +260,34 @@ class TaskDispatcher(object):
         #print(self.reply_to.name)
         #print(self.producer.name)
 
+    def branch_has_terminated(self, execution_arn, branch_id):
+        """
+        This helper method looks up the Branch Metadata for the given
+        execution ARN then finds the current Branch results for the given
+        Branch ID and checks if the "terminated" field has been set.
+
+        If Branch results are marked as terminated then all the response
+        handlers like handle_rpcmessage_response, handle_sfn_response
+        and timeout_callback will return a Task.Terminated error instead
+        of their regular response.
+
+        This test is more localised than branch_has_terminated in state_engine.
+        Calling cancel_task also causes the callback to error with
+        Task.Terminated, but this branch_has_terminated test also turns out to
+        be necessary given the case where there are Map/Parallel with only
+        Task States. In that case if all Tasks fail simultaneously, say with
+        the same timeout, then each Task response will be a terminal state and
+        needs to be checked for termination *before* the next State transition.
+        """
+        branch_metadata = self.state_engine.branch_metadata
+        if branch_id and execution_arn in branch_metadata:
+            # Get the dict containing all the branch results for this execution
+            all_branch_results = branch_metadata[execution_arn].results
+            branch_results = all_branch_results[branch_id]
+            if branch_results.get("terminated"):
+                return True
+        return False
+
     def handle_unroutable_rpcmessage(self, message):
         """
         It is possible that a Task Resource might specify an AMQP rpcmessage
@@ -459,7 +487,17 @@ class TaskDispatcher(object):
                 del self.orphaned_responses[correlation_id]
 
             del self.pending_requests[correlation_id]
-            state_machine, execution_arn, resource_arn, callback, sched_time, timeout_id, task_span = request
+
+            (
+                state_machine,
+                execution_arn,
+                resource_arn,
+                callback,
+                branch_id,
+                sched_time,
+                timeout_id,
+                task_span
+            ) = request
 
             arn = parse_arn(resource_arn)
             resource = arn["resource"]
@@ -472,6 +510,14 @@ class TaskDispatcher(object):
                 # Cancel the timeout previously set for this request.
                 self.state_engine.event_dispatcher.clear_timeout(timeout_id)
                 if callable(callback):
+                    if self.branch_has_terminated(execution_arn, branch_id):
+                        error_type = "Task.Terminated"
+                        error_message = "Task has been Terminated"
+                        result = {
+                            "errorType": error_type,
+                            "errorMessage": error_message,
+                        }
+
                     if error_type:
                         error_message = result.get("errorMessage", "")
                         opentracing.tracer.active_span.set_tag("error", True)
@@ -491,7 +537,11 @@ class TaskDispatcher(object):
                         with AWS, which is arguably less useful than the
                         function ARN might be.
                         """
-                        if request_has_invoke or is_callback or request_has_waitForTaskToken:
+                        if error_type == "Task.Terminated":
+                            pass  # Don't update history for Task.Terminated
+                        elif (request_has_invoke or
+                              is_callback or
+                              request_has_waitForTaskToken):
                             self.state_engine.update_execution_history(
                                 state_machine, execution_arn,
                                 "TaskFailed",
@@ -667,7 +717,17 @@ class TaskDispatcher(object):
         request = self.pending_requests.get(correlation_id)
         if request:
             del self.pending_requests[correlation_id]
-            state_machine, execution_arn, resource_arn, callback, sched_time, timeout_id, task_span = request
+
+            (
+                state_machine,
+                execution_arn,
+                resource_arn,
+                callback,
+                branch_id,
+                sched_time,
+                timeout_id,
+                task_span
+            ) = request
 
             # Cancel the timeout previously set for this request.
             self.state_engine.event_dispatcher.clear_timeout(timeout_id)
@@ -718,10 +778,19 @@ class TaskDispatcher(object):
                         resource = "sfn:startSyncExecution"
                         resource_type = "aws-sdk"
 
-                    error_type = result.get("Error")
+                    if self.branch_has_terminated(execution_arn, branch_id):
+                        error_type = "Task.Terminated"
+                        error_message = "Task has been Terminated"
+                        result = {
+                            "errorType": error_type,
+                            "errorMessage": error_message,
+                        }
+                    else:
+                        error_type = result.get("Error")
+                        error_message = result.get("Cause")
+
                     result_as_string = json.dumps(result)
                     if error_type:
-                        error_message = result.get("Cause")
                         opentracing.tracer.active_span.set_tag("error", True)
                         opentracing.tracer.active_span.log_kv(
                             {
@@ -730,21 +799,22 @@ class TaskDispatcher(object):
                             }
                         )
 
-                        self.state_engine.update_execution_history(
-                            state_machine, execution_arn,
-                            "TaskFailed",
-                            {
-                                "error": "States.TaskFailed",
-                                "cause": result_as_string,
-                                "resource": resource,
-                                "resourceType": resource_type,
-                            },
-                        )
-
-                        if self.task_metrics: 
-                            self.task_metrics["ServiceIntegrationsFailed"].inc(
-                                {"ServiceIntegrationResourceArn": resource_arn}
+                        if error_type != "Task.Terminated":
+                            self.state_engine.update_execution_history(
+                                state_machine, execution_arn,
+                                "TaskFailed",
+                                {
+                                    "error": "States.TaskFailed",
+                                    "cause": result_as_string,
+                                    "resource": resource,
+                                    "resourceType": resource_type,
+                                },
                             )
+
+                            if self.task_metrics: 
+                                self.task_metrics["ServiceIntegrationsFailed"].inc(
+                                    {"ServiceIntegrationResourceArn": resource_arn}
+                                )
                     else:
                         self.state_engine.update_execution_history(
                             state_machine, execution_arn,
@@ -832,7 +902,17 @@ class TaskDispatcher(object):
                 request = self.pending_requests.get(task_id)
                 if request:  # Get callback and span from request (other fields ignored)
                     del self.pending_requests[task_id]
-                    state_machine, execution_arn, resource_arn, callback, sched_time, timeout_id, task_span = request
+
+                    (
+                        state_machine,  # ignored
+                        execution_arn,  # ignored
+                        resource_arn,   # ignored
+                        callback,
+                        branch_id,      # ignored
+                        sched_time,     # ignored
+                        timeout_id,     # ignored
+                        task_span
+                    ) = request
 
                     with opentracing.tracer.scope_manager.activate(
                         span=task_span,
@@ -904,7 +984,7 @@ class TaskDispatcher(object):
             self.handle_orphaned_responses, 1000
         )
 
-    def execute_task(self, resource_arn, parameters, callback, timeout, context, event_id, redelivered):
+    def execute_task(self, resource_arn, parameters, callback, timeout, is_task_timeout, context, event_id, redelivered):
         """
         Look up stateMachineArn to get State Machine as we need that later to
         call state_engine.update_execution_history. We do it here to capture in
@@ -1011,7 +1091,8 @@ class TaskDispatcher(object):
                     }
                 )
 
-                if error["errorType"] == "States.Timeout":
+                # Only update history and metrics if a task not execution timeout.
+                if is_task_timeout and error["errorType"] == "States.Timeout":
                     execution_arn = context["Execution"]["Id"]
                     update_type = "TaskTimedOut"
                     if resource_type == "function":
@@ -1058,12 +1139,31 @@ class TaskDispatcher(object):
             request = self.pending_requests.get(correlation_id)
             if request:
                 del self.pending_requests[correlation_id]
-                state_machine, execution_arn, resource_arn, callback, sched_time, timeout_id, task_span = request
-                error = {
-                    "errorType": "States.Timeout",
-                    "errorMessage": "State or Execution ran for longer " +
-                        "than the specified TimeoutSeconds value",
-                }
+
+                (
+                    state_machine,  # ignored
+                    execution_arn,
+                    resource_arn,   # ignored
+                    callback,       # ignored
+                    branch_id,
+                    sched_time,     # ignored
+                    timeout_id,     # ignored
+                    task_span
+                ) = request
+
+                if self.branch_has_terminated(execution_arn, branch_id):
+                    error = {
+                        "errorType": "Task.Terminated",
+                        "errorMessage": "Task has been Terminated",
+                    }
+                else:
+                    state_timeout = int(timeout/1000 + 0.5)
+                    error = {
+                        "errorType": "States.Timeout",
+                        "errorMessage": "State ran for longer than " +
+                            "the specified timeout value of " +
+                            f"{state_timeout} seconds.",
+                    }
                 with opentracing.tracer.scope_manager.activate(
                     span=task_span,
                     finish_on_close=True
@@ -1091,6 +1191,19 @@ class TaskDispatcher(object):
         region = arn["region"]  # e.g. real AWS region or "local" for ASL Engine
         resource_type = arn["resource_type"]  # Should be function most times
         resource = arn["resource"]  # function-name
+
+        """
+        If the request comes from a Task State in a Branch or Iterator get
+        the Branch ID. We use it to check if the Branch or Iterator has been
+        terminated as a result of a Parallel or Map State failure and if so
+        we sent a Task.Terminated error message as the Task response.
+        """
+        branch_id = None
+        context_state = context["State"]
+        if "Branch" in context_state:
+            # Get ID of the item at the top of the Branch metadata stack
+            branch_id = context_state["Branch"][-1]["ID"]
+ 
 
         """
         Define nested functions as handlers for each supported service type.
@@ -1225,6 +1338,7 @@ class TaskDispatcher(object):
                     execution_arn,
                     resource_arn,
                     callback,
+                    branch_id,
                     time.time() * 1000,
                     timeout_id,
                     scope.span
@@ -1570,6 +1684,7 @@ class TaskDispatcher(object):
                         execution_arn,
                         resource_arn,
                         callback,
+                        branch_id,
                         time.time() * 1000,
                         timeout_id,
                         scope.span

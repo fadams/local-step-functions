@@ -1096,6 +1096,7 @@ class RestAPI(object):
                         None,  # Unused by handle_sfn_response() on this path
                         "aws_api_StartSyncExecution",  # Fake resource
                         on_result,
+                        None,  # Unused by handle_sfn_response() on this path
                         0,     # Unused by handle_sfn_response() on this path
                         timeout_id,
                         None   # Unused by handle_sfn_response() on this path
