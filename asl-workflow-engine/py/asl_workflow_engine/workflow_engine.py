@@ -214,7 +214,9 @@ class WorkflowEngine(object):
             except:  # Fall back to standard library asyncio epoll event loop
                 self.logger.info("Using standard library asyncio event loop")
 
-            loop = asyncio.get_event_loop()
+            # Create and set event loop explicitly (required for Python 3.10+)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             create_tracer("asl_workflow_engine", config["tracer"], use_asyncio=True)
         else:
             create_tracer("asl_workflow_engine", config["tracer"])
