@@ -1065,13 +1065,38 @@ class TaskDispatcher(object):
         def send_error_callback(carrier, error):
             """
             A wrapper for use when returning errors to the calling Task.
-            The wrapper is mainly to provide OpenTracing boilerplate.
-            The carrier should be provided in the case where we don't have the
-            original span relating to the request. In that case we create a new
-            span to represent this error from the information provided in
-            carrier, which should be an OpenTracing Carrier. If we do have the
-            original span then carrier should be None, and the span should be 
-            managed in the code calling this function.
+
+            This method must handle two distinct tracing scenarios:
+
+            1. If `carrier` is provided, we DO NOT have an existing active span.
+               In this case we create a new active span here, and therefore
+               this method OWNS the span scope lifecycle and MUST close it.
+
+            2. If `carrier` is None, an active span is already in scope and is
+               owned by the caller. In this case this method MUST NOT close the
+               scope, as doing so would detach the OpenTelemetry context twice.
+
+            Important OpenTelemetry / OpenTracing shim gotcha:
+            --------------------------------------------------
+            OpenTelemetry enforces strict context attach/detach semantics.
+            A scope may only be closed once. Calling `with scope:` or
+            `scope.close()` on a scope obtained via `scope_manager.active` will
+            "double close" the underlying context token and raise a runtime
+            error something like:
+
+            ERROR    - opentelemetry.context : Failed to detach context
+            Traceback (most recent call last):
+              File ".../opentelemetry/context/__init__.py", line 155, in detach
+            _RUNTIME_CONTEXT.detach(token)
+              File ".../opentelemetry/context/contextvars_context.py", line 53,
+                in detach self._current_context.reset(token)
+            RuntimeError: <Token used var=<ContextVar name='current_context'
+                default={} at 0x7f69b43299e0> at 0x7f69b1d419c0> has already
+            been used once
+
+            To safely support both cases, this method:
+             - only closes a scope when it explicitly created it
+             - never enters or closes an already-active scope
             """
             scope = None
             if carrier:
@@ -1079,10 +1104,8 @@ class TaskDispatcher(object):
                     operation_name="Task",
                     child_of=span_context("text_map", carrier, self.logger),
                 )
-            else:
-                scope = opentracing.tracer.scope_manager.active
-            
-            with scope:
+
+            try:
                 opentracing.tracer.active_span.set_tag("error", True)
                 opentracing.tracer.active_span.log_kv(
                     {
@@ -1124,6 +1147,9 @@ class TaskDispatcher(object):
 
                 if callable(callback):
                     callback(error)
+            finally:
+                if scope:
+                    scope.close()
 
 
         def timeout_callback(correlation_id):
